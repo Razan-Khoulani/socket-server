@@ -1,4 +1,5 @@
 const driverLocationService = require("../services/driverLocation.service");
+const db = require("../db");
 
 // ✅ Maps بالذاكرة (بدون Redis) — مبدئيًا
 // rideId -> Set(driverId)
@@ -42,53 +43,50 @@ module.exports = (io, socket) => {
    * ✅ Dispatch: نرسل طلب مزاودة للسائقين القريبين (من السيرفر أو من HTTP endpoint)
    * ممكن تستدعيه من Laravel via HTTP endpoint (أنظف) — رح أعطيك كود endpoint تحت
    */
-socket.on("ride:dispatchToNearbyDrivers", ({
-  ride_id,
-  pickup_lat,
-  pickup_long,
-  radius = 5000,
+  socket.on("ride:dispatchToNearbyDrivers", ({
+    ride_id,
+    pickup_lat,
+    pickup_long,
+    radius = 5000,
 
-  // ✅ نفس أسماء Laravel
-  user_bid_price,
-  min_fare_amount,
-}) => {
-  const rideId = toNumber(ride_id);
-  const lat = toNumber(pickup_lat);
-  const long = toNumber(pickup_long);
+    // ✅ نفس أسماء Laravel
+    user_bid_price,
+    min_fare_amount,
+  }) => {
+    const rideId = toNumber(ride_id);
+    const lat = toNumber(pickup_lat);
+    const long = toNumber(pickup_long);
 
-  const base = toNumber(user_bid_price);     // ممكن null
-  const min = toNumber(min_fare_amount);     // ممكن null
+    const base = toNumber(user_bid_price);     // ممكن null
+    const min = toNumber(min_fare_amount);     // ممكن null
 
-  if (!rideId || lat === null || long === null) return;
+    if (!rideId || lat === null || long === null) return;
 
-  const nearby = driverLocationService.getNearbyDriversFromMemory(lat, long, radius);
+    const nearby = driverLocationService.getNearbyDriversFromMemory(lat, long, radius);
 
-  rideCandidates.set(rideId, new Set(nearby.map(d => d.driver_id)));
+    rideCandidates.set(rideId, new Set(nearby.map(d => d.driver_id)));
 
-  nearby.forEach(d => {
-    io.to(driverRoom(d.driver_id)).emit("ride:bidRequest", {
-      ride_id: rideId,
-      pickup_lat: lat,
-      pickup_long: long,
-      radius,
+    nearby.forEach(d => {
+      io.to(driverRoom(d.driver_id)).emit("ride:bidRequest", {
+        ride_id: rideId,
+        pickup_lat: lat,
+        pickup_long: long,
+        radius,
 
-      // ✅ هي اللي السائق لازم يشوفها
-      user_bid_price: base,
-      min_fare_amount: min,
+        // ✅ هي اللي السائق لازم يشوفها
+        user_bid_price: base,
+        min_fare_amount: min,
+      });
     });
+
+    console.log(`📢 dispatched ride ${rideId} to ${nearby.length} drivers (user_bid_price=${base}, min_fare_amount=${min})`);
   });
-
-  console.log(`📢 dispatched ride ${rideId} to ${nearby.length} drivers (user_bid_price=${base}, min_fare_amount=${min})`);
-});
-
 
   /**
    * ✅ السائق يقدم عرض (Bid)
    * driver app: socket.emit("driver:submitBid", { driver_id, ride_id, offered_price, ... })
    * هذا سيصل للـ user عبر روم الرحلة فقط.
    */
-
-
   socket.on("driver:submitBid", (payload) => {
     const rideId = toNumber(payload?.ride_id);
     const driverId = toNumber(socket.driverId);
@@ -104,41 +102,43 @@ socket.on("ride:dispatchToNearbyDrivers", ({
 
     // إرسال العرض للمستخدم
     io.to(rideRoom(rideId)).emit("ride:newBid", {
-        ride_id: rideId,
-        driver_id: driverId,
-        offered_price: offeredPrice,
-        bidding_time: Date.now(),
-        meta: payload.meta ?? {},
+      ride_id: rideId,
+      driver_id: driverId,
+      offered_price: offeredPrice,
+      bidding_time: Date.now(),
+      meta: payload.meta ?? {},
     });
 
     console.log(`💰 driver ${driverId} submitted bid: ${offeredPrice}`);
-});
-
+  });
 
   /**
    * ✅ اليوزر يرد على سائق محدد (Counter Offer أو Accept/Reject)
    * user app: socket.emit("user:respondToDriver", { ride_id, driver_id, type, price })
    * الرد يروح فقط على روم السائق (driver:{id})
    */
-socket.on("user:respondToDriver", (payload) => {
+  socket.on("user:respondToDriver", (payload) => {
     const rideId = toNumber(payload?.ride_id);
     const driverId = toNumber(payload?.driver_id);
     if (!rideId || !driverId) return;
 
     // إرسال الرد إلى السائق
     io.to(driverRoom(driverId)).emit("ride:userResponse", {
-        ride_id: rideId,
-        driver_id: driverId,
-        type: payload.type,      // "counter" | "reject"
-        price: payload.price ?? null,
-        message: payload.message ?? null,
-        at: Date.now(),
+      ride_id: rideId,
+      driver_id: driverId,
+      type: payload.type,      // "counter" | "reject"
+      price: payload.price ?? null,
+      message: payload.message ?? null,
+      at: Date.now(),
     });
 
     console.log(`🗣️ user response -> driver ${driverId} for ride ${rideId} (${payload.type})`);
-});
+  });
 
-socket.on("driver:acceptOffer", (payload) => {
+  /**
+   * ✅ قبول السائق للعرض
+   */
+  socket.on("driver:acceptOffer", (payload) => {
     const driverId = toNumber(payload?.driver_id);
     const rideId = toNumber(payload?.ride_id);
     const offeredPrice = toNumber(payload?.offered_price);
@@ -147,73 +147,75 @@ socket.on("driver:acceptOffer", (payload) => {
 
     // إرسال القبول للسعر إلى اليوزر دون تحديث البيانات في قاعدة البيانات
     io.to(rideRoom(rideId)).emit("ride:acceptedByDriver", {
-        ride_id: rideId,
-        driver_id: driverId,
-        offered_price: offeredPrice,
-        message: "Offer accepted by driver",
-        at: Date.now(),
+      ride_id: rideId,
+      driver_id: driverId,
+      offered_price: offeredPrice,
+      message: "Offer accepted by driver",
+      at: Date.now(),
     });
 
     console.log(`✅ Driver ${driverId} accepted offer for ride ${rideId}`);
-});
+  });
 
-socket.on("driver:acceptOffer", (payload) => {
-    const driverId = toNumber(payload?.driver_id);
-    const rideId = toNumber(payload?.ride_id);
-    const offeredPrice = toNumber(payload?.offered_price);
-
-    if (!driverId || !rideId || !offeredPrice) return;
-
-    // إرسال القبول للسعر إلى اليوزر دون تحديث البيانات في قاعدة البيانات
-    io.to(rideRoom(rideId)).emit("ride:acceptedByDriver", {
-        ride_id: rideId,
-        driver_id: driverId,
-        offered_price: offeredPrice,
-        message: "Offer accepted by driver",
-        at: Date.now(),
-    });
-
-    console.log(`✅ Driver ${driverId} accepted offer for ride ${rideId}`);
-});
-
-
-
-socket.on("user:acceptOffer", (payload) => {
+  /**
+   * ✅ قبول المستخدم للعرض وتحديث قاعدة البيانات
+   */
+  socket.on("user:acceptOffer", (payload) => {
     const rideId = toNumber(payload?.ride_id);
     const driverId = toNumber(payload?.driver_id);
     const offeredPrice = toNumber(payload?.offered_price);
+
+    console.log("404");
 
     if (!rideId || !driverId || !offeredPrice) return;
 
     // تحديث قاعدة البيانات عندما يقبل اليوزر العرض
-    db.query(
-        `UPDATE user_ride_booking 
-        SET final_confirm_bid_price = ?, user_bid_price = ?, driver_id = ?, status = 1 
-        WHERE ride_id = ?`,
-        [offeredPrice, offeredPrice, driverId, rideId],
-        (err, result) => {
-            if (err) {
-                console.error("Database update error:", err);
-                return;
-            }
+// في handler user:acceptOffer
+db.query(
+  `UPDATE user_ride_booking 
+   SET 
+     final_confirm_bid_price = ?,
+     user_bid_price = ?,
+     driver_id = ?,
+     status = 1
+   WHERE id = ?`,
+  [offeredPrice, offeredPrice, driverId, rideId],
+  (err, result) => {
+    if (err) {
+      console.error("خطأ في التحديث:", err);
+      return;
+    }
 
-            // إرسال القبول النهائي إلى السائق
-            io.to(driverRoom(driverId)).emit("ride:userAccepted", {
-                ride_id: rideId,
-                driver_id: driverId,
-                offered_price: offeredPrice,
-                message: "User accepted the offer",
-                at: Date.now(),
-            });
+    console.log("نتيجة التحديث:");
+    console.log("عدد السجلات المتأثرة →", result.affectedRows);
+    console.log("تفاصيل الـ result →", result);
 
-            console.log(`✅ User accepted offer for ride ${rideId}, updating database`);
-        }
-    );
-});
+    if (result.affectedRows === 0) {
+      console.warn(
+        `⚠️  ما تم تحديث أي سجل !\n` +
+        `تحقق من:\n` +
+        `1. هل يوجد سجل بـ id = ${rideId} ؟\n` +
+        `2. هل القيم مختلفة فعلاً عن الموجودة حالياً؟`
+      );
+    } else {
+      console.log(`تم تحديث السجل بنجاح → id = ${rideId}`);
+    }
+    // إرسال التأكيد للسائق
+    io.to(driverRoom(driverId)).emit("ride:userAccepted", {
+      ride_id: rideId,
+      driver_id: driverId,
+      offered_price: offeredPrice,
+      message: "User accepted the offer",
+      at: Date.now(),
+    });
 
+    console.log(`✅ User accepted offer for ride ${rideId}, updating database`);
+  }
+);
+  });
 
   /**
-   * ✅ ت لما ما بقى في تفاوض)
+   * ✅ إغلاق الرحلة
    */
   socket.on("ride:close", ({ ride_id }) => {
     const rideId = toNumber(ride_id);
