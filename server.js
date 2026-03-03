@@ -40,15 +40,16 @@ const debugSocketLog = (...args) => {
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
-  "http://192.168.100.51:8000";
+  "https://aiactive.co.uk/backend/backend-laravel/public";
 const LARAVEL_DRIVER_INVOICE_PATH = "/api/driver/transport-ride-invoice";
 const LARAVEL_TIMEOUT_MS = 7000;
 const SOCKET_BIND_HOST =
   process.env.SOCKET_BIND_HOST || "0.0.0.0";
-const SOCKET_BIND_PORT = Number(process.env.SOCKET_BIND_PORT) || 3000;
+const SOCKET_BIND_PORT = Number(process.env.SOCKET_BIND_PORT) || 4000;
 const INVOICE_STATUSES = new Set([7, 8, 9]);
 const TRIP_SUMMARY_START_STATUSES = new Set([5]);
 const TRIP_SUMMARY_COMPLETE_STATUSES = new Set([7, 8]);
+const SIMPLE_PASSED_DEST_STATUSES = new Set([5]);
 // ride statuses that should be treated as final (clear active ride mapping)
 const FINAL_STATUSES = new Set([4, 6, 7, 8, 9]);
 const INVOICE_TTL_MS = 10 * 60 * 1000;
@@ -63,8 +64,14 @@ const ENDED_DEDUPE_TTL_MS = Number.isFinite(
 )
   ? Number(process.env.ENDED_DEDUPE_TTL_MS)
   : 5000;
+const SIMPLE_PASSED_DEDUPE_TTL_MS = Number.isFinite(
+  Number(process.env.SIMPLE_PASSED_DEDUPE_TTL_MS)
+)
+  ? Number(process.env.SIMPLE_PASSED_DEDUPE_TTL_MS)
+  : 5000;
 const statusDedupe = new Map(); // key -> timestamp
 const endedDedupe = new Map(); // rideId -> timestamp
+const simplePassedDedupe = new Map(); // key -> timestamp
 const rideTripMeta = new Map(); // rideId -> trip runtime snapshot
 const TRIP_META_TTL_MS = Number.isFinite(Number(process.env.TRIP_META_TTL_MS))
   ? Number(process.env.TRIP_META_TTL_MS)
@@ -593,13 +600,14 @@ app.post("/events/internal/driver-location", (req, res) => {
 
   const activeRideId = getActiveRideByDriver(driverId);
   if (activeRideId) {
-    appendRidePoint(activeRideId, { lat: la, lng: lo, at: Date.now() });
+    const now = Date.now();
+    appendRidePoint(activeRideId, { lat: la, lng: lo, at: now });
     io.to(`ride:${activeRideId}`).emit("ride:locationUpdate", {
       ride_id: activeRideId,
       driver_id: driverId,
       lat: la,
       long: lo,
-      at: Date.now(),
+      at: now,
     });
   }
 
@@ -726,7 +734,8 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
     });
 
     const rideId = Number(ride_id);
-    const driverId = driver_id != null ? Number(driver_id) : null;
+    const driverNum = driver_id != null ? Number(driver_id) : null;
+    const driverId = Number.isFinite(driverNum) ? driverNum : null;
     const status = Number(ride_status);
     const la = lat != null ? Number(lat) : null;
     const lo = long != null ? Number(long) : null;
@@ -742,6 +751,43 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       ride_id: rideId,
       ride_status: status,
     };
+
+    if (SIMPLE_PASSED_DEST_STATUSES.has(status)) {
+      const simpleKey = `${rideId}:${status}`;
+      const isDupSimplePassed = shouldSkipDedupe(
+        simplePassedDedupe,
+        simpleKey,
+        SIMPLE_PASSED_DEDUPE_TTL_MS
+      );
+
+      if (!isDupSimplePassed) {
+        const targetDriverId = driverId ?? getActiveDriverByRide(rideId) ?? null;
+        const simplePassedEvt = {
+          ride_id: rideId,
+          ride_status: status,
+          lat: Number.isFinite(la) ? la : null,
+          long: Number.isFinite(lo) ? lo : null,
+          message: "passed destination (simple status trigger)",
+          source: "ride-status-updated",
+          at: Date.now(),
+        };
+
+        io.to(`ride:${rideId}`).emit("ride:passedDestination", simplePassedEvt);
+        if (targetDriverId) {
+          io.to(`driver:${targetDriverId}`).emit(
+            "ride:passedDestination",
+            simplePassedEvt
+          );
+        }
+        console.log(
+          `[status][emit] ride:passedDestination ride:${rideId} status:${status} driver:${targetDriverId ?? "none"}`
+        );
+      } else {
+        console.log(
+          `[status][dedupe] skip ride:passedDestination ride:${rideId} status:${status}`
+        );
+      }
+    }
 
     const statusKey = `${rideId}:${status}`;
     const isDupStatus = shouldSkipDedupe(
@@ -842,6 +888,13 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
 // =========================
 app.post("/ride/start-tracking", (req, res) => {
   try {
+    if (!ENABLE_RIDE_TRACKING_SERVICE) {
+      return res.json({
+        status: 1,
+        message: "Tracking service disabled",
+      });
+    }
+
     const body = req.body || {};
     const {
       ride_id,
@@ -851,42 +904,8 @@ app.post("/ride/start-tracking", (req, res) => {
       destination_long,
     } = body;
     console.log("[tracking][start] request:", body);
-    if (ride_id == null) {
-      return res.status(400).json({ status: 0, message: "ride_id required" });
-    }
-
-    if (!io) {
-      return res.status(500).json({ status: 0, message: "io not initialized" });
-    }
-
-    const rideId = Number(ride_id);
-
-    if (isNaN(rideId)) {
-      return res.status(400).json({ status: 0, message: "Invalid ride_id" });
-    }
-
-    if (!ENABLE_RIDE_TRACKING_SERVICE) {
-      const la = Number(pickup_lat);
-      const lo = Number(pickup_long);
-      if (!isNaN(la) && !isNaN(lo)) {
-        io.to(`ride:${rideId}`).emit("ride:locationUpdate", {
-          ride_id: rideId,
-          lat: la,
-          long: lo,
-          at: Date.now(),
-        });
-      }
-      console.log(
-        `[tracking][start][direct] ride ${rideId} (tracking service disabled)`
-      );
-      return res.json({
-        status: 1,
-        message: "Tracking service disabled (direct mode)",
-        ride_id: rideId,
-      });
-    }
-
     if (
+      ride_id == null ||
       pickup_lat == null ||
       pickup_long == null ||
       destination_lat == null ||
@@ -895,6 +914,11 @@ app.post("/ride/start-tracking", (req, res) => {
       return res.status(400).json({ status: 0, message: "Missing parameters" });
     }
 
+    if (!io) {
+      return res.status(500).json({ status: 0, message: "io not initialized" });
+    }
+
+    const rideId = Number(ride_id);
     const pickup = { lat: Number(pickup_lat), long: Number(pickup_long) };
     const destination = {
       lat: Number(destination_lat),
@@ -922,8 +946,15 @@ app.post("/ride/start-tracking", (req, res) => {
 // =========================
 app.post("/ride/stop-tracking", (req, res) => {
   try {
+    if (!ENABLE_RIDE_TRACKING_SERVICE) {
+      return res.json({
+        status: 1,
+        message: "Tracking service disabled",
+      });
+    }
+
     const body = req.body || {};
-    const { ride_id, driver_id } = body;
+    const { ride_id } = body;
 
     if (ride_id == null) {
       return res.status(400).json({ status: 0, message: "ride_id required" });
@@ -934,65 +965,7 @@ app.post("/ride/stop-tracking", (req, res) => {
     }
 
     const rideId = Number(ride_id);
-    const driverIdFromPayload = Number(driver_id);
-    const resolvedDriverId =
-      Number.isFinite(driverIdFromPayload) && driverIdFromPayload > 0
-        ? driverIdFromPayload
-        : getActiveDriverByRide(rideId);
-
-    const driverArrivedPayload = {
-      ride_id: rideId,
-      driver_id: resolvedDriverId ?? null,
-      message: "وصلت للوجهة",
-      at: Date.now(),
-    };
-
-    if (isNaN(rideId)) {
-      return res.status(400).json({ status: 0, message: "Invalid ride_id" });
-    }
-
-    if (!ENABLE_RIDE_TRACKING_SERVICE) {
-      io.to(`ride:${rideId}`).emit("ride:completed", {
-        ride_id: rideId,
-        message: "Ride completed - End trip",
-        at: Date.now(),
-      });
-
-      if (resolvedDriverId) {
-        io.to(`driver:${resolvedDriverId}`).emit(
-          "ride:arrivedDestination",
-          driverArrivedPayload
-        );
-        io.to(`driver:${resolvedDriverId}`).emit(
-          "ride:completed:ack",
-          driverArrivedPayload
-        );
-      }
-
-      clearActiveRideByRideId(rideId);
-      console.log(
-        `[tracking][stop][direct] ride ${rideId} (tracking service disabled)`
-      );
-      return res.json({
-        status: 1,
-        message: "Tracking service disabled (direct mode)",
-        ride_id: rideId,
-      });
-    }
-
     const stopped = rideTracking.stopTracking(io, rideId);
-
-    if (resolvedDriverId) {
-      io.to(`driver:${resolvedDriverId}`).emit(
-        "ride:arrivedDestination",
-        driverArrivedPayload
-      );
-      io.to(`driver:${resolvedDriverId}`).emit(
-        "ride:completed:ack",
-        driverArrivedPayload
-      );
-    }
-
     clearActiveRideByRideId(rideId);
 
     console.log(`[tracking][stop] ride ${rideId} stopped`);
@@ -1035,14 +1008,16 @@ app.post("/ride/update-location", (req, res) => {
     }
 
     if (!ENABLE_RIDE_TRACKING_SERVICE) {
-      appendRidePoint(rideId, { lat: la, lng: lo, at: Date.now() });
       io.to(`ride:${rideId}`).emit("ride:locationUpdate", {
         ride_id: rideId,
         lat: la,
         long: lo,
-        at: Date.now(),
       });
-      return res.json({ status: 1, message: "Location updated", ride_id: rideId });
+      return res.json({
+        status: 1,
+        message: "Location updated (direct mode)",
+        ride_id: rideId,
+      });
     }
 
     rideTracking.updateLocation(io, rideId, la, lo);
@@ -1078,11 +1053,9 @@ app.post("/ride/arrived", (req, res) => {
       arrived_at: arrived_at ?? Date.now(),
     };
 
-    if (
-      ENABLE_RIDE_TRACKING_SERVICE &&
-      payload.lat != null &&
-      payload.long != null
-    ) {
+    if (!ENABLE_RIDE_TRACKING_SERVICE) {
+      io.to(`ride:${payload.ride_id}`).emit("ride:arrived", payload);
+    } else if (payload.lat != null && payload.long != null) {
       rideTracking.arriveAtPickup(io, payload.ride_id, payload.lat, payload.long);
     } else {
       io.to(`ride:${payload.ride_id}`).emit("ride:arrived", payload);
@@ -1170,9 +1143,10 @@ server.listen(SOCKET_BIND_PORT, SOCKET_BIND_HOST, () => {
   );
   console.log(
     `[tracking] mode=${
-      ENABLE_RIDE_TRACKING_SERVICE ? "ride-tracking-service" : "direct-location-only"
+      ENABLE_RIDE_TRACKING_SERVICE ? "rideTracking-service" : "direct-location-only"
     }`
   );
   console.log("Started at:", new Date().toLocaleString());
 });
+
 

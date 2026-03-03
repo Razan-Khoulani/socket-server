@@ -17,7 +17,7 @@ const LARAVEL_LOCATION_PUSH_EVERY_MS = 10000; // how often to push driver locati
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
-  "http://192.168.100.51:8000";
+  "https://aiactive.co.uk/backend/backend-laravel/public";
 const LARAVEL_TIMEOUT_MS = 7000;
 const STATUS_DEDUPE_TTL_MS = Number.isFinite(
   Number(process.env.STATUS_DEDUPE_TTL_MS)
@@ -216,6 +216,15 @@ module.exports = (io, socket) => {
           d.avatar ??
           d.image ??
           null;
+        const driver_gender = toNumber(
+          d.driver_gender ?? d.gender ?? baseMeta.driver_gender ?? null
+        );
+        const child_seat = toNumber(
+          d.child_seat ?? d.child_seat_accessibility ?? baseMeta.child_seat ?? null
+        );
+        const handicap = toNumber(
+          d.handicap ?? d.handicap_accessibility ?? baseMeta.handicap ?? null
+        );
 
         // حالة السائق (من الريسبونس إذا بدك تكون أدق)
         const currentStatus = Number(d.new_status ?? d.driver_current_status ?? 1);
@@ -242,6 +251,9 @@ module.exports = (io, socket) => {
           ...(driver_name ? { driver_name } : {}),
           ...(rating != null ? { rating } : {}),
           ...(driver_image ? { driver_image } : {}),
+          ...(driver_gender === 1 || driver_gender === 2 ? { driver_gender } : {}),
+          ...(child_seat === 0 || child_seat === 1 ? { child_seat } : {}),
+          ...(handicap === 0 || handicap === 1 ? { handicap } : {}),
         };
 
         driverLocationService.updateMeta(driverId, metaUpdate);

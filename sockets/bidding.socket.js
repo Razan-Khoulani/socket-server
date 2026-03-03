@@ -1,6 +1,7 @@
 // sockets/bidding.socket.js
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios"); // لضمان استدعاء Laravel API عند قبول العرض
+const { getDistanceMeters } = require("../utils/geo.util");
 const { getUserDetails, getUserDetailsByToken } = require("../store/users.store");
 const {
   clearActiveRideByRideId,
@@ -39,11 +40,16 @@ const toNumber = (v) => {
 };
 
 const round2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
+const DRIVER_TO_PICKUP_SPEED_KMPH = Number.isFinite(
+  Number(process.env.DRIVER_TO_PICKUP_SPEED_KMPH)
+)
+  ? Math.max(5, Number(process.env.DRIVER_TO_PICKUP_SPEED_KMPH))
+  : 28;
 
-// ✅ UPDATED: timeout صار 90 ثانية بدل 60 (override via env for tests)
-const RIDE_TIMEOUT_MS = Number.isFinite(Number(process.env.RIDE_TIMEOUT_MS))
-  ? Number(process.env.RIDE_TIMEOUT_MS)
-  : 90 * 1000;
+// ✅ UPDATED: timeout صار 90 ثانية (ALL TIMER VALUES RETURNED IN SECONDS)
+const RIDE_TIMEOUT_S = Number.isFinite(Number(process.env.RIDE_TIMEOUT_S))
+  ? Number(process.env.RIDE_TIMEOUT_S)
+  : 90; // ✅ fixed 90 seconds
 
 const CANCELLED_RIDE_TTL_MS = 10 * 60 * 1000;
 
@@ -69,7 +75,7 @@ const MAX_DRIVER_LOCATION_AGE_MS = Number.isFinite(Number(process.env.MAX_DRIVER
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
-  "http://192.168.100.51:8000";
+  "https://aiactive.co.uk/backend/backend-laravel/public";
 
 const LARAVEL_ACCEPT_BID_PATH = "/api/customer/transport/accept-bid";
 const LARAVEL_DRIVER_BID_PATH = "/api/driver/bid-offer";
@@ -78,6 +84,27 @@ const LARAVEL_ACCEPT_BID_TIMEOUT_MS = Number.isFinite(
 )
   ? Number(process.env.LARAVEL_ACCEPT_BID_TIMEOUT_MS)
   : 7000;
+
+// ─────────────────────────────
+// ✅ Timer helpers (SECONDS ONLY + SERVER AUTHORITATIVE)
+// ─────────────────────────────
+/**
+ * ✅ Timer payload (server-authoritative) — ALL IN SECONDS
+ * - server_time: epoch seconds
+ * - expires_at: epoch seconds
+ * - timeout_ms: duration seconds (kept key name to avoid breaking old clients)
+ */
+const nowSec = () => Math.floor(Date.now() / 1000);
+
+const makeTimer = (durationSec = RIDE_TIMEOUT_S) => {
+  const now = nowSec();
+  const durSec = Math.max(0, Math.floor(Number.isFinite(Number(durationSec)) ? Number(durationSec) : RIDE_TIMEOUT_S));
+  return {
+    server_time: now,          // seconds
+    expires_at: now + durSec,  // seconds
+    timeout_ms: durSec,        // seconds (kept key name)
+  };
+};
 
 // ─────────────────────────────
 // ✅ Patch system helpers
@@ -97,9 +124,17 @@ const nextDriverSeq = (driverId) => {
  */
 function emitDriverPatch(io, driverId, ops = []) {
   if (!driverId || !ops || ops.length === 0) return;
+  const safeOps = ops.map((op) => {
+    if (!op || typeof op !== "object") return op;
+    if (op.op !== "upsert" || !op.ride || typeof op.ride !== "object") return op;
+    return {
+      ...op,
+      ride: sanitizeRidePayloadForClient(op.ride),
+    };
+  });
   io.to(driverRoom(driverId)).emit("driver:rides:patch", {
     driver_id: driverId,
-    ops,
+    ops: safeOps,
     seq: nextDriverSeq(driverId),
     at: Date.now(),
   });
@@ -299,6 +334,140 @@ const buildUserDetails = (data) => {
   return details;
 };
 
+const buildCustomerPayload = (payload = {}, userDetails = null) => {
+  const details =
+    userDetails && typeof userDetails === "object"
+      ? userDetails
+      : payload?.user_details && typeof payload.user_details === "object"
+      ? payload.user_details
+      : null;
+
+  const customerId = toNumber(
+    details?.user_id ??
+      payload?.user_id ??
+      payload?.customer_id ??
+      payload?.passenger_id ??
+      payload?.user_details?.user_id
+  );
+
+  const customerName =
+    details?.user_name ??
+    payload?.user_name ??
+    payload?.customer_name ??
+    payload?.passenger_name ??
+    null;
+
+  const customerGenderRaw =
+    details?.user_gender ??
+    payload?.user_gender ??
+    payload?.customer_gender ??
+    payload?.gender ??
+    null;
+  const customerGender =
+    customerGenderRaw === "" || customerGenderRaw == null
+      ? null
+      : Number.isFinite(Number(customerGenderRaw))
+      ? Number(customerGenderRaw)
+      : customerGenderRaw;
+
+  const customerCountryCode =
+    details?.user_country_code ??
+    payload?.user_country_code ??
+    payload?.customer_country_code ??
+    payload?.country_code ??
+    payload?.select_country_code ??
+    null;
+
+  const customerPhone =
+    details?.user_phone ??
+    payload?.user_phone ??
+    payload?.customer_phone ??
+    payload?.contact_number ??
+    payload?.phone ??
+    null;
+
+  const customerPhoneFull =
+    details?.user_phone_full ??
+    payload?.user_phone_full ??
+    payload?.customer_phone_full ??
+    (customerCountryCode && customerPhone ? `${customerCountryCode}${customerPhone}` : null);
+
+  const customerImage =
+    details?.user_image ??
+    payload?.user_image ??
+    payload?.customer_image ??
+    payload?.profile_image ??
+    payload?.avatar ??
+    null;
+
+  const customerToken =
+    details?.user_token ??
+    details?.token ??
+    payload?.user_token ??
+    payload?.token ??
+    payload?.access_token ??
+    null;
+
+  if (
+    !customerId &&
+    !customerName &&
+    !customerPhone &&
+    !customerImage &&
+    !customerToken &&
+    !details
+  ) {
+    return null;
+  }
+
+  return {
+    user_id: customerId ?? null,
+    user_name: customerName ?? null,
+    user_gender: customerGender ?? null,
+    user_country_code: customerCountryCode ?? null,
+    user_phone: customerPhone ?? null,
+    user_phone_full: customerPhoneFull ?? null,
+    user_image: customerImage ?? null,
+    user_token: customerToken ?? null,
+    token: customerToken ?? null,
+  };
+};
+
+const attachCustomerFields = (payload = {}, userDetails = null) => {
+  if (!payload || typeof payload !== "object") return payload;
+
+  const customer = buildCustomerPayload(payload, userDetails);
+  return {
+    ...payload,
+    customer: customer ?? null,
+    customer_details: customer ?? null,
+    customer_id: customer?.user_id ?? null,
+    customer_name: customer?.user_name ?? null,
+    customer_gender: customer?.user_gender ?? null,
+    customer_country_code: customer?.user_country_code ?? null,
+    customer_phone: customer?.user_phone ?? null,
+    customer_phone_full: customer?.user_phone_full ?? null,
+    customer_image: customer?.user_image ?? null,
+  };
+};
+
+const sanitizeRidePayloadForClient = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return payload;
+  const {
+    user_details,
+    customer,
+    customer_details,
+    customer_id,
+    customer_name,
+    customer_gender,
+    customer_country_code,
+    customer_phone,
+    customer_phone_full,
+    customer_image,
+    ...rest
+  } = payload;
+  return rest;
+};
+
 // ✅ rides cancelled (block dispatch)
 const cancelledRides = new Set(); // rideId
 
@@ -396,7 +565,6 @@ function finalizeAcceptedRide(io, rideId, driverId, finalPrice, options = {}) {
     driver_id: driverId,
     at: Date.now(),
   });
-
   closeRideBidding(io, rideId, { clearUser: false });
 
   const d = driverLocationService.getDriver(driverId);
@@ -421,23 +589,75 @@ function cancelRideTimeout(rideId) {
   }
 }
 
-function startRideTimeout(io, rideId) {
+/**
+ * ✅ UPDATED: startRideTimeout accepts seconds (NOT ms)
+ */
+function startRideTimeout(io, rideId, durationSec = RIDE_TIMEOUT_S) {
   cancelRideTimeout(rideId);
+
+  const sec = Math.max(0, toNumber(durationSec) ?? RIDE_TIMEOUT_S);
+  const ms = sec * 1000;
 
   const timer = setTimeout(() => {
     console.log(`🛑 Ride ${rideId} has timed out. Removing from memory.`);
     // ✅ timeout -> remove from all inboxes + candidates
     removeRideFromAllInboxes(io, rideId);
     rideCandidates.delete(rideId);
-  }, RIDE_TIMEOUT_MS);
+  }, ms);
 
   rideTimers.set(rideId, timer);
 }
 
+/**
+ * ✅ NEW: unified timer refresh (always 90s, server authoritative)
+ */
+function refreshRideTimer(io, rideId, options = {}) {
+  const { update_snapshot = true, patch_inboxes = true } = options || {};
+  if (!rideId) return null;
+
+  const timer = makeTimer(RIDE_TIMEOUT_S); // ✅ seconds
+
+  // restart real server timeout to match expires_at (seconds)
+  startRideTimeout(io, rideId, Math.max(0, timer.expires_at - nowSec()));
+
+  // update snapshot
+  if (update_snapshot) {
+    const snap = getRideDetails(rideId);
+    if (snap && typeof snap === "object") {
+      saveRideDetails(rideId, {
+        ...snap,
+        ...timer,
+      });
+    }
+  }
+
+  // update inbox entries
+  if (patch_inboxes) {
+    for (const [driverId, box] of driverRideInbox.entries()) {
+      if (!box?.has?.(rideId)) continue;
+      const current = box.get(rideId);
+      if (!current || typeof current !== "object") continue;
+
+      const updated = {
+        ...current,
+        ...timer,
+        _ts: Date.now(),
+      };
+      const updatedWithCustomer = attachCustomerFields(updated, current?.user_details ?? null);
+
+      box.set(rideId, updatedWithCustomer);
+      emitDriverPatch(io, driverId, [{ op: "upsert", ride: updatedWithCustomer }]);
+    }
+  }
+
+  return timer;
+}
+
 function inboxUpsert(driverId, rideId, payload) {
   if (!driverRideInbox.has(driverId)) driverRideInbox.set(driverId, new Map());
+  const prepared = attachCustomerFields(payload, payload?.user_details ?? null);
   driverRideInbox.get(driverId).set(rideId, {
-    ...payload,
+    ...prepared,
     ride_id: rideId,
     _ts: Date.now(), // ✅ مهم للتنظيف
   });
@@ -529,7 +749,7 @@ function getFullRideSnapshot(rideId, driverId = null) {
 function emitDriverInbox(io, driverId, eventName = "driver:rides:list") {
   pruneDriverInbox(io, driverId);
 
-  const list = inboxList(driverId, 30);
+  const list = inboxList(driverId, 30).map((ride) => sanitizeRidePayloadForClient(ride));
   io.to(driverRoom(driverId)).emit(eventName, {
     driver_id: driverId,
     rides: list,
@@ -558,7 +778,7 @@ function updateRideUserDetailsInInbox(io, rideId, userDetails) {
     const ride = box.get(rideId);
     if (!ride) continue;
 
-    const updated = {
+    const updated = attachCustomerFields({
       ...ride,
       user_id: next.user_id ?? ride.user_id ?? null,
       user_name: next.user_name ?? ride.user_name ?? null,
@@ -578,7 +798,7 @@ function updateRideUserDetailsInInbox(io, rideId, userDetails) {
       },
 
       _ts: Date.now(),
-    };
+    }, userDetails);
 
     box.set(rideId, updated);
 
@@ -594,7 +814,7 @@ function refreshUserDetailsForUserId(io, userId, userDetails) {
     for (const [rideId, ride] of box.entries()) {
       if (ride?.user_id !== userId) continue;
 
-      const updated = {
+      const updated = attachCustomerFields({
         ...ride,
         user_id: userDetails.user_id ?? ride.user_id ?? null,
         user_name: userDetails.user_name ?? ride.user_name ?? null,
@@ -614,7 +834,7 @@ function refreshUserDetailsForUserId(io, userId, userDetails) {
         },
 
         _ts: Date.now(),
-      };
+      }, userDetails);
       box.set(rideId, updated);
       ops.push({ op: "upsert", ride: updated });
     }
@@ -683,6 +903,15 @@ function closeRideBidding(io, rideId, opts = {}) {
 function dispatchToNearbyDrivers(io, data) {
   const rideId = toNumber(data?.ride_id ?? data?.id);
   if (!rideId) return false;
+    // ✅ fallback: if dispatch payload missing user info, try snapshot memory by rideId
+  const snap0 = getRideDetails(rideId);
+  if (snap0 && typeof snap0 === "object") {
+    data = {
+      ...snap0,   // has user_id/token if previously saved
+      ...data,    // incoming overrides snapshot
+      user_details: data?.user_details ?? snap0?.user_details ?? null,
+    };
+  }
 
   const activeDriverId = getActiveDriverByRide(rideId);
   if (activeDriverId) {
@@ -721,7 +950,20 @@ function dispatchToNearbyDrivers(io, data) {
   const fromStore = userIdTmp ? getUserDetails(userIdTmp) : null;
   const fromToken = !fromStore && tokenTmp ? getUserDetailsByToken(tokenTmp) : null;
 
-  const userDetails = built ?? fromStore ?? fromToken ?? null;
+let userDetails = built ?? fromStore ?? fromToken ?? null;
+
+// ✅ extra fallback: if still null, try snapshot user_details
+if (!userDetails) {
+  const snap = getRideDetails(rideId);
+  const snapToken = snap?.token ?? snap?.user_details?.user_token ?? snap?.user_details?.token ?? null;
+  const snapUserId = toNumber(snap?.user_id ?? snap?.user_details?.user_id ?? null);
+
+  userDetails =
+    (snapUserId ? getUserDetails(snapUserId) : null) ??
+    (snapToken ? getUserDetailsByToken(snapToken) : null) ??
+    snap?.user_details ??
+    null;
+}
   const userId = getUserIdFromDispatch(data, userDetails);
 
   const isPriceUpdated = !!data?.isPriceUpdated;
@@ -749,12 +991,17 @@ function dispatchToNearbyDrivers(io, data) {
       null
   );
 
+
   // ✅ optional filter requirements (apply only if provided)
   const requiredGender = toNumber(
     data?.required_driver_gender ?? data?.required_gender ?? data?.driver_gender ?? null
   );
   const needChildSeat = toNumber(
-    data?.need_child_seat ?? data?.child_seat ?? data?.require_child_seat ?? null
+    data?.need_child_seat ??
+      data?.child_seat ??
+      data?.require_child_seat ??
+      data?.smoking ??
+      null
   );
   const needHandicap = toNumber(
     data?.need_handicap ?? data?.handicap ?? data?.require_handicap ?? null
@@ -801,13 +1048,19 @@ function dispatchToNearbyDrivers(io, data) {
     token_present: !!tokenTmp,
   });
 
+  // ✅ TIMER (SERVER ONLY): ALWAYS CREATE 90s TIMER (NO incoming server_time/expires_at)
+  const timer = makeTimer(RIDE_TIMEOUT_S);
+
+  // ✅ start server timeout (seconds)
+  startRideTimeout(io, rideId, RIDE_TIMEOUT_S);
+
   rideCandidates.set(rideId, new Set(candidates.map((d) => d.driver_id)));
   if (userId) setUserActiveRide(userId, rideId);
 
   const baseMeta =
     data?.meta && typeof data.meta === "object" && !Array.isArray(data.meta) ? data.meta : {};
 
-  const ridePayload = {
+  const ridePayloadBase = {
     ride_id: rideId,
 
     // ✅ FLAT user fields (important for retry + merges)
@@ -857,10 +1110,14 @@ function dispatchToNearbyDrivers(io, data) {
     ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
     ...(updatedPrice !== null ? { updatedPrice } : {}),
     ...(updatedAt !== null ? { updatedAt } : {}),
+
+    // ✅ timer fields (SECONDS)
+    ...timer,
   };
+  const ridePayload = attachCustomerFields(ridePayloadBase, ridePayloadBase.user_details ?? userDetails);
 
   // ✅ keep a snapshot for future re-dispatch (retry-safe + includes flat user fields + token)
-  saveRideDetails(rideId, {
+  saveRideDetails(rideId, attachCustomerFields({
     ride_id: rideId,
 
     pickup_lat: lat,
@@ -886,7 +1143,7 @@ function dispatchToNearbyDrivers(io, data) {
       ...(etaMin !== null ? { eta_min: etaMin } : {}),
     },
 
-    // ✅ user flat fields (so snapshot has them even if user_details missing later)
+    // ✅ user flat fields
     user_id: userId ?? userDetails?.user_id ?? null,
     user_name: userDetails?.user_name ?? null,
     user_gender: userDetails?.user_gender ?? null,
@@ -895,7 +1152,6 @@ function dispatchToNearbyDrivers(io, data) {
     user_country_code: userDetails?.user_country_code ?? null,
     user_phone_full: userDetails?.user_phone_full ?? null,
 
-    // ✅ token fallback
     token: tokenTmp ?? null,
     user_details: userDetails
       ? {
@@ -908,12 +1164,70 @@ function dispatchToNearbyDrivers(io, data) {
     ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
     ...(updatedPrice !== null ? { updatedPrice } : {}),
     ...(updatedAt !== null ? { updatedAt } : {}),
-  });
+
+    // ✅ timer fields (SECONDS)
+    ...timer,
+  }, userDetails));
+
+  // Keep bidRequest user fields stable even when one source is partially missing.
+  const bidReqUserId =
+    toNumber(ridePayload?.user_id) ??
+    toNumber(data?.user_id) ??
+    toNumber(userDetails?.user_id) ??
+    null;
+  const bidReqStoredUser = bidReqUserId ? getUserDetails(bidReqUserId) : null;
+  const bidReqStoredByToken =
+    !bidReqStoredUser && tokenTmp ? getUserDetailsByToken(tokenTmp) : null;
+
+  const bidReqUserName =
+    ridePayload?.user_name ??
+    data?.user_name ??
+    userDetails?.user_name ??
+    bidReqStoredUser?.user_name ??
+    bidReqStoredByToken?.user_name ??
+    null;
+  const bidReqUserGender =
+    ridePayload?.user_gender ??
+    data?.user_gender ??
+    userDetails?.user_gender ??
+    bidReqStoredUser?.user_gender ??
+    bidReqStoredByToken?.user_gender ??
+    null;
+  const bidReqUserImage =
+    ridePayload?.user_image ??
+    data?.user_image ??
+    userDetails?.user_image ??
+    bidReqStoredUser?.user_image ??
+    bidReqStoredByToken?.user_image ??
+    null;
+  const bidReqUserPhone =
+    ridePayload?.user_phone ??
+    data?.user_phone ??
+    userDetails?.user_phone ??
+    bidReqStoredUser?.user_phone ??
+    bidReqStoredByToken?.user_phone ??
+    null;
+  const bidReqUserCountryCode =
+    ridePayload?.user_country_code ??
+    data?.user_country_code ??
+    userDetails?.user_country_code ??
+    bidReqStoredUser?.user_country_code ??
+    bidReqStoredByToken?.user_country_code ??
+    null;
+  const bidReqUserPhoneFull =
+    ridePayload?.user_phone_full ??
+    data?.user_phone_full ??
+    userDetails?.user_phone_full ??
+    bidReqStoredUser?.user_phone_full ??
+    bidReqStoredByToken?.user_phone_full ??
+    (bidReqUserCountryCode && bidReqUserPhone
+      ? `${bidReqUserCountryCode}${bidReqUserPhone}`
+      : null);
 
   candidates.forEach((d) => {
     const room = driverRoom(d.driver_id);
 
-    io.to(room).emit("ride:bidRequest", {
+    io.to(room).emit("ride:bidRequest", sanitizeRidePayloadForClient({
       ride_id: rideId,
 
       pickup_lat: lat,
@@ -928,21 +1242,23 @@ function dispatchToNearbyDrivers(io, data) {
       user_bid_price: base,
       min_fare_amount: min,
 
-      user_id: ridePayload.user_id,
-      user_name: ridePayload.user_name,
-      user_gender: ridePayload.user_gender,
-      user_image: ridePayload.user_image,
-      user_phone: ridePayload.user_phone,
-      user_country_code: ridePayload.user_country_code,
-      user_phone_full: ridePayload.user_phone_full,
+      user_id: bidReqUserId,
+      user_name: bidReqUserName,
+      user_gender: bidReqUserGender,
+      user_image: bidReqUserImage,
+      user_phone: bidReqUserPhone,
+      user_country_code: bidReqUserCountryCode,
+      user_phone_full: bidReqUserPhoneFull,
 
       token: tokenTmp ?? null,
-      user_details: ridePayload.user_details,
 
       ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
       ...(updatedPrice !== null ? { updatedPrice } : {}),
       ...(updatedAt !== null ? { updatedAt } : {}),
-    });
+
+      // ✅ timer fields (SECONDS)
+      ...timer,
+    }));
 
     inboxUpsert(d.driver_id, rideId, ridePayload);
 
@@ -950,8 +1266,6 @@ function dispatchToNearbyDrivers(io, data) {
 
     console.log(`   -> Sent bidRequest + patch(upsert) to driver ${d.driver_id} (room:${room})`);
   });
-
-  startRideTimeout(io, rideId);
 
   if (candidates.length > 0) {
     console.log(`✅ Finished dispatching ride ${rideId} — notified ${candidates.length} driver(s)`);
@@ -1239,6 +1553,95 @@ module.exports = (io, socket) => {
 
     const currency = toNumber(payload?.currency) ?? 1;
     const finalPrice = round2(offeredPrice * currency);
+    const rideSnapshot =
+      driverRideInbox.get(driverId)?.get(rideId) ??
+      getRideDetails(rideId) ??
+      null;
+
+    const payloadMeta =
+      payload?.meta && typeof payload.meta === "object" && !Array.isArray(payload.meta)
+        ? payload.meta
+        : {};
+    const snapshotMeta =
+      rideSnapshot?.meta && typeof rideSnapshot.meta === "object" && !Array.isArray(rideSnapshot.meta)
+        ? rideSnapshot.meta
+        : {};
+
+    const payloadDriverToPickupDistanceM = toNumber(
+      payload?.driver_to_pickup_distance_m ?? payloadMeta?.driver_to_pickup_distance_m ?? null
+    );
+    const payloadDriverToPickupDurationS = toNumber(
+      payload?.driver_to_pickup_duration_s ?? payloadMeta?.driver_to_pickup_duration_s ?? null
+    );
+    const payloadDriverToPickupDurationMin = toNumber(
+      payload?.driver_to_pickup_duration_min ?? payloadMeta?.driver_to_pickup_duration_min ?? null
+    );
+
+    const snapshotDriverToPickupDistanceM = toNumber(
+      rideSnapshot?.driver_to_pickup_distance_m ?? snapshotMeta?.driver_to_pickup_distance_m ?? null
+    );
+    const snapshotDriverToPickupDurationS = toNumber(
+      rideSnapshot?.driver_to_pickup_duration_s ?? snapshotMeta?.driver_to_pickup_duration_s ?? null
+    );
+    const snapshotDriverToPickupDurationMin = toNumber(
+      rideSnapshot?.driver_to_pickup_duration_min ?? snapshotMeta?.driver_to_pickup_duration_min ?? null
+    );
+
+    const driverPos = driverLocationService.getDriver(driverId) || null;
+    const driverLat = toNumber(payload?.driver_lat ?? payload?.lat ?? driverPos?.lat ?? null);
+    const driverLong = toNumber(payload?.driver_long ?? payload?.long ?? driverPos?.long ?? null);
+    const pickupLatForEta = toNumber(payload?.pickup_lat ?? rideSnapshot?.pickup_lat ?? null);
+    const pickupLongForEta = toNumber(payload?.pickup_long ?? rideSnapshot?.pickup_long ?? null);
+
+    const driverToPickupDistanceM =
+      payloadDriverToPickupDistanceM ??
+      snapshotDriverToPickupDistanceM ??
+      (driverLat !== null &&
+      driverLong !== null &&
+      pickupLatForEta !== null &&
+      pickupLongForEta !== null
+        ? Math.round(getDistanceMeters(driverLat, driverLong, pickupLatForEta, pickupLongForEta))
+        : null);
+
+    const payloadDurationFromMin =
+      payloadDriverToPickupDurationMin !== null
+        ? Math.round(payloadDriverToPickupDurationMin * 60)
+        : null;
+    const snapshotDurationFromMin =
+      snapshotDriverToPickupDurationMin !== null
+        ? Math.round(snapshotDriverToPickupDurationMin * 60)
+        : null;
+
+    const driverToPickupDurationS =
+      payloadDriverToPickupDurationS ??
+      payloadDurationFromMin ??
+      snapshotDriverToPickupDurationS ??
+      snapshotDurationFromMin ??
+      (driverToPickupDistanceM !== null
+        ? Math.max(60, Math.round((driverToPickupDistanceM * 3.6) / DRIVER_TO_PICKUP_SPEED_KMPH))
+        : null);
+
+    const driverToPickupDistanceKm =
+      driverToPickupDistanceM !== null ? round2(driverToPickupDistanceM / 1000) : null;
+    const driverToPickupDurationMin =
+      driverToPickupDurationS !== null ? round2(driverToPickupDurationS / 60) : null;
+
+    const bidMeta = {
+      ...payloadMeta,
+      ...(driverToPickupDistanceM !== null
+        ? {
+            driver_to_pickup_distance_m: driverToPickupDistanceM,
+            driver_to_pickup_distance_km: driverToPickupDistanceKm,
+          }
+        : {}),
+      ...(driverToPickupDurationS !== null
+        ? {
+            driver_to_pickup_duration_s: driverToPickupDurationS,
+            driver_to_pickup_duration_min: driverToPickupDurationMin,
+            estimated_arrival_min: driverToPickupDurationMin,
+          }
+        : {}),
+    };
 
     const driverMeta = driverLocationService.getMeta(driverId) || {};
     const driverServiceId =
@@ -1314,6 +1717,12 @@ module.exports = (io, socket) => {
         });
     }
 
+    // ✅ TIMER refresh: every new bid resets timer (90s seconds)
+    const timer = refreshRideTimer(io, rideId, {
+      update_snapshot: true,
+      patch_inboxes: true,
+    });
+
     const ridePayload = {
       ride_id: rideId,
       driver_id: driverId,
@@ -1334,7 +1743,20 @@ module.exports = (io, socket) => {
       service_type_id: toNumber(payload.service_type_id) ?? null,
       service_category_id: toNumber(payload.service_category_id) ?? null,
       created_at: payload.created_at ?? null,
-      meta: payload.meta ?? {},
+      ...(driverToPickupDistanceM !== null
+        ? {
+            driver_to_pickup_distance_m: driverToPickupDistanceM,
+            driver_to_pickup_distance_km: driverToPickupDistanceKm,
+          }
+        : {}),
+      ...(driverToPickupDurationS !== null
+        ? {
+            driver_to_pickup_duration_s: driverToPickupDurationS,
+            driver_to_pickup_duration_min: driverToPickupDurationMin,
+            estimated_arrival_min: driverToPickupDurationMin,
+          }
+        : {}),
+      meta: bidMeta,
 
       driver_details: driverDetails,
       address_list: payload.address_list ?? [],
@@ -1343,6 +1765,9 @@ module.exports = (io, socket) => {
       bid_limit: payload.bid_limit ?? 5,
       can_bid_more: payload.can_bid_more ?? true,
       remain_bid: (payload.bid_limit ?? 5) - (payload.user_bid_count ?? 0),
+
+      // ✅ timer fields (SECONDS)
+      ...(timer ? timer : {}),
     };
 
     io.to(rideRoom(rideId)).emit("ride:newBid", ridePayload);
@@ -1355,6 +1780,10 @@ module.exports = (io, socket) => {
       console.log(`🧹 [inbox] removed ride ${rideId} from driver ${driverId} after submitBid`);
     }
   });
+
+  // ✅ باقي الملف (user:respondToDriver / user:acceptOffer / ride:close / disconnect)
+  // ما تم تغييره نهائياً — فقط سيستمر باستعمال refreshRideTimer الذي صار 90s بالثواني
+  // -------------------------------------------------
 
   socket.on("user:respondToDriver", (payload) => {
     console.log("[bid][user:respondToDriver] incoming", {
@@ -1381,7 +1810,6 @@ module.exports = (io, socket) => {
     }
 
     const newPrice = toNumber(payload?.price) ?? toNumber(payload?.user_bid_price);
-    cancelRideTimeout(rideId);
 
     const set = rideCandidates.get(rideId);
     const candidateDrivers = set ? Array.from(set.values()) : [];
@@ -1426,7 +1854,7 @@ module.exports = (io, socket) => {
     }
 
     const snapshotBase = snapshot
-      ? {
+      ? attachCustomerFields({
           ...snapshot,
           user_details: snapshotDetails ?? snapshot.user_details ?? null,
           user_id: snapshot.user_id ?? snapshotDetails?.user_id ?? null,
@@ -1442,8 +1870,14 @@ module.exports = (io, socket) => {
             snapshotDetails?.token ??
             payloadToken ??
             null,
-        }
+        }, snapshotDetails)
       : null;
+
+    // ✅ TIMER refresh: every user response resets timer (90s seconds)
+    const timer = refreshRideTimer(io, rideId, {
+      update_snapshot: true,
+      patch_inboxes: true,
+    });
 
     for (const dId of candidateDrivers) {
       const rideFull = driverRideInbox.get(dId)?.get(rideId);
@@ -1452,7 +1886,7 @@ module.exports = (io, socket) => {
       if (baseRide) {
         const mergedUD = incomingUserDetails ?? baseRide.user_details ?? snapshotDetails ?? null;
 
-        const updatedRide = {
+        const updatedRide = attachCustomerFields({
           ...baseRide,
           user_details: mergedUD ?? baseRide.user_details ?? null,
           user_id: mergedUD?.user_id ?? baseRide.user_id ?? null,
@@ -1472,7 +1906,10 @@ module.exports = (io, socket) => {
           isPriceUpdated: true,
           updatedPrice: newPrice,
           updatedAt: Date.now(),
-        };
+
+          // ✅ timer fields (SECONDS)
+          ...(timer ? timer : {}),
+        }, mergedUD);
 
         inboxUpsert(dId, rideId, updatedRide);
         emitDriverPatch(io, dId, [{ op: "upsert", ride: updatedRide }]);
@@ -1483,6 +1920,9 @@ module.exports = (io, socket) => {
       io.to(driverRoom(dId)).emit("ride:userResponse", {
         ride_id: rideId,
         price: newPrice,
+
+        // ✅ timer fields (SECONDS)
+        ...(timer ? timer : {}),
         at: Date.now(),
       });
 
@@ -1497,6 +1937,11 @@ module.exports = (io, socket) => {
         isPriceUpdated: true,
         updatedPrice: newPrice,
         updatedAt: Date.now(),
+
+        // ✅ carry same timer forward (SECONDS)
+        server_time: timer?.server_time ?? null,
+        expires_at: timer?.expires_at ?? null,
+        timeout_ms: timer?.timeout_ms ?? null,
       };
       dispatchToNearbyDrivers(io, redispatchData);
     } else {
@@ -1506,6 +1951,9 @@ module.exports = (io, socket) => {
     io.to(rideRoom(rideId)).emit("ride:priceUpdated", {
       ride_id: rideId,
       user_bid_price: newPrice,
+
+      // ✅ timer fields (SECONDS)
+      ...(timer ? timer : {}),
       at: Date.now(),
     });
 
@@ -1649,3 +2097,4 @@ module.exports.saveRideDetails = saveRideDetails;
 module.exports.getRideDetails = getRideDetails;
 module.exports.getUserIdForRide = getUserIdForRide;
 module.exports.finalizeAcceptedRide = finalizeAcceptedRide;
+module.exports.removeRideFromAllInboxes = removeRideFromAllInboxes;
