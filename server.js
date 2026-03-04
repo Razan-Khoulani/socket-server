@@ -49,7 +49,14 @@ const SOCKET_BIND_PORT = Number(process.env.SOCKET_BIND_PORT) || 4000;
 const INVOICE_STATUSES = new Set([7, 8, 9]);
 const TRIP_SUMMARY_START_STATUSES = new Set([5]);
 const TRIP_SUMMARY_COMPLETE_STATUSES = new Set([7, 8]);
-const SIMPLE_PASSED_DEST_STATUSES = new Set([5]);
+// Optional fallback: emit ride:passedDestination from status updates.
+// Keep empty by default so passed-destination is driven by tracking logic only.
+const SIMPLE_PASSED_DEST_STATUSES = new Set(
+  String(process.env.SIMPLE_PASSED_DEST_STATUSES || "")
+    .split(",")
+    .map((v) => Number(v.trim()))
+    .filter((v) => Number.isFinite(v))
+);
 // ride statuses that should be treated as final (clear active ride mapping)
 const FINAL_STATUSES = new Set([4, 6, 7, 8, 9]);
 const INVOICE_TTL_MS = 10 * 60 * 1000;
@@ -660,6 +667,74 @@ app.post("/events/internal/ride-user-accepted", (req, res) => {
   }
 
   return res.json({ status: 1 });
+});
+
+app.post("/events/internal/ride-extra-distance-accepted", (req, res) => {
+  try {
+    const body = req.body || {};
+    const rideNum = Number(body.ride_id);
+    if (!Number.isFinite(rideNum) || rideNum <= 0) {
+      return res.status(400).json({ status: 0, message: "ride_id required" });
+    }
+
+    const providerNum = Number(body.provider_id);
+    const driverNum = Number(body.driver_id);
+    const resolvedDriverId =
+      (Number.isFinite(providerNum) && providerNum > 0
+        ? providerNum
+        : Number.isFinite(driverNum) && driverNum > 0
+        ? driverNum
+        : getActiveDriverByRide(rideNum)) ?? null;
+
+    const evt = {
+      ride_id: rideNum,
+      ride_status: Number.isFinite(Number(body.ride_status))
+        ? Number(body.ride_status)
+        : null,
+      adjustment_id: Number.isFinite(Number(body.adjustment_id))
+        ? Number(body.adjustment_id)
+        : null,
+      previous_total_distance: Number.isFinite(Number(body.previous_total_distance))
+        ? Number(body.previous_total_distance)
+        : null,
+      extra_distance_km: Number.isFinite(Number(body.extra_distance_km))
+        ? Number(body.extra_distance_km)
+        : null,
+      updated_total_distance: Number.isFinite(Number(body.updated_total_distance))
+        ? Number(body.updated_total_distance)
+        : null,
+      cost_per_km: Number.isFinite(Number(body.cost_per_km))
+        ? Number(body.cost_per_km)
+        : null,
+      previous_total_pay: Number.isFinite(Number(body.previous_total_pay))
+        ? Number(body.previous_total_pay)
+        : null,
+      extra_fare_amount: Number.isFinite(Number(body.extra_fare_amount))
+        ? Number(body.extra_fare_amount)
+        : null,
+      updated_total_pay: Number.isFinite(Number(body.updated_total_pay))
+        ? Number(body.updated_total_pay)
+        : null,
+      source: "laravel:accept-not-reached-destination",
+      at: Number.isFinite(Number(body.at)) ? Number(body.at) : Date.now(),
+    };
+
+    io.to(`ride:${rideNum}`).emit("ride:extraDistanceAccepted", evt);
+    io.to(`ride:${rideNum}`).emit("ride:passedDestinationAccepted", evt);
+    if (resolvedDriverId) {
+      io.to(`driver:${resolvedDriverId}`).emit("ride:extraDistanceAccepted", evt);
+      io.to(`driver:${resolvedDriverId}`).emit("ride:passedDestinationAccepted", evt);
+    }
+
+    console.log(
+      `[extra-distance][emit] ride:${rideNum} driver:${resolvedDriverId ?? "none"} events:ride:extraDistanceAccepted,ride:passedDestinationAccepted adjustment:${evt.adjustment_id ?? "none"} extra_km:${evt.extra_distance_km ?? "null"} extra_fare:${evt.extra_fare_amount ?? "null"}`
+    );
+
+    return res.json({ status: 1 });
+  } catch (e) {
+    console.error("❌ /events/internal/ride-extra-distance-accepted error:", e);
+    return res.status(500).json({ status: 0, message: "Server error" });
+  }
 });
 
 app.post("/events/internal/ride-trip-summary", (req, res) => {

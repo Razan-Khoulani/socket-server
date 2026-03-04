@@ -9,6 +9,7 @@ const {
   getRideRoutePoints,
   clearRideRoute,
 } = require("../store/rideRoutes.store");
+const { getDistanceMeters } = require("../utils/geo.util");
 const biddingSocket = require("./bidding.socket");
 
 // 🔧 Settings
@@ -44,6 +45,52 @@ module.exports = (io, socket) => {
   const toNumber = (v) => {
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
+  };
+
+  const round2 = (value) => {
+    const n = toNumber(value);
+    if (n == null) return null;
+    return Math.round(n * 100) / 100;
+  };
+
+  const computeRouteDistanceKm = (rideId) => {
+    const points = getRideRoutePoints(rideId);
+    if (!Array.isArray(points) || points.length < 2) return null;
+
+    let meters = 0;
+    for (let i = 1; i < points.length; i += 1) {
+      const prev = points[i - 1];
+      const next = points[i];
+      const segmentMeters = getDistanceMeters(
+        toNumber(prev?.lat),
+        toNumber(prev?.lng),
+        toNumber(next?.lat),
+        toNumber(next?.lng)
+      );
+      if (Number.isFinite(segmentMeters) && segmentMeters > 0) {
+        meters += segmentMeters;
+      }
+    }
+
+    if (!Number.isFinite(meters) || meters <= 0) return null;
+    return round2(meters / 1000);
+  };
+
+  const isAcceptedDecision = (value) => {
+    if (value === true || value === 1) return true;
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      return [
+        "1",
+        "true",
+        "yes",
+        "y",
+        "ok",
+        "confirm",
+        "accepted",
+      ].includes(normalized);
+    }
+    return false;
   };
 
   const driverRoom = (driverId) => `driver:${driverId}`;
@@ -627,6 +674,305 @@ console.log("[emit][ride:statusUpdated]", {
       });
     } catch (e) {
       console.error("[ride-status][driver:updateRideStatus] api failed:", e?.response?.data || e.message);
+    }
+  });
+
+  socket.on("driver:passedDestinationDecision", async (payload = {}) => {
+    console.log("[ride-status][driver:passedDestinationDecision] incoming", {
+      socket_id: socket.id,
+      socket_driver_id: socket.driverId ?? null,
+      payload_driver_id: payload?.driver_id ?? null,
+      ride_id: payload?.ride_id ?? null,
+      accepted: payload?.accepted ?? payload?.yes ?? payload?.answer ?? null,
+      extra_distance_km: payload?.extra_distance_km ?? null,
+      updated_total_distance_km:
+        payload?.updated_total_distance_km ??
+        payload?.total_distance_km ??
+        payload?.total_distance ??
+        null,
+    });
+
+    const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
+    if (!driverId) {
+      socket.emit("ride:passedDestinationDecisionAck", {
+        status: 0,
+        accepted: 0,
+        message: "driver_id required",
+        at: Date.now(),
+      });
+      return;
+    }
+
+    if (!bindDriverOnce(driverId)) {
+      socket.emit("ride:passedDestinationDecisionAck", {
+        status: 0,
+        accepted: 0,
+        ride_id: toNumber(payload?.ride_id) ?? null,
+        message: "driver_id mismatch",
+        at: Date.now(),
+      });
+      return;
+    }
+
+    const rideId =
+      toNumber(payload?.ride_id) ?? getActiveRideByDriver(driverId) ?? null;
+    if (!rideId) {
+      socket.emit("ride:passedDestinationDecisionAck", {
+        status: 0,
+        accepted: 0,
+        message: "ride_id required",
+        at: Date.now(),
+      });
+      return;
+    }
+
+    const accepted = isAcceptedDecision(
+      payload?.accepted ?? payload?.yes ?? payload?.answer
+    );
+    if (!accepted) {
+      const ack = {
+        status: 1,
+        accepted: 0,
+        ride_id: rideId,
+        message: "Driver did not accept extra distance",
+        at: Date.now(),
+      };
+      socket.emit("ride:passedDestinationDecisionAck", ack);
+      io.to(driverRoom(driverId)).emit("ride:passedDestinationDecisionAck", ack);
+      return;
+    }
+
+    const driverMeta = driverLocationService.getMeta(driverId) || {};
+    const driverServiceId =
+      toNumber(socket.driverServiceId) ??
+      toNumber(payload?.driver_service_id) ??
+      toNumber(driverMeta?.driver_service_id);
+    const accessToken =
+      socket.driverAccessToken ??
+      payload?.access_token ??
+      driverMeta?.access_token ??
+      null;
+
+    if (!driverServiceId || !accessToken) {
+      const ack = {
+        status: 0,
+        accepted: 1,
+        ride_id: rideId,
+        message: "driver_service_id/access_token required",
+        at: Date.now(),
+      };
+      socket.emit("ride:passedDestinationDecisionAck", ack);
+      io.to(driverRoom(driverId)).emit("ride:passedDestinationDecisionAck", ack);
+      return;
+    }
+
+    const hasPositiveNumber = (value) =>
+      Number.isFinite(value) && value > 0;
+
+    const extraDistanceMeters =
+      toNumber(payload?.extra_distance_m) ??
+      toNumber(payload?.road_distance_m) ??
+      toNumber(payload?.distance_m);
+    const derivedExtraDistanceKm =
+      hasPositiveNumber(extraDistanceMeters)
+        ? round2(extraDistanceMeters / 1000)
+        : null;
+    let extraDistanceKm =
+      toNumber(payload?.extra_distance_km) ?? derivedExtraDistanceKm;
+    let updatedTotalDistanceKm =
+      toNumber(payload?.updated_total_distance_km) ??
+      toNumber(payload?.total_distance_km) ??
+      toNumber(payload?.total_distance);
+
+    if (!hasPositiveNumber(extraDistanceKm) && !hasPositiveNumber(updatedTotalDistanceKm)) {
+      try {
+        const invoiceRes = await axios.post(
+          `${LARAVEL_BASE_URL}/api/driver/transport-ride-invoice`,
+          {
+            driver_id: driverId,
+            access_token: accessToken,
+            driver_service_id: driverServiceId,
+            ride_id: rideId,
+          },
+          { timeout: LARAVEL_TIMEOUT_MS }
+        );
+
+        let invoiceData = invoiceRes?.data ?? null;
+        if (typeof invoiceData === "string") {
+          try {
+            invoiceData = JSON.parse(invoiceData);
+          } catch (_) {}
+        }
+
+        const invoiceTotalDistanceKm =
+          toNumber(invoiceData?.trip_distance_km) ??
+          toNumber(invoiceData?.total_distance) ??
+          toNumber(invoiceData?.trip_summary?.distance_km) ??
+          toNumber(invoiceData?.invoice?.trip_distance_km) ??
+          toNumber(invoiceData?.invoice?.total_distance) ??
+          toNumber(invoiceData?.invoice?.trip_summary?.distance_km);
+        const invoiceExtraDistanceKm =
+          toNumber(invoiceData?.last_extra_distance_km) ??
+          toNumber(invoiceData?.extra_distance_total_km) ??
+          toNumber(invoiceData?.invoice?.last_extra_distance_km) ??
+          toNumber(invoiceData?.invoice?.extra_distance_total_km);
+
+        if (hasPositiveNumber(invoiceTotalDistanceKm)) {
+          updatedTotalDistanceKm = round2(invoiceTotalDistanceKm);
+          console.log(
+            "[ride-status][driver:passedDestinationDecision] using backend invoice distance",
+            {
+              ride_id: rideId,
+              driver_id: driverId,
+              updated_total_distance_km: updatedTotalDistanceKm,
+            }
+          );
+        }
+        if (!hasPositiveNumber(extraDistanceKm) && hasPositiveNumber(invoiceExtraDistanceKm)) {
+          extraDistanceKm = round2(invoiceExtraDistanceKm);
+        }
+      } catch (e) {
+        console.warn(
+          "[ride-status][driver:passedDestinationDecision] invoice fallback failed:",
+          e?.response?.data || e?.message || e
+        );
+      }
+    }
+
+    if (!hasPositiveNumber(extraDistanceKm) && !hasPositiveNumber(updatedTotalDistanceKm)) {
+      const routeDistanceKm = computeRouteDistanceKm(rideId);
+      if (hasPositiveNumber(routeDistanceKm)) {
+        updatedTotalDistanceKm = round2(routeDistanceKm);
+        console.log(
+          "[ride-status][driver:passedDestinationDecision] using local route distance fallback",
+          {
+            ride_id: rideId,
+            driver_id: driverId,
+            updated_total_distance_km: updatedTotalDistanceKm,
+          }
+        );
+      }
+    }
+
+    const apiPayload = {
+      driver_id: driverId,
+      access_token: accessToken,
+      driver_service_id: driverServiceId,
+      ride_id: rideId,
+    };
+    if (hasPositiveNumber(extraDistanceKm)) {
+      apiPayload.extra_distance_km = extraDistanceKm;
+    }
+    if (hasPositiveNumber(updatedTotalDistanceKm)) {
+      apiPayload.updated_total_distance_km = updatedTotalDistanceKm;
+    }
+
+    if (
+      apiPayload.extra_distance_km == null &&
+      apiPayload.updated_total_distance_km == null
+    ) {
+      const ack = {
+        status: 0,
+        accepted: 1,
+        ride_id: rideId,
+        message: "extra_distance_km or updated_total_distance_km required",
+        at: Date.now(),
+      };
+      socket.emit("ride:passedDestinationDecisionAck", ack);
+      io.to(driverRoom(driverId)).emit("ride:passedDestinationDecisionAck", ack);
+      return;
+    }
+
+    try {
+      const res = await axios.post(
+        `${LARAVEL_BASE_URL}/api/driver/accept-not-reached-destination`,
+        apiPayload,
+        { timeout: LARAVEL_TIMEOUT_MS }
+      );
+      let data = res?.data ?? null;
+      if (typeof data === "string") {
+        try {
+          data = JSON.parse(data);
+        } catch (_) {}
+      }
+
+      let invoiceData =
+        data?.invoice && typeof data?.invoice === "object" ? data.invoice : null;
+      if (!invoiceData && (data?.status == null || Number(data?.status) === 1)) {
+        try {
+          const invoiceRes = await axios.post(
+            `${LARAVEL_BASE_URL}/api/driver/transport-ride-invoice`,
+            {
+              driver_id: driverId,
+              access_token: accessToken,
+              driver_service_id: driverServiceId,
+              ride_id: rideId,
+            },
+            { timeout: LARAVEL_TIMEOUT_MS }
+          );
+          invoiceData = invoiceRes?.data ?? null;
+          if (typeof invoiceData === "string") {
+            try {
+              invoiceData = JSON.parse(invoiceData);
+            } catch (_) {}
+          }
+        } catch (invoiceErr) {
+          console.warn(
+            "[ride-status][driver:passedDestinationDecision] invoice refresh failed:",
+            invoiceErr?.response?.data || invoiceErr?.message || invoiceErr
+          );
+        }
+      }
+
+      const ack = {
+        status: data?.status ?? 1,
+        accepted: 1,
+        ride_id: rideId,
+        request: {
+          extra_distance_km: apiPayload.extra_distance_km ?? null,
+          updated_total_distance_km:
+            apiPayload.updated_total_distance_km ?? null,
+        },
+        response: data,
+        ...(invoiceData && typeof invoiceData === "object"
+          ? { invoice: invoiceData }
+          : {}),
+        at: Date.now(),
+      };
+      socket.emit("ride:passedDestinationDecisionAck", ack);
+      io.to(driverRoom(driverId)).emit("ride:passedDestinationDecisionAck", ack);
+
+      if (invoiceData && typeof invoiceData === "object") {
+        const invoiceEvt = {
+          ride_id: rideId,
+          ride_status:
+            toNumber(invoiceData?.ride_status) ??
+            toNumber(data?.ride_status) ??
+            null,
+          invoice: invoiceData,
+          source: "driver:passedDestinationDecision",
+          at: Date.now(),
+        };
+        socket.emit("ride:invoice", invoiceEvt);
+        io.to(driverRoom(driverId)).emit("ride:invoice", invoiceEvt);
+      }
+    } catch (e) {
+      const errorData = e?.response?.data ?? null;
+      const ack = {
+        status: 0,
+        accepted: 1,
+        ride_id: rideId,
+        message:
+          errorData?.message ?? e?.message ?? "accept-not-reached-destination failed",
+        error: errorData,
+        at: Date.now(),
+      };
+      socket.emit("ride:passedDestinationDecisionAck", ack);
+      io.to(driverRoom(driverId)).emit("ride:passedDestinationDecisionAck", ack);
+      console.error(
+        "[ride-status][driver:passedDestinationDecision] api failed:",
+        errorData || e?.message || e
+      );
     }
   });
 
