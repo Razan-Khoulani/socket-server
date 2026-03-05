@@ -51,12 +51,24 @@ const TRIP_SUMMARY_START_STATUSES = new Set([5]);
 const TRIP_SUMMARY_COMPLETE_STATUSES = new Set([7, 8]);
 // Optional fallback: emit ride:passedDestination from status updates.
 // Keep empty by default so passed-destination is driven by tracking logic only.
+const rawSimplePassedStatuses = String(
+  process.env.SIMPLE_PASSED_DEST_STATUSES || ""
+)
+  .split(",")
+  .map((v) => Number(v.trim()))
+  .filter((v) => Number.isFinite(v));
+// Never allow status=5 here (trip start). Passed-destination should not fire on start.
 const SIMPLE_PASSED_DEST_STATUSES = new Set(
-  String(process.env.SIMPLE_PASSED_DEST_STATUSES || "")
-    .split(",")
-    .map((v) => Number(v.trim()))
-    .filter((v) => Number.isFinite(v))
+  rawSimplePassedStatuses.filter((v) => v !== 5)
 );
+if (
+  DEBUG_SOCKET_EVENTS &&
+  rawSimplePassedStatuses.includes(5)
+) {
+  console.warn(
+    "[config] SIMPLE_PASSED_DEST_STATUSES includes 5; ignoring it to avoid false passed-destination emits"
+  );
+}
 // ride statuses that should be treated as final (clear active ride mapping)
 const FINAL_STATUSES = new Set([4, 6, 7, 8, 9]);
 const INVOICE_TTL_MS = 10 * 60 * 1000;

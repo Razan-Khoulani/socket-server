@@ -124,6 +124,7 @@ module.exports = (io, socket) => {
   // State per socket
   // ─────────────────────────────
   socket.laravelLocationInterval = null;
+  socket.activeRideId = null;
 
   // ─────────────────────────────
   // Events
@@ -352,7 +353,8 @@ module.exports = (io, socket) => {
 
     io.to(driverRoom(socket.driverId)).emit("driver:moved", payload);
 
-    const activeRideId = getActiveRideByDriver(socket.driverId);
+    const activeRideId =
+      getActiveRideByDriver(socket.driverId) ?? toNumber(socket.activeRideId);
     if (activeRideId) {
       appendRidePoint(activeRideId, { lat: la, lng: lo, at: Date.now() });
       io.to(`ride:${activeRideId}`).emit("ride:locationUpdate", {
@@ -412,6 +414,10 @@ module.exports = (io, socket) => {
         service_category_id: serviceCategoryId,
       });
       return;
+    }
+
+    if (!FINAL_RIDE_STATUSES.has(rideStatus)) {
+      socket.activeRideId = rideId;
     }
 
     const dedupeKey = `${driverId}:${rideId}`;
@@ -596,6 +602,13 @@ module.exports = (io, socket) => {
       }
     }
 
+    if (rideStatus === 6 && apiPayload.total_distance == null) {
+      const routeDistanceKm = computeRouteDistanceKm(rideId);
+      if (Number.isFinite(routeDistanceKm) && routeDistanceKm > 0) {
+        apiPayload.total_distance = routeDistanceKm;
+      }
+    }
+
     try {
       console.log("[ride-status][driver:updateRideStatus] api payload", apiPayload);
       const res = await axios.post(
@@ -625,6 +638,7 @@ module.exports = (io, socket) => {
 
   clearActiveRideByDriver(driverId);
   clearActiveRideByRideId(rideId);
+  socket.activeRideId = null;
 
   // ✅ optional: close bidding cleanly (removes inbox/candidates if any left)
   if (typeof biddingSocket.closeRideBidding === "function") {

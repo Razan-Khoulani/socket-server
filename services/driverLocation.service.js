@@ -1,5 +1,6 @@
-const db = require("../db");
 const { getDistanceMeters } = require("../utils/geo.util");
+
+let dbWriteSkipLogged = false;
 
 const driverLocations = new Map();   // driverId -> { lat, long, timestamp, ...meta }
 const driverListeners = new Map();   // driverId -> Set<callback>
@@ -8,17 +9,18 @@ const driverListeners = new Map();   // driverId -> Set<callback>
 // DB update (كما هو)
 // ─────────────────────────────────────────────
 exports.update = (driverId, lat, long) => {
-  return new Promise((resolve, reject) => {
-    db.query(
-      `UPDATE transport_driver_details
-       SET current_lat = ?, current_long = ?, updated_at = NOW()
-       WHERE id = ?`,
-      [lat, long, driverId],
-      (err, result) => {
-        if (err) return reject(err);
-        resolve(result);
-      }
+  if (!dbWriteSkipLogged) {
+    dbWriteSkipLogged = true;
+    console.log(
+      "[driverLocationService.update] DB writes are disabled (memory-only mode)"
     );
+  }
+  return Promise.resolve({
+    affectedRows: 0,
+    skipped: true,
+    driverId,
+    lat,
+    long,
   });
 };
 
