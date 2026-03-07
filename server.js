@@ -49,28 +49,16 @@ const SOCKET_BIND_PORT = Number(process.env.SOCKET_BIND_PORT) || 4000;
 const INVOICE_STATUSES = new Set([7, 8, 9]);
 const TRIP_SUMMARY_START_STATUSES = new Set([5]);
 const TRIP_SUMMARY_COMPLETE_STATUSES = new Set([7, 8]);
-// Optional fallback: emit ride:passedDestination from status updates.
-// Keep empty by default so passed-destination is driven by tracking logic only.
-const rawSimplePassedStatuses = String(
-  process.env.SIMPLE_PASSED_DEST_STATUSES || ""
+const SIMPLE_PASSED_DEST_DISTANCE_M = Number.isFinite(
+  Number(process.env.SIMPLE_PASSED_DEST_DISTANCE_M)
 )
-  .split(",")
-  .map((v) => Number(v.trim()))
-  .filter((v) => Number.isFinite(v));
-// Never allow status=5 here (trip start). Passed-destination should not fire on start.
-const SIMPLE_PASSED_DEST_STATUSES = new Set(
-  rawSimplePassedStatuses.filter((v) => v !== 5)
-);
-if (
-  DEBUG_SOCKET_EVENTS &&
-  rawSimplePassedStatuses.includes(5)
-) {
-  console.warn(
-    "[config] SIMPLE_PASSED_DEST_STATUSES includes 5; ignoring it to avoid false passed-destination emits"
-  );
-}
+  ? Number(process.env.SIMPLE_PASSED_DEST_DISTANCE_M)
+  : 25;
 // ride statuses that should be treated as final (clear active ride mapping)
 const FINAL_STATUSES = new Set([4, 6, 7, 8, 9]);
+// Keep status 6 route cache until payment statuses (7/8/9) so trip summary/invoice
+// can still read full distance even after destination reached.
+const ROUTE_CLEAR_STATUSES = new Set([4, 7, 8, 9]);
 const INVOICE_TTL_MS = 10 * 60 * 1000;
 const sentInvoiceForRide = new Set();
 const STATUS_DEDUPE_TTL_MS = Number.isFinite(
@@ -158,6 +146,23 @@ const computeRouteDistanceKm = (rideId) => {
   return round2(meters / 1000) ?? 0;
 };
 
+const resolveTripDistanceKm = ({
+  computedDistanceKm,
+  payloadDistanceKm,
+  storedDistanceKm,
+}) => {
+  const computed = toFiniteNumber(computedDistanceKm);
+  const payload = toFiniteNumber(payloadDistanceKm);
+  const stored = toFiniteNumber(storedDistanceKm);
+  const positive = [computed, payload, stored].filter(
+    (v) => v != null && v > 0
+  );
+  if (positive.length) {
+    return round2(Math.max(...positive)) ?? Math.max(...positive);
+  }
+  return round2(computed ?? payload ?? stored ?? 0) ?? 0;
+};
+
 const buildTripSummarySnapshot = ({ rideId, driverId, rideStatus, lat, long, payload }) => {
   const now = Date.now();
   const current = rideTripMeta.get(rideId) || {};
@@ -197,7 +202,17 @@ const buildTripSummarySnapshot = ({ rideId, driverId, rideStatus, lat, long, pay
     toFiniteNumber(current.end_long) ??
     (endedAt != null ? resolved.long ?? startLong : null);
 
-  const distanceKm = toFiniteNumber(current.distance_km) ?? computeRouteDistanceKm(rideId);
+  const computedDistanceKm = computeRouteDistanceKm(rideId);
+  const payloadDistanceKm =
+    toFiniteNumber(payload?.total_distance) ??
+    toFiniteNumber(payload?.trip_distance_km) ??
+    toFiniteNumber(payload?.distance_km) ??
+    toFiniteNumber(payload?.updated_total_distance_km);
+  const distanceKm = resolveTripDistanceKm({
+    computedDistanceKm,
+    payloadDistanceKm,
+    storedDistanceKm: current.distance_km,
+  });
   const payloadFinalPrice =
     toFiniteNumber(payload?.total_pay) ??
     toFiniteNumber(payload?.total_amount) ??
@@ -335,7 +350,17 @@ const emitTripSummaryEvent = ({ rideId, driverId, rideStatus, lat, long, payload
     0,
     Math.round((current.ended_at - current.started_at) / 1000)
   );
-  const distanceKm = computeRouteDistanceKm(rideId);
+  const computedDistanceKm = computeRouteDistanceKm(rideId);
+  const payloadDistanceKm =
+    toFiniteNumber(payload?.total_distance) ??
+    toFiniteNumber(payload?.trip_distance_km) ??
+    toFiniteNumber(payload?.distance_km) ??
+    toFiniteNumber(payload?.updated_total_distance_km);
+  const distanceKm = resolveTripDistanceKm({
+    computedDistanceKm,
+    payloadDistanceKm,
+    storedDistanceKm: current.distance_km,
+  });
   const finalPrice =
     toFiniteNumber(payload?.total_pay) ??
     toFiniteNumber(payload?.total_amount) ??
@@ -839,40 +864,84 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       ride_status: status,
     };
 
-    if (SIMPLE_PASSED_DEST_STATUSES.has(status)) {
-      const simpleKey = `${rideId}:${status}`;
+    let destinationLat = toFiniteNumber(
+      payload?.destination_lat ?? payload?.destination?.lat ?? payload?.destinationLat
+    );
+    let destinationLong = toFiniteNumber(
+      payload?.destination_long ??
+        payload?.destination?.long ??
+        payload?.destinationLong
+    );
+    if (
+      (destinationLat == null || destinationLong == null) &&
+      typeof payload?.destination_latlong === "string"
+    ) {
+      const [rawDestLat, rawDestLong] = payload.destination_latlong
+        .split(",")
+        .map((v) => v.trim());
+      if (destinationLat == null) destinationLat = toFiniteNumber(rawDestLat);
+      if (destinationLong == null) destinationLong = toFiniteNumber(rawDestLong);
+    }
+
+    if (
+      Number.isFinite(la) &&
+      Number.isFinite(lo) &&
+      destinationLat != null &&
+      destinationLong != null
+    ) {
+      const currentDistanceM = getDistanceMeters(la, lo, destinationLat, destinationLong);
+      const simpleKey = `${rideId}:near-destination`;
       const isDupSimplePassed = shouldSkipDedupe(
         simplePassedDedupe,
         simpleKey,
         SIMPLE_PASSED_DEDUPE_TTL_MS
       );
-
-      if (!isDupSimplePassed) {
+      if (
+        Number.isFinite(currentDistanceM) &&
+        currentDistanceM <= SIMPLE_PASSED_DEST_DISTANCE_M &&
+        !isDupSimplePassed
+      ) {
         const targetDriverId = driverId ?? getActiveDriverByRide(rideId) ?? null;
         const simplePassedEvt = {
           ride_id: rideId,
           ride_status: status,
-          lat: Number.isFinite(la) ? la : null,
-          long: Number.isFinite(lo) ? lo : null,
-          message: "passed destination (simple status trigger)",
+          lat: la,
+          long: lo,
+          destination: {
+            lat: destinationLat,
+            long: destinationLong,
+          },
+          distance_m: Math.round(currentDistanceM),
+          threshold_m: SIMPLE_PASSED_DEST_DISTANCE_M,
+          trigger: "near_destination_simple",
+          message: "near destination",
           source: "ride-status-updated",
           at: Date.now(),
         };
 
         io.to(`ride:${rideId}`).emit("ride:passedDestination", simplePassedEvt);
+        const rideRoom = io.sockets.adapter.rooms.get(`ride:${rideId}`);
+        const rideRoomCount = rideRoom ? rideRoom.size : 0;
+
         if (targetDriverId) {
           io.to(`driver:${targetDriverId}`).emit(
             "ride:passedDestination",
             simplePassedEvt
           );
+          const driverRoom = io.sockets.adapter.rooms.get(`driver:${targetDriverId}`);
+          const driverRoomCount = driverRoom ? driverRoom.size : 0;
+          console.log(
+            `[status][emit] ride:passedDestination ride:${rideId} driver:${targetDriverId} dist:${Math.round(
+              currentDistanceM
+            )}m -> rideRoom(sockets:${rideRoomCount}) driverRoom(sockets:${driverRoomCount})`
+          );
+        } else {
+          console.log(
+            `[status][emit] ride:passedDestination ride:${rideId} driver:none dist:${Math.round(
+              currentDistanceM
+            )}m -> rideRoom(sockets:${rideRoomCount})`
+          );
         }
-        console.log(
-          `[status][emit] ride:passedDestination ride:${rideId} status:${status} driver:${targetDriverId ?? "none"}`
-        );
-      } else {
-        console.log(
-          `[status][dedupe] skip ride:passedDestination ride:${rideId} status:${status}`
-        );
       }
     }
 
@@ -938,7 +1007,13 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
     // ✅ If ride reached a terminal status, clear active mapping + notify
     if (FINAL_STATUSES.has(status)) {
       clearActiveRideByRideId(rideId);
-      clearRideRoute(rideId);
+      if (ROUTE_CLEAR_STATUSES.has(status)) {
+        clearRideRoute(rideId);
+      } else {
+        console.log(
+          `[status][route-cache] keep route for ride:${rideId} status:${status}`
+        );
+      }
 
       if (typeof biddingSocket.closeRideBidding === "function") {
         biddingSocket.closeRideBidding(io, rideId);

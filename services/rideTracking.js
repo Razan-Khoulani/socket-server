@@ -1,4 +1,4 @@
-// rideTracking.js
+﻿// rideTracking.js
 
 const { getDistanceMeters } = require("../utils/geo.util");
 const { getActiveDriverByRide } = require("../store/activeRides.store");
@@ -14,9 +14,7 @@ const envNumber = (key, fallback) => {
 const AIR_TRIGGER_M = envNumber("RIDE_TRACK_AIR_TRIGGER_M", 250);
 const ROAD_CHECK_EVERY_MS = envNumber("RIDE_TRACK_ROAD_CHECK_EVERY_MS", 7000);
 const ENTER_AIR_M = envNumber("RIDE_TRACK_ENTER_AIR_M", 25);
-const EXIT_AIR_M = envNumber("RIDE_TRACK_EXIT_AIR_M", 80);
 const ENTER_ROAD_M = envNumber("RIDE_TRACK_ENTER_ROAD_M", 60);
-const EXIT_ROAD_M = envNumber("RIDE_TRACK_EXIT_ROAD_M", 150);
 const MIN_INSIDE_MS = envNumber("RIDE_TRACK_MIN_INSIDE_MS", 3000);
 
 const toFiniteNumber = (value) => {
@@ -51,9 +49,6 @@ function startTracking(io, rideId, pickup, destination) {
     if (normalizedDestination) {
       existing.destination = normalizedDestination;
     }
-    if (existing.nearDestAlertNotified == null) {
-      existing.nearDestAlertNotified = false;
-    }
 
     rideLocations.set(rideId, existing);
     emitLocation(io, rideId, pickupLat, pickupLong);
@@ -69,7 +64,6 @@ function startTracking(io, rideId, pickup, destination) {
     destination: normalizedDestination,
     hasEnteredDestZone: false,
     arrivedNotified: false,
-    nearDestAlertNotified: false,
     insideSince: null,
     passedNotified: false,
     lastRoadCheckAt: 0,
@@ -99,43 +93,6 @@ async function updateLocation(io, rideId, lat, long, options = {}) {
 
   const now = Date.now();
   let roadDist = null;
-
-  // Simple driver alert: once when car is within 25m of destination.
-  if (loc.destination && !loc.nearDestAlertNotified) {
-    const nearDist = getDistanceMeters(
-      latNum,
-      longNum,
-      loc.destination.lat,
-      loc.destination.long
-    );
-
-    if (Number.isFinite(nearDist) && nearDist <= ENTER_AIR_M) {
-      loc.nearDestAlertNotified = true;
-      const driverId = getActiveDriverByRide(rideId);
-      const nearEvt = {
-        ride_id: rideId,
-        lat: latNum,
-        long: longNum,
-        destination: loc.destination,
-        distance_m: Math.round(nearDist),
-        threshold_m: ENTER_AIR_M,
-        trigger: "near_25m",
-        message: "اقتربت من الوجهة (25m)",
-        at: now,
-      };
-
-      if (driverId) {
-        io.to(`driver:${driverId}`).emit("ride:passedDestination", nearEvt);
-        console.log(
-          `[emit->driver] event=ride:passedDestination trigger=near_25m ride=${rideId} driver=${driverId} dist=${Math.round(nearDist)}m`
-        );
-      } else {
-        console.log(
-          `[emit->driver][skip] event=ride:passedDestination trigger=near_25m ride=${rideId} driver=none dist=${Math.round(nearDist)}m`
-        );
-      }
-    }
-  }
 
   if (loc.destination && !loc.passedNotified) {
     const distAir = getDistanceMeters(
@@ -184,6 +141,10 @@ async function updateLocation(io, rideId, lat, long, options = {}) {
     }
   }
 
+  const roadDistForDecision =
+    (Number.isFinite(roadDist) ? roadDist : null) ??
+    (Number.isFinite(loc.lastRoadDistanceM) ? loc.lastRoadDistanceM : null);
+
   if (loc.destination && !loc.passedNotified) {
     const dist = getDistanceMeters(
       latNum,
@@ -195,11 +156,7 @@ async function updateLocation(io, rideId, lat, long, options = {}) {
     const inside =
       Number.isFinite(dist) &&
       dist <= ENTER_AIR_M &&
-      (roadDist == null ? true : roadDist <= ENTER_ROAD_M);
-
-    const outsideFar =
-      (Number.isFinite(dist) && dist >= EXIT_AIR_M) ||
-      (roadDist != null && roadDist >= EXIT_ROAD_M);
+      (roadDistForDecision == null ? true : roadDistForDecision <= ENTER_ROAD_M);
 
     if (inside) {
       if (!loc.insideSince) loc.insideSince = now;
@@ -217,8 +174,8 @@ async function updateLocation(io, rideId, lat, long, options = {}) {
             long: longNum,
             destination: loc.destination,
             distance_m: Math.round(dist),
-            road_distance_m: roadDist ?? loc.lastRoadDistanceM ?? null,
-            message: "✅ وصلت للوجهة",
+            road_distance_m: roadDistForDecision,
+            message: "Arrived at destination",
             at: now,
           };
 
@@ -236,7 +193,7 @@ async function updateLocation(io, rideId, lat, long, options = {}) {
 
           console.log(
             `[ride:${rideId}] arrived destination air=${Math.round(dist)}m road=${
-              roadDist ?? loc.lastRoadDistanceM ?? "null"
+              roadDistForDecision ?? "null"
             }m`
           );
         }
@@ -245,7 +202,7 @@ async function updateLocation(io, rideId, lat, long, options = {}) {
       loc.insideSince = null;
     }
 
-    if (loc.hasEnteredDestZone && outsideFar) {
+    if (loc.hasEnteredDestZone && inside) {
       loc.passedNotified = true;
 
       const driverId = getActiveDriverByRide(rideId);
@@ -255,8 +212,10 @@ async function updateLocation(io, rideId, lat, long, options = {}) {
         long: longNum,
         destination: loc.destination,
         distance_m: Math.round(dist),
-        road_distance_m: roadDist ?? loc.lastRoadDistanceM ?? null,
-        message: "⚠️ يبدو أنك تجاوزت الوجهة، يرجى إنهاء الرحلة",
+        road_distance_m: roadDistForDecision,
+        threshold_m: ENTER_AIR_M,
+        trigger: "within_25m_destination",
+        message: "Within 25m of destination",
         at: now,
       };
 
@@ -274,7 +233,7 @@ async function updateLocation(io, rideId, lat, long, options = {}) {
 
       console.log(
         `[ride:${rideId}] passed destination air=${Math.round(dist)}m road=${
-          roadDist ?? loc.lastRoadDistanceM ?? "null"
+          roadDistForDecision ?? "null"
         }m`
       );
     }
