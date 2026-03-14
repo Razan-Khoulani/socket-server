@@ -53,6 +53,51 @@ module.exports = (io, socket) => {
     return Math.round(n * 100) / 100;
   };
 
+  const parseLatLongString = (value) => {
+    if (typeof value !== "string" || !value.includes(",")) return null;
+    const [rawLat, rawLong] = value.split(",").map((item) => item.trim());
+    const lat = toNumber(rawLat);
+    const lng = toNumber(rawLong);
+    if (lat == null || lng == null) return null;
+    return { lat, lng };
+  };
+
+  const extractNamedPoint = (source, prefix) => {
+    if (!source || typeof source !== "object") return null;
+
+    const candidates = [source, source.meta, source.ride_details].filter(
+      (item) => item && typeof item === "object"
+    );
+
+    for (const candidate of candidates) {
+      const directLat = toNumber(
+        candidate[`${prefix}_lat`] ??
+          candidate[`${prefix}Lat`] ??
+          candidate[prefix]?.lat ??
+          candidate[prefix]?.latitude
+      );
+      const directLng = toNumber(
+        candidate[`${prefix}_long`] ??
+          candidate[`${prefix}Long`] ??
+          candidate[prefix]?.lng ??
+          candidate[prefix]?.long ??
+          candidate[prefix]?.longitude
+      );
+      if (directLat != null && directLng != null) {
+        return { lat: directLat, lng: directLng };
+      }
+
+      const latLongPoint = parseLatLongString(
+        candidate[`${prefix}_latlong`] ??
+          candidate[`${prefix}LatLong`] ??
+          candidate[prefix]?.latlong
+      );
+      if (latLongPoint) return latLongPoint;
+    }
+
+    return null;
+  };
+
   const computeRouteDistanceKm = (rideId) => {
     const points = getRideRoutePoints(rideId);
     if (!Array.isArray(points) || points.length < 2) return null;
@@ -405,6 +450,10 @@ module.exports = (io, socket) => {
       toNumber(payload?.service_category_id) ??
       toNumber(socket.driverServiceCategoryId) ??
       toNumber(driverMeta?.service_category_id);
+    const pickupPoint =
+      extractNamedPoint(rideDetails, "pickup") ??
+      extractNamedPoint(payload, "pickup");
+    const routeOpts = pickupPoint ? { pickup: pickupPoint } : {};
 
     if (!rideId || rideStatus == null || wayPointStatus == null || !serviceCategoryId) {
       console.log("[ride-status][driver:updateRideStatus] missing required fields", {
@@ -523,9 +572,13 @@ module.exports = (io, socket) => {
     // ✅ start/append route tracking for running rides
     if (rideStatus === 5) {
       if (Number.isFinite(currentLat) && Number.isFinite(currentLong)) {
-        startRideRoute(rideId, { lat: currentLat, lng: currentLong, at: Date.now() });
+        startRideRoute(
+          rideId,
+          { lat: currentLat, lng: currentLong, at: Date.now() },
+          routeOpts
+        );
       } else {
-        startRideRoute(rideId);
+        startRideRoute(rideId, null, routeOpts);
       }
     }
     if (rideStatus === 6) {
@@ -593,8 +646,12 @@ module.exports = (io, socket) => {
     if (rideStatus === 6 && apiPayload.route_lat_long_list == null) {
       let routePoints = getRideRoutePoints(rideId);
       if (!routePoints.length && Number.isFinite(currentLat) && Number.isFinite(currentLong)) {
-        startRideRoute(rideId);
-        appendRidePoint(rideId, { lat: currentLat, lng: currentLong, at: Date.now() });
+        startRideRoute(rideId, null, routeOpts);
+        appendRidePoint(
+          rideId,
+          { lat: currentLat, lng: currentLong, at: Date.now() },
+          routeOpts
+        );
         routePoints = getRideRoutePoints(rideId);
       }
       if (routePoints.length) {

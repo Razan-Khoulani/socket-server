@@ -10,6 +10,8 @@ const {
   setActiveRide,
   clearActiveRideByDriver,
 } = require("../store/activeRides.store");
+const LARAVEL_GET_ROUTE_PATH =
+  process.env.LARAVEL_GET_ROUTE_PATH || "/api/getRoute";
 
 const DEBUG_EVENTS = process.env.DEBUG_SOCKET_EVENTS === "1";
 const debugLog = (event, payload, socketId) => {
@@ -38,8 +40,116 @@ const toNumber = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
+const toRouteMetricNumber = (v) => {
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string") {
+    const strict = Number(v);
+    if (Number.isFinite(strict)) return strict;
+
+    // Supports API values like "25 min" or "9.23 km"
+    const normalized = v.replace(",", ".").trim();
+    const parsed = parseFloat(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
+const pickFirstValue = (...values) => {
+  for (const v of values) {
+    if (v !== undefined && v !== null && v !== "") return v;
+  }
+  return null;
+};
 
 const round2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
+const normalizeDuration = (v) => toNumber(v);
+const getRideDurationRaw = (payload = null) => {
+  if (!payload || typeof payload !== "object") return null;
+  return pickFirstValue(
+    payload?.ride_details?.duration,
+    payload?.duration,
+    payload?.meta?.duration,
+    payload?.route_api_duration_min,
+    payload?.meta?.route_api_duration_min,
+    payload?.eta_min,
+    payload?.meta?.eta_min
+  );
+};
+const getRideDurationMinutes = (payload = null) => {
+  if (!payload || typeof payload !== "object") return null;
+  return normalizeDuration(
+    payload?.ride_details?.duration ??
+      payload?.duration ??
+      payload?.meta?.duration ??
+      payload?.route_api_duration_min ??
+      payload?.meta?.route_api_duration_min ??
+      payload?.eta_min ??
+      payload?.meta?.eta_min ??
+      null
+  );
+};
+const getRideDistanceKm = (payload = null) => {
+  if (!payload || typeof payload !== "object") return null;
+  const km = pickFirstValue(
+    payload?.distance ??
+      payload?.route_api_distance_km ??
+      payload?.driver_to_pickup_distance_km ??
+      payload?.ride_details?.route_api_distance_km ??
+      payload?.meta?.route_api_distance_km
+  );
+  return km ?? null;
+};
+const getRideRouteApiDurationRaw = (payload = null) => {
+  if (!payload || typeof payload !== "object") return null;
+  return pickFirstValue(
+    toRouteMetricNumber(payload?.meta?.route_api_data?.duration),
+    toRouteMetricNumber(payload?.route_api_duration_min),
+    toRouteMetricNumber(payload?.meta?.route_api_duration_min),
+    toRouteMetricNumber(payload?.ride_details?.route_api_duration_min)
+  );
+};
+const getRideRouteApiDistanceKmRaw = (payload = null) => {
+  if (!payload || typeof payload !== "object") return null;
+  return pickFirstValue(
+    toRouteMetricNumber(payload?.meta?.route_api_data?.route),
+    toRouteMetricNumber(payload?.meta?.route_api_data?.distance_km),
+    toRouteMetricNumber(payload?.meta?.route_api_data?.total_distance),
+    toRouteMetricNumber(payload?.route_api_distance_km),
+    toRouteMetricNumber(payload?.ride_details?.route_api_distance_km),
+    toRouteMetricNumber(payload?.meta?.route_api_distance_km)
+  );
+};
+const normalizeRideMetrics = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return payload;
+
+  const duration = getRideDurationRaw(payload);
+  const distanceKm = getRideDistanceKm(payload);
+  const rideDetails =
+    payload.ride_details && typeof payload.ride_details === "object"
+      ? { ...payload.ride_details }
+      : {};
+  const meta =
+    payload.meta && typeof payload.meta === "object" ? { ...payload.meta } : {};
+
+  if (duration !== null) {
+    rideDetails.duration = duration;
+    meta.duration = duration;
+  }
+  if (distanceKm !== null) {
+    rideDetails.route_api_distance_km = distanceKm;
+    meta.route_api_distance_km = distanceKm;
+  }
+
+  return {
+    ...payload,
+    ...(duration !== null ? { duration, route_api_duration_min: duration } : {}),
+    ...(distanceKm !== null
+      ? { distance: distanceKm, route_api_distance_km: distanceKm }
+      : {}),
+    ride_details: rideDetails,
+    meta,
+  };
+};
 const DRIVER_TO_PICKUP_SPEED_KMPH = Number.isFinite(
   Number(process.env.DRIVER_TO_PICKUP_SPEED_KMPH)
 )
@@ -525,27 +635,61 @@ function finalizeAcceptedRide(io, rideId, driverId, finalPrice, options = {}) {
   const snapshot =
     rideDetails ?? (typeof getRideDetails === "function" ? getRideDetails(rideId) : null);
   const routeKm = toNumber(snapshot?.route ?? snapshot?.meta?.route ?? null);
-  const etaRaw = toNumber(snapshot?.eta_min ?? snapshot?.meta?.eta_min ?? null);
-  const etaMin = etaRaw !== null ? round2(etaRaw / 60) : null;
+  const duration = getRideDurationMinutes(snapshot);
+  const routeApiDistanceKm = toNumber(
+    snapshot?.ride_details?.route_api_distance_km ??
+      snapshot?.route_api_distance_km ??
+      snapshot?.meta?.route_api_distance_km ??
+      null
+  );
+  const etaMin = duration;
 
   const rideDetailsPayload = snapshot
     ? (() => {
         const cleanedMeta = snapshot.meta ? { ...snapshot.meta } : null;
+        const cleanedRideDetails =
+          snapshot.ride_details && typeof snapshot.ride_details === "object"
+            ? { ...snapshot.ride_details }
+            : null;
         if (cleanedMeta) {
           delete cleanedMeta.route;
           delete cleanedMeta.eta_min;
         }
+        if (cleanedRideDetails) {
+          delete cleanedRideDetails.eta_min;
+        }
         return {
           ...snapshot,
           ...(routeKm !== null ? { route: routeKm } : {}),
+          ...(duration !== null ? { duration } : {}),
           ...(etaMin !== null ? { eta_min: etaMin } : {}),
+          ...(routeApiDistanceKm !== null ? { route_api_distance_km: routeApiDistanceKm } : {}),
+          ...(cleanedRideDetails || duration !== null || routeApiDistanceKm !== null
+            ? {
+                ride_details: {
+                  ...(cleanedRideDetails ?? {}),
+                  ...(duration !== null ? { duration } : {}),
+                  ...(routeApiDistanceKm !== null ? { route_api_distance_km: routeApiDistanceKm } : {}),
+                },
+              }
+            : {}),
           ...(cleanedMeta ? { meta: cleanedMeta } : {}),
         };
       })()
-    : routeKm !== null || etaMin !== null
+    : routeKm !== null || etaMin !== null || duration !== null || routeApiDistanceKm !== null
     ? {
         ...(routeKm !== null ? { route: routeKm } : {}),
+        ...(duration !== null ? { duration } : {}),
         ...(etaMin !== null ? { eta_min: etaMin } : {}),
+        ...(routeApiDistanceKm !== null ? { route_api_distance_km: routeApiDistanceKm } : {}),
+        ...(duration !== null || routeApiDistanceKm !== null
+          ? {
+              ride_details: {
+                ...(duration !== null ? { duration } : {}),
+                ...(routeApiDistanceKm !== null ? { route_api_distance_km: routeApiDistanceKm } : {}),
+              },
+            }
+          : {}),
       }
     : null;
 
@@ -749,7 +893,53 @@ function getFullRideSnapshot(rideId, driverId = null) {
 function emitDriverInbox(io, driverId, eventName = "driver:rides:list") {
   pruneDriverInbox(io, driverId);
 
-  const list = inboxList(driverId, 30).map((ride) => sanitizeRidePayloadForClient(ride));
+  const list = inboxList(driverId, 30).map((ride) => {
+    const normalized = normalizeRideMetrics(ride);
+    const routeApiDuration = getRideRouteApiDurationRaw(normalized);
+    const routeApiDistanceKm = getRideRouteApiDistanceKmRaw(normalized);
+
+    const withRouteApi = {
+      ...normalized,
+      ...(routeApiDuration !== null
+        ? {
+            duration: routeApiDuration,
+            eta_min: routeApiDuration,
+            route_api_duration_min: routeApiDuration,
+          }
+        : {}),
+      ...(routeApiDistanceKm !== null
+        ? { distance: routeApiDistanceKm, route_api_distance_km: routeApiDistanceKm }
+        : {}),
+      ride_details: {
+        ...(normalized.ride_details && typeof normalized.ride_details === "object"
+          ? normalized.ride_details
+          : {}),
+        ...(routeApiDuration !== null ? { duration: routeApiDuration } : {}),
+        ...(routeApiDistanceKm !== null ? { route_api_distance_km: routeApiDistanceKm } : {}),
+      },
+      meta: {
+        ...(normalized.meta && typeof normalized.meta === "object" ? normalized.meta : {}),
+        ...(routeApiDuration !== null
+          ? {
+              duration: routeApiDuration,
+              eta_min: routeApiDuration,
+              route_api_duration_min: routeApiDuration,
+            }
+          : {}),
+        ...(routeApiDistanceKm !== null ? { route_api_distance_km: routeApiDistanceKm } : {}),
+      },
+    };
+
+    return sanitizeRidePayloadForClient(withRouteApi);
+  });
+  console.log("[driver:rides:list] payload", {
+    driver_id: driverId,
+    rides: list.map((ride) => ({
+      ride_id: ride?.ride_id ?? null,
+      duration: getRideRouteApiDurationRaw(ride) ?? getRideDurationRaw(ride),
+      route_api_distance_km: getRideRouteApiDistanceKmRaw(ride) ?? getRideDistanceKm(ride),
+    })),
+  });
   io.to(driverRoom(driverId)).emit(eventName, {
     driver_id: driverId,
     rides: list,
@@ -900,8 +1090,8 @@ function closeRideBidding(io, rideId, opts = {}) {
 // ─────────────────────────────
 // Dispatch
 // ─────────────────────────────
-function dispatchToNearbyDrivers(io, data) {
-  const rideId = toNumber(data?.ride_id ?? data?.id);
+async function dispatchToNearbyDrivers(io, data) {
+    const rideId = toNumber(data?.ride_id ?? data?.id);
   if (!rideId) return false;
     // ✅ fallback: if dispatch payload missing user info, try snapshot memory by rideId
   const snap0 = getRideDetails(rideId);
@@ -1015,7 +1205,88 @@ if (!userDetails) {
     });
     return false;
   }
+  const destinationLat = toNumber(data?.destination_lat);
+  const destinationLong = toNumber(data?.destination_long);
 
+  let routeApiData = null;
+  let routeApiDurationMin = pickFirstValue(
+    data?.duration,
+    data?.route_api_duration_min,
+    data?.meta?.duration,
+    data?.meta?.route_api_duration_min,
+    data?.eta_min,
+    data?.meta?.eta_min
+  );
+  let routeApiDistanceKm = pickFirstValue(
+    data?.route_api_distance_km,
+    data?.distance,
+    data?.meta?.route_api_distance_km
+  );
+
+  const hasFrontendRouteValues = routeApiDurationMin !== null || routeApiDistanceKm !== null;
+  const preferFrontendRouteMetrics =
+    data?.route_metrics_source === "frontend" ||
+    data?.route_data_source === "frontend" ||
+    toNumber(data?.prefer_frontend_route_metrics) === 1;
+  const shouldFetchRouteApi =
+    destinationLat !== null &&
+    destinationLong !== null &&
+    (!preferFrontendRouteMetrics || routeApiDurationMin === null || routeApiDistanceKm === null);
+
+  // Fetch route API when needed; keep frontend metrics if explicitly preferred.
+  if (shouldFetchRouteApi) {
+    routeApiData = await fetchRouteDataByCoords({
+      startLongitude: long,
+      startLatitude: lat,
+      endLongitude: destinationLong,
+      endLatitude: destinationLat,
+      requested_at: new Date().toISOString(),
+    });
+
+    const fetchedRouteApiDurationMin = toRouteMetricNumber(routeApiData?.duration);
+    const fetchedRouteApiDistanceKm =
+      toRouteMetricNumber(routeApiData?.route) ??
+      toRouteMetricNumber(routeApiData?.distance_km) ??
+      toRouteMetricNumber(routeApiData?.total_distance) ??
+      null;
+
+    if (
+      fetchedRouteApiDurationMin !== null &&
+      (!preferFrontendRouteMetrics || routeApiDurationMin === null)
+    ) {
+      routeApiDurationMin = fetchedRouteApiDurationMin;
+    }
+    if (
+      fetchedRouteApiDistanceKm !== null &&
+      (!preferFrontendRouteMetrics || routeApiDistanceKm === null)
+    ) {
+      routeApiDistanceKm = fetchedRouteApiDistanceKm;
+    }
+
+    console.log("[dispatch][routeApi]", {
+      ride_id: rideId,
+      source: preferFrontendRouteMetrics ? "frontend-preferred" : "api",
+      route_api_duration_min: routeApiDurationMin,
+      route_api_distance_km: routeApiDistanceKm,
+    });
+  } else if (destinationLat !== null && destinationLong !== null && hasFrontendRouteValues) {
+    console.log("[dispatch][routeApi] using frontend values", {
+      ride_id: rideId,
+      route_api_duration_min: routeApiDurationMin,
+      route_api_distance_km: routeApiDistanceKm,
+    });
+  } else if (hasFrontendRouteValues) {
+    console.log("[dispatch][routeApi] fallback to existing values (missing destination)", {
+      ride_id: rideId,
+      route_api_duration_min: routeApiDurationMin,
+      route_api_distance_km: routeApiDistanceKm,
+    });
+  }
+  const finalRouteApiDurationMin =
+    routeApiDurationMin !== null ? routeApiDurationMin : null;
+  const finalRouteApiDistanceKm =
+    routeApiDistanceKm !== null ? routeApiDistanceKm : null;
+  const finalEtaMin = finalRouteApiDurationMin !== null ? finalRouteApiDurationMin : etaMin;
   const nearby = driverLocationService.getNearbyDriversFromMemory(lat, long, radius, {
     only_online: true,
     service_type_id: serviceTypeId,
@@ -1060,114 +1331,140 @@ if (!userDetails) {
   const baseMeta =
     data?.meta && typeof data.meta === "object" && !Array.isArray(data.meta) ? data.meta : {};
 
-  const ridePayloadBase = {
-    ride_id: rideId,
+const ridePayloadBase = {
+  ride_id: rideId,
 
-    // ✅ FLAT user fields (important for retry + merges)
-    user_id: userId ?? userDetails?.user_id ?? null,
-    user_name: userDetails?.user_name ?? null,
-    user_gender: userDetails?.user_gender ?? null,
-    user_image: userDetails?.user_image ?? null,
-    user_phone: userDetails?.user_phone ?? null,
-    user_country_code: userDetails?.user_country_code ?? null,
-    user_phone_full: userDetails?.user_phone_full ?? null,
+  // ✅ FLAT user fields (important for retry + merges)
+  user_id: userId ?? userDetails?.user_id ?? null,
+  user_name: userDetails?.user_name ?? null,
+  user_gender: userDetails?.user_gender ?? null,
+  user_image: userDetails?.user_image ?? null,
+  user_phone: userDetails?.user_phone ?? null,
+  user_country_code: userDetails?.user_country_code ?? null,
+  user_phone_full: userDetails?.user_phone_full ?? null,
 
-    // ✅ keep token for later accept/merge paths
-    token: tokenTmp ?? null,
+  // ✅ keep token for later accept/merge paths
+  token: tokenTmp ?? null,
 
-    pickup_lat: lat,
-    pickup_long: long,
-    pickup_address: data.pickup_address ?? null,
+  pickup_lat: lat,
+  pickup_long: long,
+  pickup_address: data.pickup_address ?? null,
 
-    destination_lat: toNumber(data.destination_lat),
-    destination_long: toNumber(data.destination_long),
-    destination_address: data.destination_address ?? null,
+  destination_lat: toNumber(data.destination_lat),
+  destination_long: toNumber(data.destination_long),
+  destination_address: data.destination_address ?? null,
 
-    radius,
-    user_bid_price: base,
-    min_fare_amount: min,
+  radius,
+  user_bid_price: base,
+  min_fare_amount: min,
 
-    service_type_id: toNumber(data.service_type_id) ?? null,
-    service_category_id: toNumber(data.service_category_id) ?? null,
-    created_at: data.created_at ?? null,
+  service_type_id: toNumber(data.service_type_id) ?? null,
+  service_category_id: toNumber(data.service_category_id) ?? null,
+  created_at: data.created_at ?? null,
+
+  ...(routeKm !== null ? { route: routeKm } : {}),
+  ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
+  duration: finalRouteApiDurationMin,
+  route_api_distance_km: finalRouteApiDistanceKm,
+  ride_details: {
+    duration: finalRouteApiDurationMin,
+    route_api_distance_km: finalRouteApiDistanceKm,
+  },
+
+  meta: {
+    ...baseMeta,
     ...(routeKm !== null ? { route: routeKm } : {}),
-    ...(etaMin !== null ? { eta_min: etaMin } : {}),
-    meta: {
-      ...baseMeta,
-      ...(routeKm !== null ? { route: routeKm } : {}),
-      ...(etaMin !== null ? { eta_min: etaMin } : {}),
-    },
+    ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
+    duration: finalRouteApiDurationMin,
+    route_api_distance_km: finalRouteApiDistanceKm,
+    ...(routeApiData && typeof routeApiData === "object"
+      ? { route_api_data: routeApiData }
+      : {}),
+  },
 
-    // ✅ full object too
-    user_details: userDetails
-      ? {
-          ...userDetails,
-          user_token: userDetails?.user_token ?? userDetails?.token ?? tokenTmp ?? null,
-          token: userDetails?.user_token ?? userDetails?.token ?? tokenTmp ?? null,
-        }
-      : null,
+  // ✅ full object too
+  user_details: userDetails
+    ? {
+        ...userDetails,
+        user_token: userDetails?.user_token ?? userDetails?.token ?? tokenTmp ?? null,
+        token: userDetails?.user_token ?? userDetails?.token ?? tokenTmp ?? null,
+      }
+    : null,
 
-    ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
-    ...(updatedPrice !== null ? { updatedPrice } : {}),
-    ...(updatedAt !== null ? { updatedAt } : {}),
+  ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
+  ...(updatedPrice !== null ? { updatedPrice } : {}),
+  ...(updatedAt !== null ? { updatedAt } : {}),
 
-    // ✅ timer fields (SECONDS)
-    ...timer,
-  };
+  // ✅ timer fields (SECONDS)
+  ...timer,
+};
   const ridePayload = attachCustomerFields(ridePayloadBase, ridePayloadBase.user_details ?? userDetails);
 
   // ✅ keep a snapshot for future re-dispatch (retry-safe + includes flat user fields + token)
-  saveRideDetails(rideId, attachCustomerFields({
-    ride_id: rideId,
+ saveRideDetails(rideId, attachCustomerFields({
+  ride_id: rideId,
 
-    pickup_lat: lat,
-    pickup_long: long,
-    pickup_address: data.pickup_address ?? null,
+  pickup_lat: lat,
+  pickup_long: long,
+  pickup_address: data.pickup_address ?? null,
 
-    destination_lat: toNumber(data.destination_lat),
-    destination_long: toNumber(data.destination_long),
-    destination_address: data.destination_address ?? null,
+  destination_lat: toNumber(data.destination_lat),
+  destination_long: toNumber(data.destination_long),
+  destination_address: data.destination_address ?? null,
 
-    radius,
-    user_bid_price: base,
-    min_fare_amount: min,
-    service_type_id: serviceTypeId,
-    service_category_id: toNumber(data.service_category_id) ?? null,
-    created_at: data.created_at ?? null,
+  radius,
+  user_bid_price: base,
+  min_fare_amount: min,
+  service_type_id: serviceTypeId,
+  service_category_id: toNumber(data.service_category_id) ?? null,
+  created_at: data.created_at ?? null,
 
+  ...(routeKm !== null ? { route: routeKm } : {}),
+  ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
+  duration: finalRouteApiDurationMin,
+  route_api_distance_km: finalRouteApiDistanceKm,
+  ride_details: {
+    duration: finalRouteApiDurationMin,
+    route_api_distance_km: finalRouteApiDistanceKm,
+  },
+
+
+  meta: {
+    ...baseMeta,
     ...(routeKm !== null ? { route: routeKm } : {}),
-    ...(etaMin !== null ? { eta_min: etaMin } : {}),
-    meta: {
-      ...baseMeta,
-      ...(routeKm !== null ? { route: routeKm } : {}),
-      ...(etaMin !== null ? { eta_min: etaMin } : {}),
-    },
+    ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
+    duration: finalRouteApiDurationMin,
+    route_api_distance_km: finalRouteApiDistanceKm,
+    ...(routeApiData && typeof routeApiData === "object"
+      ? { route_api_data: routeApiData }
+      : {}),
+  },
 
-    // ✅ user flat fields
-    user_id: userId ?? userDetails?.user_id ?? null,
-    user_name: userDetails?.user_name ?? null,
-    user_gender: userDetails?.user_gender ?? null,
-    user_image: userDetails?.user_image ?? null,
-    user_phone: userDetails?.user_phone ?? null,
-    user_country_code: userDetails?.user_country_code ?? null,
-    user_phone_full: userDetails?.user_phone_full ?? null,
+  // ✅ user flat fields
+  user_id: userId ?? userDetails?.user_id ?? null,
+  user_name: userDetails?.user_name ?? null,
+  user_gender: userDetails?.user_gender ?? null,
+  user_image: userDetails?.user_image ?? null,
+  user_phone: userDetails?.user_phone ?? null,
+  user_country_code: userDetails?.user_country_code ?? null,
+  user_phone_full: userDetails?.user_phone_full ?? null,
 
-    token: tokenTmp ?? null,
-    user_details: userDetails
-      ? {
-          ...userDetails,
-          user_token: userDetails?.user_token ?? userDetails?.token ?? tokenTmp ?? null,
-          token: userDetails?.user_token ?? userDetails?.token ?? tokenTmp ?? null,
-        }
-      : null,
+  token: tokenTmp ?? null,
+  user_details: userDetails
+    ? {
+        ...userDetails,
+        user_token: userDetails?.user_token ?? userDetails?.token ?? tokenTmp ?? null,
+        token: userDetails?.user_token ?? userDetails?.token ?? tokenTmp ?? null,
+      }
+    : null,
 
-    ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
-    ...(updatedPrice !== null ? { updatedPrice } : {}),
-    ...(updatedAt !== null ? { updatedAt } : {}),
+  ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
+  ...(updatedPrice !== null ? { updatedPrice } : {}),
+  ...(updatedAt !== null ? { updatedAt } : {}),
 
-    // ✅ timer fields (SECONDS)
-    ...timer,
-  }, userDetails));
+  // ✅ timer fields (SECONDS)
+  ...timer,
+}, userDetails));
 
   // Keep bidRequest user fields stable even when one source is partially missing.
   const bidReqUserId =
@@ -1226,8 +1523,7 @@ if (!userDetails) {
 
   candidates.forEach((d) => {
     const room = driverRoom(d.driver_id);
-
-    io.to(room).emit("ride:bidRequest", sanitizeRidePayloadForClient({
+    const bidRequestPayload = sanitizeRidePayloadForClient({
       ride_id: rideId,
 
       pickup_lat: lat,
@@ -1251,14 +1547,30 @@ if (!userDetails) {
       user_phone_full: bidReqUserPhoneFull,
 
       token: tokenTmp ?? null,
+      ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
+      duration: finalRouteApiDurationMin,
+      route_api_distance_km: finalRouteApiDistanceKm,
+      ride_details: {
+        duration: finalRouteApiDurationMin,
+        route_api_distance_km: finalRouteApiDistanceKm,
+      },
 
       ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
       ...(updatedPrice !== null ? { updatedPrice } : {}),
       ...(updatedAt !== null ? { updatedAt } : {}),
 
-      // ✅ timer fields (SECONDS)
       ...timer,
-    }));
+    });
+
+    console.log("[ride:bidRequest] payload", {
+      driver_id: d.driver_id,
+      ride_id: bidRequestPayload?.ride_id ?? null,
+      duration:
+        bidRequestPayload?.ride_details?.duration ?? bidRequestPayload?.duration ?? null,
+      route_api_distance_km: bidRequestPayload?.route_api_distance_km ?? null,
+    });
+
+    io.to(room).emit("ride:bidRequest", bidRequestPayload);
 
     inboxUpsert(d.driver_id, rideId, ridePayload);
 
@@ -1294,6 +1606,304 @@ const isCandidateDriver = (rideId, driverId) => {
 // ─────────────────────────────
 // Socket handler
 // ─────────────────────────────
+
+
+async function fetchRouteAndEmit(io, rideId, driverId, rideSnapshot = null) {
+  if (!rideId || !driverId) return null;
+
+  const snapshot = rideSnapshot ?? getFullRideSnapshot(rideId, driverId) ?? null;
+  const driverLive = driverLocationService.getDriver(driverId) ?? null;
+  const startLongitude = toNumber(driverLive?.long);
+  const startLatitude = toNumber(driverLive?.lat);
+  const endLongitude = toNumber(snapshot?.pickup_long);
+  const endLatitude = toNumber(snapshot?.pickup_lat);
+  const requested_at = new Date().toISOString();
+
+  if (
+    startLongitude === null ||
+    startLatitude === null ||
+    endLongitude === null ||
+    endLatitude === null
+  ) {
+    const errorPayload = {
+      ride_id: rideId,
+      driver_id: driverId,
+      status: 0,
+      message: "Missing coordinates for route API",
+      params: {
+        startLongitude,
+        startLatitude,
+        endLongitude,
+        endLatitude,
+        requested_at,
+      },
+      at: Date.now(),
+    };
+
+    io.to(rideRoom(rideId)).emit("ride:routeDataError", errorPayload);
+    io.to(driverRoom(driverId)).emit("ride:routeDataError", errorPayload);
+
+    console.log("[ride:routeDataError] missing coordinates", errorPayload);
+    return null;
+  }
+
+try {
+  const response = await axios.get(
+    `${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`,
+    {
+      params: {
+        startLongitude,
+        startLatitude,
+        endLongitude,
+        endLatitude,
+        requested_at,
+      },
+      timeout: 10000,
+    }
+  );
+
+  const routeApiData = response?.data ?? null;
+  const normalizedDuration = normalizeDuration(routeApiData?.duration);
+
+  if (normalizedDuration === null) {
+    const errorPayload = {
+      ride_id: rideId,
+      driver_id: driverId,
+      status: 0,
+      message: "Route API returned invalid duration",
+      api_duration: routeApiData?.duration ?? null,
+      at: Date.now(),
+    };
+
+    io.to(rideRoom(rideId)).emit("ride:routeDataError", errorPayload);
+    io.to(driverRoom(driverId)).emit("ride:routeDataError", errorPayload);
+
+    console.error("[ride:routeDataError] invalid API duration:", errorPayload);
+    return routeApiData;
+  }
+
+  const successPayload = {
+    ride_id: rideId,
+    driver_id: driverId,
+    status: 1,
+    duration: normalizedDuration,
+    at: Date.now(),
+  };
+  // 🔎 DEBUG
+console.log("[ride:routeData] api raw duration =", routeApiData?.duration);
+console.log("[ride:routeData] success payload =", successPayload);
+console.log("[ride:routeData][source=getRoute-api]", {
+  ride_id: rideId,
+  driver_id: driverId,
+  duration: successPayload.duration,
+});
+
+
+  io.to(rideRoom(rideId)).emit("ride:routeData", successPayload);
+  io.to(driverRoom(driverId)).emit("ride:routeData", successPayload);
+
+  console.log("[ride:routeData] emitted successfully", successPayload);
+
+  return routeApiData;
+} catch (error) {
+    const errorPayload = {
+      ride_id: rideId,
+      driver_id: driverId,
+      status: 0,
+      message: "Route API request failed",
+      error: error?.response?.data || error?.message || "Unknown error",
+      at: Date.now(),
+    };
+
+    io.to(rideRoom(rideId)).emit("ride:routeDataError", errorPayload);
+    io.to(driverRoom(driverId)).emit("ride:routeDataError", errorPayload);
+
+    console.error("[ride:routeDataError] request failed:", error?.response?.data || error?.message);
+    return null;
+  }
+}
+
+async function fetchRouteDataByCoords({
+  startLongitude,
+  startLatitude,
+  endLongitude,
+  endLatitude,
+  requested_at = null,
+}) {
+  const safeStartLongitude = toNumber(startLongitude);
+  const safeStartLatitude = toNumber(startLatitude);
+  const safeEndLongitude = toNumber(endLongitude);
+  const safeEndLatitude = toNumber(endLatitude);
+  const safeRequestedAt = requested_at || new Date().toISOString();
+
+  if (
+    safeStartLongitude === null ||
+    safeStartLatitude === null ||
+    safeEndLongitude === null ||
+    safeEndLatitude === null
+  ) {
+    return null;
+  }
+
+  try {
+    const response = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
+      params: {
+        startLongitude: safeStartLongitude,
+        startLatitude: safeStartLatitude,
+        endLongitude: safeEndLongitude,
+        endLatitude: safeEndLatitude,
+        requested_at: safeRequestedAt,
+      },
+      timeout: 10000,
+    });
+
+    return response?.data ?? null;
+  } catch (error) {
+    console.error(
+      "[fetchRouteDataByCoords] failed:",
+      error?.response?.data || error?.message || error
+    );
+    return null;
+  }
+}
+
+const getAcceptedDriverToPickupMinutes = (payload = {}, rideSnapshot = null) => {
+  return (
+    pickFirstValue(
+      payload?.driver_to_pickup_duration_min,
+      payload?.driverToPickupDurationMin,
+      payload?.duration,
+      payload?.ride_details?.duration,
+      payload?.meta?.duration
+    ) ?? getRideDurationRaw(rideSnapshot) ?? null
+  );
+};
+
+const getFrontendRouteOverrideFromPayload = (payload = {}) => {
+  const durationMin = pickFirstValue(
+    payload?.duration,
+    payload?.driver_to_pickup_duration_min,
+    payload?.driverToPickupDurationMin,
+    payload?.ride_details?.duration,
+    payload?.meta?.duration
+  );
+  const distanceKm = pickFirstValue(
+    payload?.distance,
+    payload?.route_api_distance_km,
+    payload?.driver_to_pickup_distance_km,
+    payload?.ride_details?.route_api_distance_km,
+    payload?.meta?.route_api_distance_km
+  );
+  const distanceM = pickFirstValue(
+    payload?.driver_to_pickup_distance_m,
+    payload?.meta?.driver_to_pickup_distance_m
+  );
+
+  if (durationMin === null && distanceKm === null && distanceM === null) return null;
+  return { durationMin, distanceKm, distanceM };
+};
+
+const applyRouteOverrideToRidePayload = (ride = {}, routeOverride = null) => {
+  if (!ride || typeof ride !== "object" || !routeOverride) return ride;
+
+  const { durationMin, distanceKm, distanceM } = routeOverride;
+  const rideDetails =
+    ride.ride_details && typeof ride.ride_details === "object" ? { ...ride.ride_details } : {};
+  const meta = ride.meta && typeof ride.meta === "object" ? { ...ride.meta } : {};
+
+  if (durationMin !== null) {
+    rideDetails.duration = durationMin;
+    meta.duration = durationMin;
+  }
+  if (distanceKm !== null) {
+    rideDetails.route_api_distance_km = distanceKm;
+    meta.route_api_distance_km = distanceKm;
+  }
+  if (distanceM !== null) {
+    meta.driver_to_pickup_distance_m = distanceM;
+  }
+
+  return {
+    ...ride,
+    ...(durationMin !== null
+      ? {
+          duration: durationMin,
+          eta_min: durationMin,
+          route_api_duration_min: durationMin,
+          driver_to_pickup_duration_min: durationMin,
+        }
+      : {}),
+    ...(distanceKm !== null
+      ? {
+          distance: distanceKm,
+          route_api_distance_km: distanceKm,
+          driver_to_pickup_distance_km: distanceKm,
+        }
+      : {}),
+    ...(distanceM !== null ? { driver_to_pickup_distance_m: distanceM } : {}),
+    ride_details: {
+      ...(rideDetails || {}),
+    },
+    meta: {
+      ...(meta || {}),
+    },
+  };
+};
+
+function applyRouteOverrideToTrackedRide(io, rideId, routeOverride, options = {}) {
+  const { emit_bid_request = false } = options || {};
+  if (!rideId || !routeOverride) return;
+
+  const snapshot = getRideDetails(rideId);
+  if (snapshot && typeof snapshot === "object") {
+    const updatedSnapshot = applyRouteOverrideToRidePayload(snapshot, routeOverride);
+    saveRideDetails(
+      rideId,
+      attachCustomerFields(updatedSnapshot, updatedSnapshot?.user_details ?? snapshot?.user_details ?? null)
+    );
+  }
+
+  for (const [driverId, box] of driverRideInbox.entries()) {
+    const ride = box.get(rideId);
+    if (!ride) continue;
+
+    const updatedBase = applyRouteOverrideToRidePayload(ride, routeOverride);
+    const updated = attachCustomerFields(
+      {
+        ...updatedBase,
+        _ts: Date.now(),
+      },
+      updatedBase?.user_details ?? ride?.user_details ?? null
+    );
+
+    box.set(rideId, updated);
+    emitDriverPatch(io, driverId, [{ op: "upsert", ride: updated }]);
+
+    if (emit_bid_request) {
+      io.to(driverRoom(driverId)).emit("ride:bidRequest", sanitizeRidePayloadForClient(updated));
+    }
+  }
+}
+
+function emitRouteDataFromAcceptedOffer(io, rideId, driverId, driverToPickupMinutes) {
+  const successPayload = {
+    ride_id: rideId,
+    driver_id: driverId,
+    status: 1,
+    duration: driverToPickupMinutes,
+    at: Date.now(),
+  };
+  console.log("[ride:routeData][source=accepted-offer]", {
+    ride_id: rideId,
+    driver_id: driverId,
+    duration: successPayload.duration,
+  });
+
+  io.to(rideRoom(rideId)).emit("ride:routeData", successPayload);
+  io.to(driverRoom(driverId)).emit("ride:routeData", successPayload);
+
+  console.log("[ride:routeData] emitted from accepted offer", successPayload);
+}
 module.exports = (io, socket) => {
   socket.on("driver:getRidesList", ({ driver_id }) => {
     debugLog("driver:getRidesList", { driver_id }, socket.id);
@@ -1349,10 +1959,88 @@ module.exports = (io, socket) => {
     }
   });
 
-  socket.on("ride:dispatchToNearbyDrivers", (data) => {
+  socket.on("ride:dispatchToNearbyDrivers", async (data = {}) => {
     debugLog("ride:dispatchToNearbyDrivers", data, socket.id);
-    console.log("-> Received internal dispatch event:", data);
-    dispatchToNearbyDrivers(io, data);
+
+    const safeData = data && typeof data === "object" ? data : {};
+    const fallbackDistanceKm = toNumber(socket.nearbyRouteDistanceKm ?? null);
+    const fallbackDurationMin = toNumber(socket.nearbyRouteDurationMin ?? null);
+    const mergedData = { ...safeData };
+
+    const hasIncomingDistance =
+      pickFirstValue(
+        safeData?.route_api_distance_km,
+        safeData?.distance,
+        safeData?.meta?.route_api_distance_km
+      ) !== null;
+    const hasIncomingDuration =
+      pickFirstValue(
+        safeData?.duration,
+        safeData?.route_api_duration_min,
+        safeData?.meta?.duration,
+        safeData?.meta?.route_api_duration_min,
+        safeData?.eta_min,
+        safeData?.meta?.eta_min
+      ) !== null;
+
+    let appliedFrontendMetrics = false;
+    if (!hasIncomingDistance && fallbackDistanceKm !== null) {
+      mergedData.distance = fallbackDistanceKm;
+      mergedData.route_api_distance_km = fallbackDistanceKm;
+      appliedFrontendMetrics = true;
+    }
+    if (!hasIncomingDuration && fallbackDurationMin !== null) {
+      mergedData.duration = fallbackDurationMin;
+      mergedData.route_api_duration_min = fallbackDurationMin;
+      mergedData.eta_min = mergedData.eta_min ?? fallbackDurationMin;
+      appliedFrontendMetrics = true;
+    }
+
+    if (appliedFrontendMetrics) {
+      mergedData.route_metrics_source = "frontend";
+      mergedData.prefer_frontend_route_metrics = 1;
+    }
+
+    console.log("-> Received internal dispatch event:", mergedData);
+    await dispatchToNearbyDrivers(io, mergedData);
+  });
+
+  // ✅ Frontend can push duration/distance before accept to sync bidRequest + rides list
+  socket.on("ride:updateRouteMetrics", (payload = {}) => {
+    debugLog("ride:updateRouteMetrics", payload, socket.id);
+
+    const rideId = toNumber(payload?.ride_id);
+    if (!rideId) {
+      console.log("⚠️ ride:updateRouteMetrics ignored: missing ride_id");
+      return;
+    }
+
+    const routeOverride = getFrontendRouteOverrideFromPayload(payload);
+    if (!routeOverride) {
+      console.log(`⚠️ ride:updateRouteMetrics ignored: missing duration/distance (ride ${rideId})`);
+      return;
+    }
+
+    applyRouteOverrideToTrackedRide(io, rideId, routeOverride, {
+      emit_bid_request: true,
+    });
+
+    const updatedSnapshot = getRideDetails(rideId) ?? getRideSnapshotForRedispatch(rideId);
+    const duration = getRideDurationRaw(updatedSnapshot);
+    const distanceKm = getRideDistanceKm(updatedSnapshot);
+
+    socket.emit("ride:routeMetricsUpdated", {
+      ride_id: rideId,
+      duration: duration ?? null,
+      distance: distanceKm ?? null,
+      at: Date.now(),
+    });
+
+    console.log("[ride:updateRouteMetrics] applied", {
+      ride_id: rideId,
+      duration: duration ?? routeOverride?.durationMin ?? null,
+      distance: distanceKm ?? routeOverride?.distanceKm ?? null,
+    });
   });
 
   socket.on("ride:cancel", (payload = {}) => {
@@ -1537,7 +2225,7 @@ module.exports = (io, socket) => {
     const rideId = toNumber(payload?.ride_id);
     const driverId = toNumber(socket.driverId);
     const offeredPrice = toNumber(payload?.offered_price);
-
+   
     if (!driverId || !rideId || offeredPrice === null) {
       console.log(
         `⚠️ Invalid bid attempt - missing ride_id or driver_id or offered_price (socket: ${socket.id})`
@@ -1551,7 +2239,8 @@ module.exports = (io, socket) => {
       return;
     }
 
-    const currency = toNumber(payload?.currency) ?? 1;
+    const currencyRaw = toNumber(payload?.currency);
+    const currency = currencyRaw !== null && currencyRaw > 0 ? currencyRaw : 1;
     const finalPrice = round2(offeredPrice * currency);
     const rideSnapshot =
       driverRideInbox.get(driverId)?.get(rideId) ??
@@ -1605,11 +2294,11 @@ module.exports = (io, socket) => {
 
     const payloadDurationFromMin =
       payloadDriverToPickupDurationMin !== null
-        ? Math.round(payloadDriverToPickupDurationMin * 60)
+        ? payloadDriverToPickupDurationMin * 60
         : null;
     const snapshotDurationFromMin =
       snapshotDriverToPickupDurationMin !== null
-        ? Math.round(snapshotDriverToPickupDurationMin * 60)
+        ? snapshotDriverToPickupDurationMin * 60
         : null;
 
     const driverToPickupDurationS =
@@ -1624,24 +2313,145 @@ module.exports = (io, socket) => {
     const driverToPickupDistanceKm =
       driverToPickupDistanceM !== null ? round2(driverToPickupDistanceM / 1000) : null;
     const driverToPickupDurationMin =
-      driverToPickupDurationS !== null ? round2(driverToPickupDurationS / 60) : null;
+      driverToPickupDurationS !== null ? driverToPickupDurationS / 60 : null;
 
-    const bidMeta = {
-      ...payloadMeta,
-      ...(driverToPickupDistanceM !== null
-        ? {
-            driver_to_pickup_distance_m: driverToPickupDistanceM,
-            driver_to_pickup_distance_km: driverToPickupDistanceKm,
-          }
-        : {}),
-      ...(driverToPickupDurationS !== null
-        ? {
-            driver_to_pickup_duration_s: driverToPickupDurationS,
-            driver_to_pickup_duration_min: driverToPickupDurationMin,
-            estimated_arrival_min: driverToPickupDurationMin,
-          }
-        : {}),
-    };
+    // Keep frontend/snapshot values authoritative. Route API is fallback only when missing.
+    const shouldFetchRouteApi =
+      (driverToPickupDurationMin === null || driverToPickupDistanceKm === null) &&
+      driverLong !== null &&
+      driverLat !== null &&
+      pickupLongForEta !== null &&
+      pickupLatForEta !== null;
+
+    let routeApiData = null;
+    if (shouldFetchRouteApi) {
+      routeApiData = await fetchRouteDataByCoords({
+        startLongitude: driverLong,
+        startLatitude: driverLat,
+        endLongitude: pickupLongForEta,
+        endLatitude: pickupLatForEta,
+        requested_at: new Date().toISOString(),
+      });
+    }
+
+    // حاول التقاط الوقت/المسافة من API بأي اسم شائع (fallback only)
+    const apiDurationMin = toNumber(routeApiData?.duration);
+    const apiEtaMin = apiDurationMin !== null ? apiDurationMin : null;
+    const apiDurationS = apiEtaMin !== null ? Math.round(apiEtaMin * 60) : null;
+    const apiDistanceKm =
+      toNumber(routeApiData?.route) ??
+      toNumber(routeApiData?.distance_km) ??
+      toNumber(routeApiData?.total_distance) ??
+      null;
+
+    const finalDriverToPickupDistanceKm =
+      driverToPickupDistanceKm !== null ? driverToPickupDistanceKm : apiDistanceKm;
+    const finalDriverToPickupDurationS =
+      driverToPickupDurationS !== null ? driverToPickupDurationS : apiDurationS;
+    const finalDriverToPickupDurationMin =
+      driverToPickupDurationMin !== null ? driverToPickupDurationMin : apiEtaMin;
+
+    const currentSnapshot = getRideDetails(rideId) ?? {};
+    const updatedSnapshot = attachCustomerFields(
+      {
+        ...currentSnapshot,
+        ...(driverToPickupDistanceM !== null ? { driver_to_pickup_distance_m: driverToPickupDistanceM } : {}),
+        ...(finalDriverToPickupDistanceKm !== null
+          ? {
+              driver_to_pickup_distance_km: finalDriverToPickupDistanceKm,
+              route_api_distance_km: finalDriverToPickupDistanceKm,
+              distance: finalDriverToPickupDistanceKm,
+            }
+          : {}),
+        ...(finalDriverToPickupDurationS !== null ? { driver_to_pickup_duration_s: finalDriverToPickupDurationS } : {}),
+        ...(finalDriverToPickupDurationMin !== null
+          ? {
+              driver_to_pickup_duration_min: finalDriverToPickupDurationMin,
+              estimated_arrival_min: finalDriverToPickupDurationMin,
+              duration: finalDriverToPickupDurationMin,
+              eta_min: finalDriverToPickupDurationMin,
+              route_api_duration_min: finalDriverToPickupDurationMin,
+            }
+          : {}),
+        ride_details: {
+          ...(currentSnapshot?.ride_details && typeof currentSnapshot.ride_details === "object"
+            ? currentSnapshot.ride_details
+            : {}),
+          ...(finalDriverToPickupDurationMin !== null
+            ? { duration: finalDriverToPickupDurationMin }
+            : {}),
+          ...(finalDriverToPickupDistanceKm !== null
+            ? { route_api_distance_km: finalDriverToPickupDistanceKm }
+            : {}),
+        },
+        meta: {
+          ...(currentSnapshot?.meta && typeof currentSnapshot.meta === "object"
+            ? currentSnapshot.meta
+            : {}),
+          ...(driverToPickupDistanceM !== null
+            ? { driver_to_pickup_distance_m: driverToPickupDistanceM }
+            : {}),
+          ...(finalDriverToPickupDistanceKm !== null
+            ? {
+                driver_to_pickup_distance_km: finalDriverToPickupDistanceKm,
+                route_api_distance_km: finalDriverToPickupDistanceKm,
+              }
+            : {}),
+          ...(finalDriverToPickupDurationS !== null
+            ? { driver_to_pickup_duration_s: finalDriverToPickupDurationS }
+            : {}),
+          ...(finalDriverToPickupDurationMin !== null
+            ? {
+                driver_to_pickup_duration_min: finalDriverToPickupDurationMin,
+                estimated_arrival_min: finalDriverToPickupDurationMin,
+                duration: finalDriverToPickupDurationMin,
+              }
+            : {}),
+          ...(routeApiData && typeof routeApiData === "object"
+            ? { route_api_data: routeApiData }
+            : {}),
+        },
+      },
+      currentSnapshot?.user_details ?? null
+    );
+    saveRideDetails(rideId, updatedSnapshot);
+
+const bidMeta = {
+  ...payloadMeta,
+
+  ...(apiEtaMin !== null
+    ? { driver_to_pickup_api_duration_min: apiEtaMin }
+    : {}),
+
+  ...(driverToPickupDistanceM !== null || finalDriverToPickupDistanceKm !== null
+    ? {
+        ...(driverToPickupDistanceM !== null
+          ? { driver_to_pickup_distance_m: driverToPickupDistanceM }
+          : {}),
+        ...(finalDriverToPickupDistanceKm !== null
+          ? { driver_to_pickup_distance_km: finalDriverToPickupDistanceKm }
+          : {}),
+      }
+    : {}),
+
+  ...(finalDriverToPickupDurationMin !== null || finalDriverToPickupDurationS !== null
+    ? {
+        ...(finalDriverToPickupDurationS !== null
+          ? { driver_to_pickup_duration_s: finalDriverToPickupDurationS }
+          : {}),
+        ...(finalDriverToPickupDurationMin !== null
+          ? {
+              driver_to_pickup_duration_min: finalDriverToPickupDurationMin,
+              estimated_arrival_min: finalDriverToPickupDurationMin,
+            }
+          : {}),
+      }
+    : {}),
+
+  ...(routeApiData && typeof routeApiData === "object"
+    ? { route_api_data: routeApiData }
+    : {}),
+};
 
     const driverMeta = driverLocationService.getMeta(driverId) || {};
     const driverServiceId =
@@ -1723,53 +2533,77 @@ module.exports = (io, socket) => {
       patch_inboxes: true,
     });
 
-    const ridePayload = {
-      ride_id: rideId,
-      driver_id: driverId,
-      offered_price: offeredPrice,
-      bidding_time: Date.now(),
+const ridePayload = {
+  ride_id: rideId,
+  driver_id: driverId,
+  offered_price: offeredPrice,
+  bidding_time: Date.now(),
 
-      pickup_lat: payload.pickup_lat ?? null,
-      pickup_long: payload.pickup_long ?? null,
-      pickup_address: payload.pickup_address ?? null,
-      destination_lat: toNumber(payload.destination_lat) ?? null,
-      destination_long: toNumber(payload.destination_long) ?? null,
-      destination_address: payload.destination_address ?? null,
+  pickup_lat: payload.pickup_lat ?? null,
+  pickup_long: payload.pickup_long ?? null,
+  pickup_address: payload.pickup_address ?? null,
+  destination_lat: toNumber(payload.destination_lat) ?? null,
+  destination_long: toNumber(payload.destination_long) ?? null,
+  destination_address: payload.destination_address ?? null,
 
-      radius: payload.radius ?? 0,
-      user_bid_price: offeredPrice,
-      user_bid_price_final: finalPrice,
-      min_fare_amount: payload.min_fare_amount ?? 0,
-      service_type_id: toNumber(payload.service_type_id) ?? null,
-      service_category_id: toNumber(payload.service_category_id) ?? null,
-      created_at: payload.created_at ?? null,
-      ...(driverToPickupDistanceM !== null
-        ? {
-            driver_to_pickup_distance_m: driverToPickupDistanceM,
-            driver_to_pickup_distance_km: driverToPickupDistanceKm,
-          }
-        : {}),
-      ...(driverToPickupDurationS !== null
-        ? {
-            driver_to_pickup_duration_s: driverToPickupDurationS,
-            driver_to_pickup_duration_min: driverToPickupDurationMin,
-            estimated_arrival_min: driverToPickupDurationMin,
-          }
-        : {}),
-      meta: bidMeta,
+  radius: payload.radius ?? 0,
+  user_bid_price: offeredPrice,
+  user_bid_price_final: finalPrice,
+  min_fare_amount:
+    toNumber(payload?.min_fare_amount) ??
+    toNumber(rideSnapshot?.min_fare_amount) ??
+    null,
+  service_type_id: toNumber(payload.service_type_id) ?? null,
+  service_category_id: toNumber(payload.service_category_id) ?? null,
+  created_at: payload.created_at ?? null,
 
-      driver_details: driverDetails,
-      address_list: payload.address_list ?? [],
-      user_timeout: payload.user_timeout ?? 60,
-      driver_algo: payload.driver_algo ?? "default_algorithm",
-      bid_limit: payload.bid_limit ?? 5,
-      can_bid_more: payload.can_bid_more ?? true,
-      remain_bid: (payload.bid_limit ?? 5) - (payload.user_bid_count ?? 0),
+  ...(apiEtaMin !== null
+    ? { driver_to_pickup_api_duration_min: apiEtaMin }
+    : {}),
 
-      // ✅ timer fields (SECONDS)
-      ...(timer ? timer : {}),
-    };
+  ...(driverToPickupDistanceM !== null || finalDriverToPickupDistanceKm !== null
+    ? {
+        ...(driverToPickupDistanceM !== null
+          ? { driver_to_pickup_distance_m: driverToPickupDistanceM }
+          : {}),
+        ...(finalDriverToPickupDistanceKm !== null
+          ? { driver_to_pickup_distance_km: finalDriverToPickupDistanceKm }
+          : {}),
+      }
+    : {}),
 
+  ...(finalDriverToPickupDurationS !== null || finalDriverToPickupDurationMin !== null
+    ? {
+        ...(finalDriverToPickupDurationS !== null
+          ? { driver_to_pickup_duration_s: finalDriverToPickupDurationS }
+          : {}),
+        ...(finalDriverToPickupDurationMin !== null
+          ? {
+              driver_to_pickup_duration_min: finalDriverToPickupDurationMin,
+              estimated_arrival_min: finalDriverToPickupDurationMin,
+            }
+          : {}),
+      }
+    : {}),
+
+  meta: {
+    ...bidMeta,
+    ...(apiEtaMin !== null
+      ? { driver_to_pickup_api_duration_min: apiEtaMin }
+      : {}),
+  },
+
+  driver_details: driverDetails,
+  address_list: payload.address_list ?? [],
+  user_timeout: payload.user_timeout ?? 60,
+  driver_algo: payload.driver_algo ?? "default_algorithm",
+  bid_limit: payload.bid_limit ?? 5,
+  can_bid_more: payload.can_bid_more ?? true,
+  remain_bid: (payload.bid_limit ?? 5) - (payload.user_bid_count ?? 0),
+
+  // ✅ timer fields (SECONDS)
+  ...(timer ? timer : {}),
+};
     io.to(rideRoom(rideId)).emit("ride:newBid", ridePayload);
 
     console.log(`💰 Driver ${driverId} submitted bid ${offeredPrice} for ride ${rideId}`);
@@ -1943,8 +2777,7 @@ module.exports = (io, socket) => {
         expires_at: timer?.expires_at ?? null,
         timeout_ms: timer?.timeout_ms ?? null,
       };
-      dispatchToNearbyDrivers(io, redispatchData);
-    } else {
+      void dispatchToNearbyDrivers(io, redispatchData);    } else {
       console.log(`⚠️ redispatch skipped: no ride snapshot for ride ${rideId}`);
     }
 
@@ -1962,8 +2795,7 @@ module.exports = (io, socket) => {
     );
   });
 
-  socket.on("user:acceptOffer", (payload) => {
-    console.log("[user:acceptOffer] incoming payload:", payload, "socket:", socket.id);
+socket.on("user:acceptOffer", async (payload) => {    console.log("[user:acceptOffer] incoming payload:", payload, "socket:", socket.id);
     debugLog("user:acceptOffer", payload, socket.id);
 
     const rideId = toNumber(payload?.ride_id);
@@ -1975,6 +2807,8 @@ module.exports = (io, socket) => {
     }
 
     const rideSnapshot = getFullRideSnapshot(rideId, driverId);
+    let acceptedRideSnapshot = rideSnapshot;
+
 
     if (cancelledRides.has(rideId)) {
       console.log(`⚠️ user:acceptOffer ignored: ride ${rideId} is cancelled`);
@@ -2057,10 +2891,41 @@ module.exports = (io, socket) => {
           console.error("Error while calling accept bid API:", error?.response?.data || error.message);
         });
     }
+    // ✅ trust frontend values on accept (no recalculation)
+    const frontendRouteOverride = getFrontendRouteOverrideFromPayload(payload);
+    if (frontendRouteOverride) {
+      console.log("[user:acceptOffer][routeData-source=frontend-payload]", {
+        ride_id: rideId,
+        driver_id: driverId,
+        duration: frontendRouteOverride.durationMin,
+        distance: frontendRouteOverride.distanceKm,
+      });
+
+      applyRouteOverrideToTrackedRide(io, rideId, frontendRouteOverride, {
+        emit_bid_request: true,
+      });
+      acceptedRideSnapshot = getFullRideSnapshot(rideId, driverId) ?? acceptedRideSnapshot;
+    }
+
+    const acceptedMinutes = getAcceptedDriverToPickupMinutes(payload, acceptedRideSnapshot);
+
+    if (acceptedMinutes !== null) {
+      console.log("[user:acceptOffer][routeData-source=accepted-offer]", {
+        ride_id: rideId,
+        driver_id: driverId,
+        duration: acceptedMinutes,
+      });
+      emitRouteDataFromAcceptedOffer(io, rideId, driverId, acceptedMinutes);
+    } else {
+      console.log("[user:acceptOffer][routeData-source=none] missing duration in frontend payload", {
+        ride_id: rideId,
+        driver_id: driverId,
+      });
+    }
 
     finalizeAcceptedRide(io, rideId, driverId, finalPrice, {
       message: "User accepted the offer",
-      rideDetails: rideSnapshot,
+      rideDetails: acceptedRideSnapshot,
       userId,
     });
 

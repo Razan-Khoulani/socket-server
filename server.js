@@ -1,4 +1,5 @@
 // server.js
+require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -93,6 +94,42 @@ const round2 = (v) => {
   const n = toFiniteNumber(v);
   if (n == null) return null;
   return Math.round(n * 100) / 100;
+};
+
+const parseLatLongString = (value) => {
+  if (typeof value !== "string" || !value.includes(",")) return null;
+  const [rawLat, rawLong] = value.split(",").map((item) => item.trim());
+  const lat = toFiniteNumber(rawLat);
+  const lng = toFiniteNumber(rawLong);
+  if (lat == null || lng == null) return null;
+  return { lat, lng };
+};
+
+const resolveNamedPoint = (source, prefix) => {
+  if (!source || typeof source !== "object") return null;
+
+  const directLat = toFiniteNumber(
+    source[`${prefix}_lat`] ??
+      source[`${prefix}Lat`] ??
+      source[prefix]?.lat ??
+      source[prefix]?.latitude
+  );
+  const directLng = toFiniteNumber(
+    source[`${prefix}_long`] ??
+      source[`${prefix}Long`] ??
+      source[prefix]?.lng ??
+      source[prefix]?.long ??
+      source[prefix]?.longitude
+  );
+  if (directLat != null && directLng != null) {
+    return { lat: directLat, lng: directLng };
+  }
+
+  return parseLatLongString(
+    source[`${prefix}_latlong`] ??
+      source[`${prefix}LatLong`] ??
+      source[prefix]?.latlong
+  );
 };
 
 const formatDurationHms = (seconds) => {
@@ -658,7 +695,7 @@ app.post("/events/internal/driver-location", (req, res) => {
   res.json({ status: 1 });
 });
 
-app.post("/events/internal/ride-bid-dispatch", (req, res) => {
+app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
   console.log(
     "[ride-bid-dispatch] Incoming request from Laravel",
     req.body
@@ -668,9 +705,10 @@ app.post("/events/internal/ride-bid-dispatch", (req, res) => {
     service_type_id: req.body?.service_type_id ?? null,
     radius: req.body?.radius ?? null,
   });
+
   try {
-    biddingSocket.dispatchToNearbyDrivers(io, req.body);
-    res.json({ status: 1 });
+    const ok = await biddingSocket.dispatchToNearbyDrivers(io, req.body);
+    res.json({ status: ok ? 1 : 0 });
   } catch (e) {
     console.error("[ride-bid-dispatch] Failed:", e.message);
     res.status(500).json({ status: 0, message: "Dispatch failed" });
@@ -853,16 +891,53 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
     const lo = long != null ? Number(long) : null;
 
     if (status === 5) {
+      const pickupPoint = resolveNamedPoint(payload, "pickup");
+      const routeOpts = pickupPoint ? { pickup: pickupPoint } : {};
       if (Number.isFinite(la) && Number.isFinite(lo)) {
-        startRideRoute(rideId, { lat: la, lng: lo, at: Date.now() });
+        startRideRoute(
+          rideId,
+          { lat: la, lng: lo, at: Date.now() },
+          routeOpts
+        );
       } else {
-        startRideRoute(rideId);
+        startRideRoute(rideId, null, routeOpts);
       }
     }
+    const userId =
+      user_id ??
+      payload?.user_id ??
+      payload?.user_details?.user_id ??
+      payload?.user?.id ??
+      (typeof biddingSocket.getUserIdForRide === "function"
+        ? biddingSocket.getUserIdForRide(rideId)
+        : null);
+    const cancelBy =
+      typeof payload?.cancel_by === "string" && payload.cancel_by.trim() !== ""
+        ? payload.cancel_by.trim()
+        : null;
+    const cancelReasonId = Number.isFinite(Number(payload?.cancel_reason_id))
+      ? Number(payload.cancel_reason_id)
+      : Number.isFinite(Number(payload?.reason_id))
+      ? Number(payload.reason_id)
+      : null;
+
     const evt = {
       ride_id: rideId,
       ride_status: status,
+      ...(driverId ? { driver_id: driverId } : {}),
+      ...(Number.isFinite(Number(userId)) ? { user_id: Number(userId) } : {}),
+      ...(cancelBy ? { cancel_by: cancelBy } : {}),
+      ...(cancelReasonId != null ? { reason_id: cancelReasonId } : {}),
     };
+
+    if (status === 4) {
+      if (typeof biddingSocket.markRideCancelled === "function") {
+        biddingSocket.markRideCancelled(io, rideId);
+      } else if (typeof biddingSocket.removeRideFromAllInboxes === "function") {
+        biddingSocket.removeRideFromAllInboxes(io, rideId);
+        clearActiveRideByRideId(rideId);
+      }
+    }
 
     let destinationLat = toFiniteNumber(
       payload?.destination_lat ?? payload?.destination?.lat ?? payload?.destinationLat
@@ -973,19 +1048,23 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       console.log(
         `[status][emit] ride:${rideId} status:${status} -> room:ride:${rideId} (sockets:${count})`
       );
+
+      if (status === 4) {
+        const cancelledEvt = {
+          ...evt,
+          ended: true,
+          at: Date.now(),
+        };
+        io.to(`ride:${rideId}`).emit("ride:cancelled", cancelledEvt);
+        if (driverId) {
+          io.to(`driver:${driverId}`).emit("ride:cancelled", cancelledEvt);
+        }
+      }
     } else {
       console.log(
         `[status][dedupe] skip ride:statusUpdated ride:${rideId} status:${status}`
       );
     }
-    const userId =
-      user_id ??
-      payload?.user_id ??
-      payload?.user_details?.user_id ??
-      payload?.user?.id ??
-      (typeof biddingSocket.getUserIdForRide === "function"
-        ? biddingSocket.getUserIdForRide(rideId)
-        : null);
     if (userId) {
       const uid = Number(userId);
       console.log(`[status][emit] ride:${rideId} status:${status} -> user:${uid} (no direct room emit)`);
@@ -1015,7 +1094,7 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
         );
       }
 
-      if (typeof biddingSocket.closeRideBidding === "function") {
+      if (status !== 4 && typeof biddingSocket.closeRideBidding === "function") {
         biddingSocket.closeRideBidding(io, rideId);
       }
 
@@ -1064,6 +1143,8 @@ app.post("/ride/start-tracking", (req, res) => {
       pickup_long,
       destination_lat,
       destination_long,
+      current_lat,
+      current_long,
     } = body;
     console.log("[tracking][start] request:", body);
     if (
@@ -1086,6 +1167,20 @@ app.post("/ride/start-tracking", (req, res) => {
       lat: Number(destination_lat),
       long: Number(destination_long),
     };
+    const currentLat = toFiniteNumber(current_lat);
+    const currentLong = toFiniteNumber(current_long);
+
+    if (currentLat != null && currentLong != null) {
+      startRideRoute(
+        rideId,
+        { lat: currentLat, lng: currentLong, at: Date.now() },
+        { pickup: { lat: pickup.lat, lng: pickup.long } }
+      );
+    } else {
+      startRideRoute(rideId, null, {
+        pickup: { lat: pickup.lat, lng: pickup.long },
+      });
+    }
 
     // بدء التتبع باستخدام الإحداثيات من الذاكرة
     rideTracking.startTracking(io, rideId, pickup, destination);
@@ -1243,10 +1338,77 @@ app.post("/ride/arrived", (req, res) => {
   }
 });
 
+app.post("/webhooks/ride-cancelled", (req, res) => {
+  try {
+    const body = req.body || {};
+    const { ride_id, user_id, reason_id, driver_id } = body;
+
+    if (ride_id == null) {
+      return res.status(400).json({ status: 0, message: "ride_id required" });
+    }
+
+    const rideId = Number(ride_id);
+    if (!Number.isFinite(rideId) || rideId <= 0) {
+      return res.status(400).json({ status: 0, message: "invalid ride_id" });
+    }
+
+    const driverId = Number.isFinite(Number(driver_id))
+      ? Number(driver_id)
+      : getActiveDriverByRide(rideId) ?? null;
+    const userId = Number.isFinite(Number(user_id)) ? Number(user_id) : null;
+    const reasonId = Number.isFinite(Number(reason_id)) ? Number(reason_id) : null;
+    const at = Date.now();
+
+    const statusEvt = {
+      ride_id: rideId,
+      ride_status: 4,
+    };
+    const cancelledEvt = {
+      ride_id: rideId,
+      ride_status: 4,
+      user_id: userId,
+      driver_id: driverId,
+      reason_id: reasonId,
+      cancel_by: "user",
+      ended: true,
+      at,
+    };
+
+    if (typeof biddingSocket.markRideCancelled === "function") {
+      biddingSocket.markRideCancelled(io, rideId);
+    } else {
+      if (typeof biddingSocket.removeRideFromAllInboxes === "function") {
+        biddingSocket.removeRideFromAllInboxes(io, rideId);
+      }
+      clearActiveRideByRideId(rideId);
+    }
+    clearRideRoute(rideId);
+
+    io.to(`ride:${rideId}`).emit("ride:statusUpdated", statusEvt);
+    io.to(`ride:${rideId}`).emit("ride:cancelled", cancelledEvt);
+    io.to(`ride:${rideId}`).emit("ride:ended", cancelledEvt);
+
+    if (driverId) {
+      io.to(`driver:${driverId}`).emit("ride:statusUpdated", statusEvt);
+      io.to(`driver:${driverId}`).emit("ride:cancelled", cancelledEvt);
+      io.to(`driver:${driverId}`).emit("ride:ended", cancelledEvt);
+    }
+
+    console.log(
+      `[cancel-webhook] ride:${rideId} user:${userId ?? "null"} driver:${driverId ?? "null"} reason:${reasonId ?? "null"}`
+    );
+
+    return res.json({ status: 1, ride_id: rideId });
+  } catch (e) {
+    console.error("❌ /webhooks/ride-cancelled error:", e);
+    return res.status(500).json({ status: 0, message: "Server error" });
+  }
+});
 
 
-app.post("/events/internal/ride-dispatch-retry", (req, res) => {
-  const {
+
+app.post("/events/internal/ride-dispatch-retry", async (req, res) => {
+    const {
     ride_id,
     pickup_lat,
     pickup_long,
@@ -1279,8 +1441,7 @@ app.post("/events/internal/ride-dispatch-retry", (req, res) => {
   );
 
   const nearby = driverLocationService.getNearbyDriversFromMemory(lat, long, rad);
-  const ok = biddingSocket.dispatchToNearbyDrivers(io, {
-    ...req.body,
+  const ok = biddingSocket.dispatchToNearbyDrivers(io, {    ...req.body,
     ride_id: rideId,
     pickup_lat: lat,
     pickup_long: long,
@@ -1310,5 +1471,6 @@ server.listen(SOCKET_BIND_PORT, SOCKET_BIND_HOST, () => {
   );
   console.log("Started at:", new Date().toLocaleString());
 });
+
 
 

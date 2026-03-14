@@ -1,4 +1,4 @@
-﻿// sockets/user.socket.js
+﻿﻿// sockets/user.socket.js
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios");
 const { setUserDetails } = require("../store/users.store");
@@ -14,15 +14,27 @@ const debugLog = (event, payload, socketId) => {
   console.log("[user.socket]", event, "socket:", socketId, "payload:", payload);
 };
 
-const INITIAL_RADIUS = 500; // نبدأ بـ 500 متر
-const MAX_RADIUS = 5000; // حد أقصى
+const INITIAL_RADIUS = 5000;
+const MAX_RADIUS = 5000;
 const RADIUS_MULTIPLIER = 2;
-const NEARBY_EVERY_MS = 3000; // كل قديش نبعت تحديث
-const MAX_DRIVER_LOCATION_AGE_MS = 2 * 60 * 1000; // ignore stale drivers (2 minutes)
+const NEARBY_EVERY_MS = 3000;
+const MAX_DRIVER_LOCATION_AGE_MS = 2 * 60 * 1000;
+
+// ✅ NEW: road-based filtering
+const ROAD_RADIUS_METERS = 5000; // الفلترة النهائية حسب الطريق
+const AIR_CANDIDATE_RADIUS_METERS = 8000; // مرشحين أوليين بشكل هوائي قبل فلترة الطريق
+const MAX_ROAD_FILTER_CANDIDATES = Number.isFinite(Number(process.env.MAX_ROAD_FILTER_CANDIDATES))
+  ? Math.max(1, Number(process.env.MAX_ROAD_FILTER_CANDIDATES))
+  : 25;
+
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
   "https://aiactive.co.uk/backend/backend-laravel/public";
+
+const LARAVEL_GET_ROUTE_PATH =
+  process.env.LARAVEL_GET_ROUTE_PATH || "/api/getRoute";
+
 const LARAVEL_TIMEOUT_MS = 7000;
 const VEHICLE_ICON_RELATIVE_DIR = "assets/images/service-category/transport-service-type";
 const DRIVER_IMAGE_RELATIVE_DIR = "assets/images/profile-images/provider";
@@ -121,15 +133,12 @@ const normalizeDriverImageUrl = (value) =>
 const buildVehicleTypesSignature = (types) => {
   if (!Array.isArray(types) || types.length === 0) return "[]";
 
-  // make stable ordering regardless of "drivers_count" ties
   const stable = [...types].sort((a, b) => {
     const aId = Number(a?.service_type_id ?? 0);
     const bId = Number(b?.service_type_id ?? 0);
     return aId - bId;
   });
 
-  // include only fields that matter to UI
-  // (if any of these changes => emit)
   const compact = stable.map((t) => ({
     service_type_id: toNumber(t?.service_type_id),
     service_category_id: toNumber(t?.service_category_id),
@@ -205,6 +214,120 @@ const fetchVehicleFaresFromApi = async (
   }
 };
 
+// ✅ NEW: helper extracts road distance from route API response
+const extractRoadDistanceMeters = (payload) => {
+  if (!payload || typeof payload !== "object") return null;
+
+  const directM = toNumber(
+    payload?.distance_m ??
+      payload?.distanceMeters ??
+      payload?.distance_meters ??
+      null
+  );
+  if (directM !== null) return directM;
+
+  const km = toNumber(
+    payload?.route ??
+      payload?.distance_km ??
+      payload?.total_distance ??
+      null
+  );
+  if (km !== null) return Math.round(km * 1000);
+
+  const nestedM = toNumber(
+    payload?.routes?.[0]?.distanceMeters ??
+      payload?.routes?.[0]?.legs?.[0]?.distance?.value ??
+      null
+  );
+  if (nestedM !== null) return nestedM;
+
+  return null;
+};
+
+// ✅ NEW: driver -> pickup road metrics via Laravel route API
+const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, pickupLong) => {
+  const la1 = toNumber(driverLat);
+  const lo1 = toNumber(driverLong);
+  const la2 = toNumber(pickupLat);
+  const lo2 = toNumber(pickupLong);
+
+  if (la1 === null || lo1 === null || la2 === null || lo2 === null) {
+    return {
+      road_distance_m: null,
+      road_duration_s: null,
+      road_duration_min: null,
+      raw: null,
+    };
+  }
+
+  try {
+    const res = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
+      params: {
+        startLongitude: lo1,
+        startLatitude: la1,
+        endLongitude: lo2,
+        endLatitude: la2,
+        requested_at: new Date().toISOString(),
+      },
+      timeout: LARAVEL_TIMEOUT_MS,
+    });
+
+    const data = res?.data ?? null;
+    const roadDistanceM = extractRoadDistanceMeters(data);
+    const durationMin = toNumber(data?.duration ?? null);
+    const durationS = durationMin !== null ? Math.round(durationMin * 60) : null;
+
+    return {
+      road_distance_m: roadDistanceM,
+      road_duration_s: durationS,
+      road_duration_min: durationMin !== null ? roundMoney(durationMin) : null,
+      raw: data,
+    };
+  } catch (e) {
+    console.warn("[driverToPickupRoadMetrics] failed:", e?.response?.data || e?.message || e);
+    return {
+      road_distance_m: null,
+      road_duration_s: null,
+      road_duration_min: null,
+      raw: null,
+    };
+  }
+};
+
+// ✅ NEW: final road-based filtering
+const filterDriversByRoadRadius = async (drivers, pickupLat, pickupLong, roadRadiusM) => {
+  const list = Array.isArray(drivers) ? drivers.slice(0, MAX_ROAD_FILTER_CANDIDATES) : [];
+  const results = await Promise.all(
+    list.map(async (d) => {
+      const driverId = toNumber(d?.driver_id);
+      const driverLat = toNumber(d?.lat);
+      const driverLong = toNumber(d?.long);
+
+      if (!driverId || driverLat === null || driverLong === null) return null;
+
+      const metrics = await fetchDriverToPickupRoadMetrics(
+        driverLat,
+        driverLong,
+        pickupLat,
+        pickupLong
+      );
+
+      if (metrics.road_distance_m === null) return null;
+      if (metrics.road_distance_m > roadRadiusM) return null;
+
+      return {
+        ...d,
+        driver_to_pickup_distance_m: metrics.road_distance_m,
+        driver_to_pickup_distance_km: roundMoney(metrics.road_distance_m / 1000),
+        driver_to_pickup_duration_s: metrics.road_duration_s,
+        driver_to_pickup_duration_min: metrics.road_duration_min,
+      };
+    })
+  );
+
+  return results.filter(Boolean);
+};
+
 const extractRouteDistanceKm = (payload) => {
   if (payload == null) return null;
   if (typeof payload === "number") return roundMoney(payload);
@@ -252,8 +375,66 @@ const extractRouteDistanceKm = (payload) => {
     return roundMoney(Number(meters) / 1000);
   }
 
-  const distanceMaybeKm = toNumber(route.distance ?? null);
-  if (distanceMaybeKm !== null) return roundMoney(distanceMaybeKm);
+  const distanceMaybeRaw = toNumber(route.distance ?? null);
+  if (distanceMaybeRaw !== null) return roundMoney(distanceMaybeRaw / 60);
+
+  return null;
+};
+
+const extractRouteDurationMin = (payload) => {
+  if (payload == null) return null;
+  if (typeof payload === "number") return roundMoney(payload);
+  if (typeof payload === "string" && payload.trim() !== "") {
+    const n = toNumber(payload);
+    if (n !== null) return roundMoney(n);
+  }
+  if (typeof payload !== "object") return null;
+
+  const route =
+    payload.route ??
+    payload.route_info ??
+    payload.routeInfo ??
+    payload.trip ??
+    payload.path ??
+    payload;
+
+  if (typeof route === "number") return roundMoney(route);
+  if (typeof route === "string" && route.trim() !== "") {
+    const n = toNumber(route);
+    if (n !== null) return roundMoney(n);
+  }
+  if (!route || typeof route !== "object") return null;
+
+  const directMin = toNumber(
+    route.duration_min ??
+      route.durationMin ??
+      route.route_api_duration_min ??
+      route.driver_to_pickup_duration_min ??
+      route.eta_min ??
+      route.etaMin ??
+      route.time_min ??
+      route.timeMin ??
+      route.duration ??
+      null
+  );
+  if (directMin !== null) return roundMoney(directMin);
+
+  let durationSec = toNumber(
+    route.duration_s ??
+      route.durationSec ??
+      route.durationSeconds ??
+      route.driver_to_pickup_duration_s ??
+      route.time_s ??
+      route.timeSec ??
+      null
+  );
+  if (durationSec === null && route?.routes?.[0]?.durationSeconds != null) {
+    durationSec = toNumber(route.routes[0].durationSeconds);
+  }
+  if (durationSec === null && route?.routes?.[0]?.legs?.[0]?.duration?.value != null) {
+    durationSec = toNumber(route.routes[0].legs[0].duration.value);
+  }
+  if (durationSec !== null) return roundMoney(durationSec / 60);
 
   return null;
 };
@@ -271,15 +452,15 @@ const extractUserDetails = (payload) => {
   if (!userId) return null;
 
   const userName = src?.user_name ?? src?.name ?? null;
-const userToken =
-  src?.user_token ??
-  src?.token ??
-  payload?.user_token ??
-  payload?.token ??
-  payload?.access_token ??
-  payload?.accessToken ??
-  null;
-    const genderRaw = src?.gender ?? src?.user_gender ?? src?.gender_id ?? null;
+  const userToken =
+    src?.user_token ??
+    src?.token ??
+    payload?.user_token ??
+    payload?.token ??
+    payload?.access_token ??
+    payload?.accessToken ??
+    null;
+  const genderRaw = src?.gender ?? src?.user_gender ?? src?.gender_id ?? null;
   const userGender =
     genderRaw === "" || genderRaw == null
       ? null
@@ -287,8 +468,10 @@ const userToken =
       ? Number(genderRaw)
       : genderRaw;
   const countryCode = src?.select_country_code ?? src?.country_code ?? null;
-  const contactNumber = src?.contact_number ?? src?.user_phone ?? src?.phone ?? src?.mobile ?? null;
-  const userImage = src?.profile_image ?? src?.user_image ?? src?.image ?? src?.avatar ?? null;
+  const contactNumber =
+    src?.contact_number ?? src?.user_phone ?? src?.phone ?? src?.mobile ?? null;
+  const userImage =
+    src?.profile_image ?? src?.user_image ?? src?.image ?? src?.avatar ?? null;
 
   return {
     user_id: userId,
@@ -306,14 +489,12 @@ const userToken =
 const normalizeEpochSeconds = (value) => {
   const n = toNumber(value);
   if (n === null) return null;
-  // Backward compatibility: convert legacy epoch-millis to epoch-seconds.
   return n > 1e11 ? Math.floor(n / 1000) : Math.floor(n);
 };
 
 const normalizeDurationSeconds = (value) => {
   const n = toNumber(value);
   if (n === null) return null;
-  // Backward compatibility: old flows used milliseconds in timeout_ms.
   return n > 10000 ? Math.floor(n / 1000) : Math.floor(n);
 };
 
@@ -354,7 +535,6 @@ const makeTimer = () => {
   };
 };
 
-// ensure ride snapshot has stable timer (persist into bidding.socket snapshot)
 const ensureRideTimer = (rideId, rideDetails) => {
   if (!rideId) return null;
 
@@ -362,7 +542,6 @@ const ensureRideTimer = (rideId, rideDetails) => {
     const normalized = normalizeTimerFields(rideDetails);
     if (!normalized) return makeTimer();
 
-    // Persist normalized timer back so all subsequent emits keep one unit.
     if (rideDetails && typeof biddingSocket.saveRideDetails === "function") {
       const rawServer = toNumber(rideDetails.server_time);
       const rawExpires = toNumber(rideDetails.expires_at);
@@ -400,22 +579,17 @@ module.exports = (io, socket) => {
   socket.nearbyInterval = null;
   socket.nearbyRadius = INITIAL_RADIUS;
 
-  // ✅ optional: فلترة حسب نوع السيارة (TransportVehicleType.id)
   socket.nearbyServiceTypeId = null;
   socket.nearbyServiceCategoryId = null;
   socket.nearbyRouteDistanceKm = null;
+  socket.nearbyRouteDurationMin = null;
   socket.nearbyRequiredGender = null;
   socket.nearbyNeedChildSeat = null;
   socket.nearbyNeedHandicap = null;
 
-  // ✅ NEW: dedupe signature for vehicle types
   socket.lastVehicleTypesSig = null;
-
-  // ✅ NEW: current ride id (used for ride:pricingSnapshot)
   socket.currentRideId = null;
 
-  // cache fares per service_category_id + distance_km to avoid repeated API calls
-  // Map<serviceCatId, { distanceKm: number, map: Map<vehicleTypeId, fare> }>
   socket.nearbyFareCache = new Map();
 
   const applyNearbyFiltersFromPayload = (payload = {}, options = {}) => {
@@ -495,8 +669,16 @@ module.exports = (io, socket) => {
     if (socket.nearbyRouteDistanceKm !== rounded) {
       socket.nearbyRouteDistanceKm = rounded;
       socket.nearbyFareCache.clear();
+      socket.lastVehicleTypesSig = null;
+    }
+  };
 
-      // ✅ distance changed => vehicle fares/signature will likely change
+  const setNearbyRouteDurationMin = (value) => {
+    const n = toNumber(value);
+    if (n === null) return;
+    const rounded = roundMoney(n);
+    if (socket.nearbyRouteDurationMin !== rounded) {
+      socket.nearbyRouteDurationMin = rounded;
       socket.lastVehicleTypesSig = null;
     }
   };
@@ -512,7 +694,6 @@ module.exports = (io, socket) => {
     socket.isUser = true;
     socket.userId = details.user_id;
     setUserDetails(details.user_id, details);
-    // NOTE: user-specific room is intentionally not used (ride room only)
 
     if (typeof biddingSocket.refreshUserDetailsForUserId === "function") {
       biddingSocket.refreshUserDetailsForUserId(io, details.user_id, details);
@@ -557,7 +738,6 @@ module.exports = (io, socket) => {
 
     const driverId = getActiveDriverByRide(rideId);
     if (!driverId) return;
-
     if (!changed && snapshot) return;
 
     io.to(`driver:${driverId}`).emit("ride:statusPreUpdate", {
@@ -569,17 +749,14 @@ module.exports = (io, socket) => {
     });
   };
 
-  // ✅ customer sends login info explicitly
   socket.on("user:loginInfo", (payload) => {
     registerUser(payload, "user:loginInfo");
   });
 
-  // ✅ some clients send initialData (alias)
   socket.on("user:initialData", (payload) => {
     registerUser(payload, "user:initialData");
   });
 
-  // ✅ NEW: user joins ride room from THIS file so we can use socket.currentRideId safely
   socket.on("user:joinRideRoom", (payload = {}) => {
     debugLog("user:joinRideRoom", payload, socket.id);
 
@@ -596,8 +773,6 @@ module.exports = (io, socket) => {
 
     socket.join(`ride:${rideId}`);
     socket.currentRideId = rideId;
-
-    // ✅ ensure next pricing snapshot can emit even لو ما تغيرت types حسب signature القديمة
     socket.lastVehicleTypesSig = null;
 
     socket.emit("ride:joined", { ride_id: rideId });
@@ -614,12 +789,11 @@ module.exports = (io, socket) => {
     }
   };
 
-  // ✅ helper يرجّع أنواع السيارات المتوفرة ضمن القريبين (online فقط) + ✅ exclude busy drivers
   const buildNearbyVehicleTypes = async (lat, long) => {
     const nearbyAll = driverLocationService.getNearbyDriversFromMemory(
       lat,
       long,
-      socket.nearbyRadius,
+      AIR_CANDIDATE_RADIUS_METERS,
       {
         only_online: true,
         max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
@@ -629,13 +803,19 @@ module.exports = (io, socket) => {
       }
     );
 
-    // ✅ NEW: exclude busy drivers (active ride)
-    const nearbyDrivers = nearbyAll.filter((d) => {
+    const nearbyAvailable = nearbyAll.filter((d) => {
       const dId = toNumber(d?.driver_id);
       if (!dId) return false;
       const activeRide = getActiveRideByDriver(dId);
       return !activeRide;
     });
+
+    const nearbyDrivers = await filterDriversByRoadRadius(
+      nearbyAvailable,
+      lat,
+      long,
+      ROAD_RADIUS_METERS
+    );
 
     const typesMap = new Map();
 
@@ -656,6 +836,18 @@ module.exports = (io, socket) => {
           driver_image: normalizeDriverImageUrl(d.driver_image),
           rating: toNumber(d.rating),
           drivers_count: 1,
+
+          // keep already computed road metrics if present
+          driver_to_pickup_distance_m: toNumber(d.driver_to_pickup_distance_m),
+          driver_to_pickup_distance_km:
+            d.driver_to_pickup_distance_km != null
+              ? roundMoney(toNumber(d.driver_to_pickup_distance_km))
+              : null,
+          driver_to_pickup_duration_s: toNumber(d.driver_to_pickup_duration_s),
+          driver_to_pickup_duration_min:
+            d.driver_to_pickup_duration_min != null
+              ? roundMoney(toNumber(d.driver_to_pickup_duration_min))
+              : null,
         });
       } else {
         const existing = typesMap.get(key);
@@ -666,10 +858,25 @@ module.exports = (io, socket) => {
         if (!existing.driver_image && d.driver_image) {
           existing.driver_image = normalizeDriverImageUrl(d.driver_image);
         }
+
+        // keep nearest road metrics if this candidate is closer
+        const currentM = toNumber(existing.driver_to_pickup_distance_m);
+        const nextM = toNumber(d.driver_to_pickup_distance_m);
+        if (nextM !== null && (currentM === null || nextM < currentM)) {
+          existing.driver_to_pickup_distance_m = nextM;
+          existing.driver_to_pickup_distance_km =
+            d.driver_to_pickup_distance_km != null
+              ? roundMoney(toNumber(d.driver_to_pickup_distance_km))
+              : roundMoney(nextM / 1000);
+          existing.driver_to_pickup_duration_s = toNumber(d.driver_to_pickup_duration_s);
+          existing.driver_to_pickup_duration_min =
+            d.driver_to_pickup_duration_min != null
+              ? roundMoney(toNumber(d.driver_to_pickup_duration_min))
+              : null;
+        }
       }
     }
 
-    // ترتيب حسب عدد السائقين (الأكثر أولاً)
     const result = Array.from(typesMap.values()).sort(
       (a, b) => (b.drivers_count ?? 0) - (a.drivers_count ?? 0)
     );
@@ -683,7 +890,7 @@ module.exports = (io, socket) => {
 
     if (distanceKm !== null) {
       try {
-        const groups = new Map(); // serviceCatId -> Set<vehicleTypeId>
+        const groups = new Map();
         for (const item of result) {
           const serviceCatId = fixedServiceCatId ?? toNumber(item.service_category_id);
           if (!serviceCatId) continue;
@@ -701,8 +908,6 @@ module.exports = (io, socket) => {
           ) {
             cacheEntry = { distanceKm, pickupLat, pickupLong, map: new Map() };
             socket.nearbyFareCache.set(serviceCatId, cacheEntry);
-
-            // ✅ pickup changed => fares may change => allow re-emit
             socket.lastVehicleTypesSig = null;
           }
 
@@ -739,12 +944,16 @@ module.exports = (io, socket) => {
 
             const driverDistanceM = toNumber(fare.driver_to_pickup_distance_m ?? null);
             const driverDurationS = toNumber(fare.driver_to_pickup_duration_s ?? null);
-            item.driver_to_pickup_distance_m = driverDistanceM;
-            item.driver_to_pickup_duration_s = driverDurationS;
-            item.driver_to_pickup_distance_km =
-              driverDistanceM !== null ? roundMoney(driverDistanceM / 1000) : null;
-            item.driver_to_pickup_duration_min =
-              driverDurationS !== null ? roundMoney(driverDurationS / 60) : null;
+
+            // prefer fare API values if present, otherwise keep road-filter values
+            if (driverDistanceM !== null) {
+              item.driver_to_pickup_distance_m = driverDistanceM;
+              item.driver_to_pickup_distance_km = roundMoney(driverDistanceM / 1000);
+            }
+            if (driverDurationS !== null) {
+              item.driver_to_pickup_duration_s = driverDurationS;
+              item.driver_to_pickup_duration_min = roundMoney(driverDurationS / 60);
+            }
           }
         }
       } catch (e) {
@@ -755,7 +964,6 @@ module.exports = (io, socket) => {
     return result;
   };
 
-  // ✅ NEW: emit vehicle types ONLY if changed (and always on same event)
   const emitNearbyVehicleTypes = async () => {
     if (!socket.nearbyCenter) return;
     const { lat, long } = socket.nearbyCenter;
@@ -774,10 +982,8 @@ module.exports = (io, socket) => {
 
       console.log("[user:nearbyVehicleTypes] emit ->", summarizeVehicleTypesForLog(types));
 
-      // ✅ original event (unchanged)
       socket.emit("user:nearbyVehicleTypes", types);
 
-      // ✅ scenario: also broadcast pricing snapshot to the ride room (if joined)
       const rideId = socket.currentRideId;
       if (rideId) {
         const rideDetails =
@@ -786,24 +992,20 @@ module.exports = (io, socket) => {
             : null;
 
         const userPrice =
-          rideDetails?.updatedPrice ?? rideDetails?.user_bid_price ?? rideDetails?.min_fare_amount ?? null;
+          rideDetails?.updatedPrice ??
+          rideDetails?.user_bid_price ??
+          rideDetails?.min_fare_amount ??
+          null;
 
-        // ✅ NEW: ensure timer exists (and persist it) so frontend can countdown
         const timer = ensureRideTimer(rideId, rideDetails);
 
         io.to(`ride:${rideId}`).emit("ride:pricingSnapshot", {
           ride_id: rideId,
-
-          // ✅ NEW: timer fields
           ...(timer ? timer : {}),
-
-          // ✅ user price if provided
           user_bid_price: userPrice,
           isPriceUpdated: !!rideDetails?.isPriceUpdated,
           updatedPrice: rideDetails?.updatedPrice ?? null,
           updatedAt: rideDetails?.updatedAt ?? null,
-
-          // ✅ start/end points
           pickup: {
             lat: rideDetails?.pickup_lat ?? socket.nearbyCenter?.lat ?? null,
             long: rideDetails?.pickup_long ?? socket.nearbyCenter?.long ?? null,
@@ -814,7 +1016,6 @@ module.exports = (io, socket) => {
             long: rideDetails?.destination_long ?? null,
             address: rideDetails?.destination_address ?? null,
           },
-
           vehicle_types: types,
           at: Date.now(),
         });
@@ -825,7 +1026,7 @@ module.exports = (io, socket) => {
   };
 
   /////////////////////////////////////////////////////////////
-  const sendNearby = (eventName = "user:nearbyDrivers") => {
+  const sendNearby = async (eventName = "user:nearbyDrivers") => {
     if (!socket.nearbyCenter) return;
 
     const { lat, long } = socket.nearbyCenter;
@@ -847,32 +1048,26 @@ module.exports = (io, socket) => {
     const nearbyAll = driverLocationService.getNearbyDriversFromMemory(
       lat,
       long,
-      socket.nearbyRadius,
+      AIR_CANDIDATE_RADIUS_METERS,
       {
         ...opts,
         max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
       }
     );
 
-    // ✅ NEW: exclude busy drivers (active ride) for nearby drivers list too
-    const nearby = nearbyAll.filter((d) => {
+    const nearbyAvailable = nearbyAll.filter((d) => {
       const dId = toNumber(d?.driver_id);
       if (!dId) return false;
       const activeRide = getActiveRideByDriver(dId);
       return !activeRide;
     });
 
-    // 🚀 إذا ما في ولا سائق → وسّع الراديوس
-    if (nearby.length === 0 && socket.nearbyRadius < MAX_RADIUS) {
-      socket.nearbyRadius = Math.min(socket.nearbyRadius * RADIUS_MULTIPLIER, MAX_RADIUS);
-
-      console.log(`🔍 No drivers found, expanding radius to ${socket.nearbyRadius}m`);
-
-      // ✅ radius changed => vehicle types scope changed => allow re-emit
-      socket.lastVehicleTypesSig = null;
-
-      return sendNearby(eventName);
-    }
+    const nearby = await filterDriversByRoadRadius(
+      nearbyAvailable,
+      lat,
+      long,
+      ROAD_RADIUS_METERS
+    );
 
     const nearbyWithNormalizedIcons = nearby.map((d) => ({
       ...d,
@@ -882,11 +1077,11 @@ module.exports = (io, socket) => {
 
     socket.emit(eventName, nearbyWithNormalizedIcons);
 
-    console.log(`👤 Nearby -> ${nearby.length} drivers within ${socket.nearbyRadius}m`);
+    console.log(
+      `👤 Nearby -> ${nearby.length} drivers within road radius ${ROAD_RADIUS_METERS}m`
+    );
   };
 
-  // ✅ واحد فقط: اليوزر يطلب nearby ويبدأ streaming تلقائيًا
-  // ✅ إضافة اختيارية: service_type_id للفلترة
   socket.on("user:findNearbyDrivers", (payload = {}) => {
     debugLog("user:findNearbyDrivers", payload, socket.id);
     console.log("📦 payload from frontend:", payload);
@@ -898,7 +1093,8 @@ module.exports = (io, socket) => {
 
     const details = extractUserDetails(payload);
     const routeKm = extractRouteDistanceKm(payload);
-    const etaMin = toNumber(payload?.eta_min ?? null);
+    const routeDurationMin = extractRouteDurationMin(payload);
+    const etaMin = toNumber(payload?.eta_min ?? null) ?? routeDurationMin;
     if (details) {
       if (routeKm !== null) details.route = routeKm;
       if (etaMin !== null) details.eta_min = etaMin;
@@ -910,7 +1106,6 @@ module.exports = (io, socket) => {
     }
     emitRouteEtaToDriver(routeKm, etaMin, payload);
 
-    // ✅ كل طلب جديد يبدأ من 500 متر
     socket.nearbyRadius = INITIAL_RADIUS;
 
     const la = toNumber(lat);
@@ -919,7 +1114,6 @@ module.exports = (io, socket) => {
 
     socket.nearbyCenter = { lat: la, long: lo };
 
-    // ✅ حفظ نوع الفلتر إذا انبعث (إذا ما انبعث => null => كل الأنواع)
     const st = toNumber(service_type_id);
     socket.nearbyServiceTypeId = st === null ? null : st;
 
@@ -929,30 +1123,25 @@ module.exports = (io, socket) => {
     if (routeKm !== null) {
       setNearbyRouteDistanceKm(routeKm);
     }
+    if (routeDurationMin !== null) {
+      setNearbyRouteDurationMin(routeDurationMin);
+    }
 
-    // ✅ NEW: force first emit for vehicle types
     socket.lastVehicleTypesSig = null;
 
-    // snapshot immediately
-    sendNearby("user:nearbyDrivers");
-
-    // ✅ ابعت أنواع السيارات المتاحة فوراً (على نفس الايفنت)
+    void sendNearby("user:nearbyDrivers");
     void emitNearbyVehicleTypes();
 
-    // start periodic updates
     stopNearby();
     socket.nearbyInterval = setInterval(() => {
-      sendNearby("user:nearbyDrivers:update");
-
-      // ✅ build every interval but emit only if changed
+      void sendNearby("user:nearbyDrivers:update");
       void emitNearbyVehicleTypes();
     }, NEARBY_EVERY_MS);
   });
 
   //////////////////////////////////////////////////////////
 
-  // ✅ الواجهة تطلب فقط أنواع السيارات القريبة (بدون تشغيل streaming للdrivers)
-  socket.on("user:getNearbyVehicleTypes", async (payload = {}) => {
+  const handleGetNearbyVehicleTypes = async (payload = {}) => {
     const { lat, long } = payload;
     debugLog("user:getNearbyVehicleTypes", { lat, long }, socket.id);
     console.log("[user:getNearbyVehicleTypes] payload:", payload);
@@ -963,7 +1152,8 @@ module.exports = (io, socket) => {
 
     const details = extractUserDetails(payload);
     const routeKm = extractRouteDistanceKm(payload);
-    const etaMin = toNumber(payload?.eta_min ?? null);
+    const routeDurationMin = extractRouteDurationMin(payload);
+    const etaMin = toNumber(payload?.eta_min ?? null) ?? routeDurationMin;
     if (details) {
       if (routeKm !== null) details.route = routeKm;
       if (etaMin !== null) details.eta_min = etaMin;
@@ -977,18 +1167,20 @@ module.exports = (io, socket) => {
     if (routeKm !== null) {
       setNearbyRouteDistanceKm(routeKm);
     }
+    if (routeDurationMin !== null) {
+      setNearbyRouteDurationMin(routeDurationMin);
+    }
 
-    // ✅ ensure this is a real snapshot emit even if previously same
     socket.lastVehicleTypesSig = null;
-
-    // set a center so emit helper can work consistently
     socket.nearbyCenter = { lat: la, long: lo };
     await emitNearbyVehicleTypes();
 
     console.log(`🚗 Nearby vehicle types requested (socket:${socket.id})`);
-  });
+  };
 
-  // إذا اليوزر تحرك وبدك تغير المركز
+  socket.on("user:getNearbyVehicleTypes", handleGetNearbyVehicleTypes);
+  socket.on("user:getnearByVichleType", handleGetNearbyVehicleTypes);
+
   socket.on("user:updateNearbyCenter", async (payload = {}) => {
     const { lat, long } = payload;
     debugLog("user:updateNearbyCenter", { lat, long }, socket.id);
@@ -1005,38 +1197,35 @@ module.exports = (io, socket) => {
     if (sc !== null && sc > 0) socket.nearbyServiceCategoryId = sc;
 
     const routeKm = extractRouteDistanceKm(payload);
-    const etaMin = toNumber(payload?.eta_min ?? null);
+    const routeDurationMin = extractRouteDurationMin(payload);
+    const etaMin = toNumber(payload?.eta_min ?? null) ?? routeDurationMin;
     if (routeKm !== null) {
       setNearbyRouteDistanceKm(routeKm);
     }
+    if (routeDurationMin !== null) {
+      setNearbyRouteDurationMin(routeDurationMin);
+    }
     emitRouteEtaToDriver(routeKm, etaMin, payload);
 
-    sendNearby("user:nearbyDrivers:update");
-
-    // ✅ same event, emit only if changed
+    void sendNearby("user:nearbyDrivers:update");
     await emitNearbyVehicleTypes();
   });
 
-  // ✅ تغيير الفلتر بدون ما تعيد تشغيل nearby
   socket.on("user:setNearbyServiceType", async ({ service_type_id }) => {
     debugLog("user:setNearbyServiceType", { service_type_id }, socket.id);
     const st = toNumber(service_type_id);
     socket.nearbyServiceTypeId = st === null ? null : st;
 
-    // ✅ فلتر جديد => ابدأ من 500
     socket.nearbyRadius = INITIAL_RADIUS;
-
-    // ✅ allow vehicle types to re-emit
     socket.lastVehicleTypesSig = null;
 
-    sendNearby("user:nearbyDrivers:update");
+    void sendNearby("user:nearbyDrivers:update");
 
     if (socket.nearbyCenter) {
       await emitNearbyVehicleTypes();
     }
   });
 
-  // إيقاف التحديثات (مثلاً لما تبدأ رحلة)
   socket.on("user:stopNearbyDrivers", () => {
     debugLog("user:stopNearbyDrivers", {}, socket.id);
     stopNearby();
@@ -1044,16 +1233,13 @@ module.exports = (io, socket) => {
     socket.nearbyServiceTypeId = null;
     socket.nearbyServiceCategoryId = null;
     socket.nearbyRouteDistanceKm = null;
+    socket.nearbyRouteDurationMin = null;
     socket.nearbyRequiredGender = null;
     socket.nearbyNeedChildSeat = null;
     socket.nearbyNeedHandicap = null;
     socket.nearbyRadius = INITIAL_RADIUS;
     socket.nearbyFareCache.clear();
-
-    // ✅ reset signature
     socket.lastVehicleTypesSig = null;
-
-    // ✅ reset ride id
     socket.currentRideId = null;
   });
 
