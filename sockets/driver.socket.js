@@ -225,6 +225,15 @@ module.exports = (io, socket) => {
     return socket.driverId === newDriverId;
   };
 
+  const emitCandidatesSummaryForDriver = (driverId) => {
+    if (
+      typeof biddingSocket.emitCandidatesSummaryForDriverStateChange ===
+      "function"
+    ) {
+      biddingSocket.emitCandidatesSummaryForDriverStateChange(io, driverId);
+    }
+  };
+
   const logRooms = (label) => {
     const roomsMap = io.sockets.adapter.rooms;
     const customRooms = [];
@@ -437,6 +446,8 @@ module.exports = (io, socket) => {
       }
     }
 
+    // ✅ ابعث المرشحين مباشرة عند أونلاين
+    emitCandidatesSummaryForDriver(driverId);
     socket.emit("driver:ready", { driver_id: driverId });
   });
 
@@ -479,6 +490,8 @@ module.exports = (io, socket) => {
       updatedAt: now,
     });
 
+    // ✅ ابعث تحديث المرشحين مع كل update-location مقبول
+    emitCandidatesSummaryForDriver(socket.driverId);
     console.log(
       "[update-location] payload:",
       { lat: la, long: lo },
@@ -803,21 +816,20 @@ module.exports = (io, socket) => {
       }
 
       if (FINAL_RIDE_STATUSES.has(rideStatus)) {
-  // ✅ IMPORTANT: release driver from active ride
-  const { clearActiveRideByDriver, clearActiveRideByRideId } = require("../store/activeRides.store");
+        // ✅ IMPORTANT: release driver from active ride
+        const { clearActiveRideByDriver, clearActiveRideByRideId } = require("../store/activeRides.store");
 
-  clearActiveRideByDriver(driverId);
-  clearActiveRideByRideId(rideId);
-  socket.activeRideId = null;
+        clearActiveRideByDriver(driverId);
+        clearActiveRideByRideId(rideId);
+        socket.activeRideId = null;
 
-  // ✅ optional: close bidding cleanly (removes inbox/candidates if any left)
-  if (typeof biddingSocket.closeRideBidding === "function") {
-    biddingSocket.closeRideBidding(io, rideId, { clearUser: true });
-  }
+        // ✅ optional: close bidding cleanly (removes inbox/candidates if any left)
+        if (typeof biddingSocket.closeRideBidding === "function") {
+          biddingSocket.closeRideBidding(io, rideId, { clearUser: true });
+        }
 
-  console.log(`[ride-status] cleared active ride: driver=${driverId} ride=${rideId} status=${rideStatus}`);
-}
-
+        console.log(`[ride-status] cleared active ride: driver=${driverId} ride=${rideId} status=${rideStatus}`);
+      }
 
       const rideUserId = toNumber(rideDetails?.user_id);
       const rideToken =
@@ -842,14 +854,13 @@ module.exports = (io, socket) => {
         ...(routeKm !== null ? { route: routeKm } : {}),
         ...(etaMin !== null ? { eta_min: etaMin } : {}),
       };
-// ✅ DEBUG: print emitted payload of ride:statusUpdated
-console.log("[emit][ride:statusUpdated]", {
-  toRideRoom: `ride:${rideId}`,
-  toDriverRoom: driverRoom(driverId),
-  payload: optimisticEvt,
-});
 
-      
+      // ✅ DEBUG: print emitted payload of ride:statusUpdated
+      console.log("[emit][ride:statusUpdated]", {
+        toRideRoom: `ride:${rideId}`,
+        toDriverRoom: driverRoom(driverId),
+        payload: optimisticEvt,
+      });
       io.to(`ride:${rideId}`).emit("ride:statusUpdated", optimisticEvt);
       io.to(driverRoom(driverId)).emit("ride:statusUpdated", optimisticEvt);
       console.log("[ride-status][driver:updateRideStatus] optimistic emit", {
@@ -1184,6 +1195,8 @@ console.log("[emit][ride:statusUpdated]", {
         updatedAt: Date.now(),
       });
 
+      // ✅ حدّث المرشحين عند أوفلاين
+      emitCandidatesSummaryForDriver(socket.driverId);
       console.log(`⚫ Driver ${socket.driverId} went offline (socket: ${socket.id})`);
       logRooms(`after disconnect driver:${socket.driverId}`);
     }

@@ -2384,7 +2384,17 @@ function emitRouteDataFromAcceptedOffer(io, rideId, driverId, driverToPickupMinu
   io.to(rideRoom(rideId)).emit("ride:routeData", successPayload);
   io.to(driverRoom(driverId)).emit("ride:routeData", successPayload);
 
-  console.log("[ride:routeData] emitted from accepted offer", successPayload);
+console.log("[ride:routeData] emitted from accepted offer", successPayload);
+}
+function emitCandidatesSummaryForDriverStateChange(io, driverId) {
+  const safeDriverId = toNumber(driverId);
+  if (!safeDriverId) return;
+
+  for (const [rideId, candidateSet] of rideCandidates.entries()) {
+    if (!candidateSet || !candidateSet.has(safeDriverId)) continue;
+
+    emitRideCandidatesSummary(io, rideId);
+  }
 }
 
 module.exports = (io, socket) => {
@@ -3619,3 +3629,4 @@ module.exports.touchUserActiveRide = touchUserActiveRide;
 module.exports.finalizeAcceptedRide = finalizeAcceptedRide;
 module.exports.removeRideFromAllInboxes = removeRideFromAllInboxes;
 module.exports.upsertRideRouteMetrics = upsertRideRouteMetrics;
+module.exports.emitCandidatesSummaryForDriverStateChange = emitCandidatesSummaryForDriverStateChange;
