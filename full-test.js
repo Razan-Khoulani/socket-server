@@ -3,7 +3,7 @@ const io = require("socket.io-client");
 // =============
 // CONFIG
 // =============
-const SERVER    = "http://localhost:3000";
+const SERVER    = "https://aiactive.co.uk:4000";
 const RIDE_ID   = 42;
 const USER_ID   = 7;
 const PICKUP    = { lat: 33.6, long: 36.28 };
@@ -69,6 +69,10 @@ drivers.forEach((driver) => {
       });
     }
   });
+
+  driverSocket.on("driver:location:updated", (payload) => {
+    console.log("📍 [driver] driver:location:updated", payload);
+  });
 });
 
 // =========================
@@ -106,6 +110,10 @@ setTimeout(() => {
         min_fare_amount: 4000,
       });
     }, 1800);  // زيادة بسيطة لإعطاء وقت للسائقين
+  });
+
+  userSocket.on("driver:location:updated", (payload) => {
+    console.log("📍 [user] driver:location:updated", payload);
   });
 
   userSocket.on("ride:joined", (data) => {
