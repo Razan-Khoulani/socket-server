@@ -1,0 +1,37 @@
+[dotenv@17.3.1] injecting env (13) from .env -- tip: ⚙️  override existing env vars with { override: true }
+[BOOT] socket server source file: c:\Users\Lenovo\Desktop\catch\socket-server\server.js
+🚀 Socket server running at http://0.0.0.0:4000
+[tracking] mode=rideTracking-service
+Started at: 3/18/2026, 12:11:32 PM
+[NEW CONNECTION] socket.id = OcOZ1ssz2WP0jjH7AAAC
+[NEW CONNECTION] socket.id = PXuH4ZUadBdCAlZsAAAD
+✅ driver joined room driver:5 socket: OcOZ1ssz2WP0jjH7AAAC
+👤 User 7001 joined ride room ride:91051 (socket:PXuH4ZUadBdCAlZsAAAD)
+👤 User 7001 joined ride room ride:91051 (socket:PXuH4ZUadBdCAlZsAAAD)
+[internal][ride-status-updated] { ride_id: 91051, driver_id: 5, ride_status: 6, user_id: 7001 }
+[status][emit] ride:passedDestination ride:91051 driver:5 dist:7m -> rideRoom(sockets:1) driverRoom(sockets:1)
+[tripSummary][check] ride:91051 status:6 driver:5
+[tripSummary][skip] ride:91051 status:6 not in start:[5] complete:[7,8,11]
+[status][emit] ride:91051 status:6 -> room:ride:91051 (sockets:1)
+[status][emit] ride:91051 status:6 -> user:7001 (no direct room emit)
+[status][emit] ride:91051 status:6 -> room:driver:5 (sockets:1)
+[invoice][check] ride:91051 status:6 driver:5
+[invoice][skip] ride:91051 status:6 not in [7,8,9]
+[status][route-cache] keep route for ride:91051 status:6
+[ride-status][driver:passedDestinationDecision] incoming {
+  socket_id: 'OcOZ1ssz2WP0jjH7AAAC',
+  socket_driver_id: 5,
+  payload_driver_id: 5,
+  ride_id: 91051,
+  accepted: 'yes',
+  extra_distance_km: 0.25,
+  updated_total_distance_km: 1.1
+}
+⚫ Driver 5 went offline (socket: OcOZ1ssz2WP0jjH7AAAC)
+========== ROOMS DEBUG ==========
+📌 after disconnect driver:5
+🏷️ Custom rooms: [ { room: 'ride:91051', socketsCount: 1 } ]
+=================================
+
+[DISCONNECT] socket OcOZ1ssz2WP0jjH7AAAC disconnected
+[DISCONNECT] socket PXuH4ZUadBdCAlZsAAAD disconnected
