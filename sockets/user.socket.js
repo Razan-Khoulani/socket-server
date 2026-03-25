@@ -61,14 +61,18 @@ const buildPriceBounds = (baseFare) => {
   const base = toNumber(baseFare);
   if (base === null) {
     return {
+      base_fare: null,
       estimated_fare: null,
       min_price: null,
       max_price: null,
     };
   }
 
+  const roundedBase = roundMoney(base);
+
   return {
-    estimated_fare: roundMoney(base),
+    base_fare: roundedBase,
+    estimated_fare: roundedBase,
     min_price: roundMoney(base / 2),
     max_price: roundMoney(base * 2),
   };
@@ -91,6 +95,7 @@ const summarizeVehicleTypesForLog = (types) => {
     service_category_id: t?.service_category_id ?? null,
     vehicle_type_name: t?.vehicle_type_name ?? null,
     drivers_count: t?.drivers_count ?? null,
+        base_fare: t?.base_fare ?? null,
     estimated_fare: t?.estimated_fare ?? null,
     min_price: t?.min_price ?? null,
     max_price: t?.max_price ?? null,
@@ -169,6 +174,7 @@ const buildVehicleTypesSignature = (types) => {
 
     distance_km: t?.distance_km != null ? roundMoney(toNumber(t?.distance_km)) : null,
     cost_per_km: t?.cost_per_km != null ? roundMoney(toNumber(t?.cost_per_km)) : null,
+base_fare: t?.base_fare != null ? roundMoney(toNumber(t?.base_fare)) : null,
 estimated_fare: t?.estimated_fare != null ? roundMoney(toNumber(t?.estimated_fare)) : null,
 min_price: t?.min_price != null ? roundMoney(toNumber(t?.min_price)) : null,
 max_price: t?.max_price != null ? roundMoney(toNumber(t?.max_price)) : null,
@@ -1108,6 +1114,7 @@ module.exports = (io, socket) => {
 item.distance_km = roundMoney(distanceKm);
 
 const priceBounds = buildPriceBounds(fare.estimated_fare);
+item.base_fare = priceBounds.base_fare;
 item.estimated_fare = priceBounds.estimated_fare;
 item.min_price = priceBounds.min_price;
 item.max_price = priceBounds.max_price;
@@ -1134,85 +1141,118 @@ item.max_price = priceBounds.max_price;
     return result;
   };
 
-  const emitNearbyVehicleTypes = async () => {
-    if (!socket.nearbyCenter) return;
-    const { lat, long } = socket.nearbyCenter;
-    try {
-      const types = await buildNearbyVehicleTypes(lat, long);
+ const emitNearbyVehicleTypes = async () => {
+  if (!socket.nearbyCenter) return;
+  const { lat, long } = socket.nearbyCenter;
 
-      const sig = buildVehicleTypesSignature(types);
-      if (sig === socket.lastVehicleTypesSig) {
-        if (DEBUG_EVENTS) {
-          console.log("[user:nearbyVehicleTypes] skipped (no change)");
-        }
-        return;
-      }
+  try {
+    const types = await buildNearbyVehicleTypes(lat, long);
 
+    const sig = buildVehicleTypesSignature(types);
+    const vehicleTypesChanged = sig !== socket.lastVehicleTypesSig;
+
+    if (vehicleTypesChanged) {
       socket.lastVehicleTypesSig = sig;
-
       console.log("[user:nearbyVehicleTypes] emit ->", summarizeVehicleTypesForLog(types));
-
       socket.emit("user:nearbyVehicleTypes", types);
-
-      const rideId = socket.currentRideId;
-      if (rideId) {
-        const rideDetails =
-          typeof biddingSocket.getRideDetails === "function"
-            ? biddingSocket.getRideDetails(rideId)
-            : null;
-
-        const userPrice =
-          rideDetails?.updatedPrice ??
-          rideDetails?.user_bid_price ??
-          rideDetails?.min_fare_amount ??
-          null;
-
-        const timer = ensureRideTimer(rideId, rideDetails);
-
-        // Dedupe pricing snapshot: emit only when pricing state changes,
-        // not on every nearby-drivers refresh tick.
-        const pricingSnapshotSig = JSON.stringify({
-          ride_id: rideId,
-          user_bid_price: userPrice ?? null,
-          isPriceUpdated: !!rideDetails?.isPriceUpdated,
-          updatedPrice: rideDetails?.updatedPrice ?? null,
-          updatedAt: rideDetails?.updatedAt ?? null,
-          pickup_lat: rideDetails?.pickup_lat ?? socket.nearbyCenter?.lat ?? null,
-          pickup_long: rideDetails?.pickup_long ?? socket.nearbyCenter?.long ?? null,
-          destination_lat: rideDetails?.destination_lat ?? null,
-          destination_long: rideDetails?.destination_long ?? null,
-        });
-        const prevPricingSnapshotSig = socket.lastPricingSnapshotSigByRide.get(rideId);
-        if (prevPricingSnapshotSig === pricingSnapshotSig) {
-          return;
-        }
-        socket.lastPricingSnapshotSigByRide.set(rideId, pricingSnapshotSig);
-
-        io.to(`ride:${rideId}`).emit("ride:pricingSnapshot", {
-          ride_id: rideId,
-          ...(timer ? timer : {}),
-          user_bid_price: userPrice,
-          isPriceUpdated: !!rideDetails?.isPriceUpdated,
-          updatedPrice: rideDetails?.updatedPrice ?? null,
-          updatedAt: rideDetails?.updatedAt ?? null,
-          pickup: {
-            lat: rideDetails?.pickup_lat ?? socket.nearbyCenter?.lat ?? null,
-            long: rideDetails?.pickup_long ?? socket.nearbyCenter?.long ?? null,
-            address: rideDetails?.pickup_address ?? null,
-          },
-          destination: {
-            lat: rideDetails?.destination_lat ?? null,
-            long: rideDetails?.destination_long ?? null,
-            address: rideDetails?.destination_address ?? null,
-          },
-          vehicle_types: types,
-          at: Date.now(),
-        });
-      }
-    } catch (e) {
-      console.warn("[nearbyVehicleTypes] emit failed:", e?.message || e);
+    } else if (DEBUG_EVENTS) {
+      console.log("[user:nearbyVehicleTypes] skipped (no change)");
     }
-  };
+
+    const rideId = socket.currentRideId;
+    if (!rideId) return;
+
+    const rideDetails =
+      typeof biddingSocket.getRideDetails === "function"
+        ? biddingSocket.getRideDetails(rideId)
+        : null;
+
+    const userPrice =
+      rideDetails?.updatedPrice ??
+      rideDetails?.user_bid_price ??
+      rideDetails?.min_fare_amount ??
+      null;
+
+    const selectedVehicleTypeId = toNumber(rideDetails?.service_type_id ?? null);
+
+    const selectedVehicleType =
+      selectedVehicleTypeId !== null
+        ? types.find((t) => toNumber(t?.service_type_id) === selectedVehicleTypeId) ?? null
+        : null;
+
+    const snapshotBaseFare =
+      toNumber(selectedVehicleType?.base_fare) ??
+      toNumber(selectedVehicleType?.estimated_fare) ??
+      toNumber(rideDetails?.base_fare) ??
+      toNumber(rideDetails?.estimated_fare) ??
+      toNumber(rideDetails?.user_bid_price) ??
+      toNumber(rideDetails?.min_fare_amount) ??
+      null;
+
+    const snapshotMinPrice =
+      toNumber(selectedVehicleType?.min_price) ??
+      toNumber(rideDetails?.min_price) ??
+      null;
+
+    const snapshotMaxPrice =
+      toNumber(selectedVehicleType?.max_price) ??
+      toNumber(rideDetails?.max_price) ??
+      null;
+
+    const timer = ensureRideTimer(rideId, rideDetails);
+
+    const pricingSnapshotSig = JSON.stringify({
+      ride_id: rideId,
+      user_bid_price: userPrice ?? null,
+      isPriceUpdated: !!rideDetails?.isPriceUpdated,
+      updatedPrice: rideDetails?.updatedPrice ?? null,
+      updatedAt: rideDetails?.updatedAt ?? null,
+      base_fare: snapshotBaseFare ?? null,
+      min_price: snapshotMinPrice ?? null,
+      max_price: snapshotMaxPrice ?? null,
+        vehicle_types_sig: sig,
+
+      pickup_lat: rideDetails?.pickup_lat ?? socket.nearbyCenter?.lat ?? null,
+      pickup_long: rideDetails?.pickup_long ?? socket.nearbyCenter?.long ?? null,
+      destination_lat: rideDetails?.destination_lat ?? null,
+      destination_long: rideDetails?.destination_long ?? null,
+    });
+
+    const prevPricingSnapshotSig = socket.lastPricingSnapshotSigByRide.get(rideId);
+    if (prevPricingSnapshotSig === pricingSnapshotSig) {
+      return;
+    }
+
+    socket.lastPricingSnapshotSigByRide.set(rideId, pricingSnapshotSig);
+
+    io.to(`ride:${rideId}`).emit("ride:pricingSnapshot", {
+      ride_id: rideId,
+      ...(timer ? timer : {}),
+      user_bid_price: userPrice,
+      base_fare: snapshotBaseFare,
+      estimated_fare: snapshotBaseFare,
+      min_price: snapshotMinPrice,
+      max_price: snapshotMaxPrice,
+      isPriceUpdated: !!rideDetails?.isPriceUpdated,
+      updatedPrice: rideDetails?.updatedPrice ?? null,
+      updatedAt: rideDetails?.updatedAt ?? null,
+      pickup: {
+        lat: rideDetails?.pickup_lat ?? socket.nearbyCenter?.lat ?? null,
+        long: rideDetails?.pickup_long ?? socket.nearbyCenter?.long ?? null,
+        address: rideDetails?.pickup_address ?? null,
+      },
+      destination: {
+        lat: rideDetails?.destination_lat ?? null,
+        long: rideDetails?.destination_long ?? null,
+        address: rideDetails?.destination_address ?? null,
+      },
+      vehicle_types: types,
+      at: Date.now(),
+    });
+  } catch (e) {
+    console.warn("[nearbyVehicleTypes] emit failed:", e?.message || e);
+  }
+};
 
   /////////////////////////////////////////////////////////////
   const sendNearby = async (eventName = "user:nearbyDrivers") => {
