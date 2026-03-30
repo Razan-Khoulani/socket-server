@@ -114,6 +114,24 @@ const validateDriverLocationPoint = (driverId, lat, long, at = Date.now()) => {
   lastAcceptedLocationByDriver.set(driverId, { lat, long, at });
   return { ok: true };
 };
+const getDriverActiveRideId = (driverId) => {
+  return getActiveRideByDriver(driverId) ?? toNumber(socket.activeRideId) ?? null;
+};
+
+const rejectOfflineIfBusy = (driverId, targetSocket = socket) => {
+  const activeRideId = getDriverActiveRideId(driverId);
+
+  if (!activeRideId) return false;
+
+  targetSocket.emit("driver:offlineRejected", {
+    status: 0,
+    message: "Cannot go offline while ride is active",
+    ride_id: activeRideId,
+    at: Date.now(),
+  });
+
+  return true;
+};
 
 module.exports = (io, socket) => {
   // ─────────────────────────────
@@ -299,12 +317,13 @@ module.exports = (io, socket) => {
     // ✅ خزّن أولياً لوكيشن + online (بدون upsert)
     driverLocationService.updateMemory(driverId, la, lo);
 
-    const baseMeta = {
-      driver_id: driverId,
-      is_online: true,
-      driver_service_id: toNumber(driver_service_id) ?? null,
-      updatedAt: Date.now(),
-    };
+const baseMeta = {
+  driver_id: driverId,
+  is_online: true,
+  socket_disconnected: false,
+  driver_service_id: toNumber(driver_service_id) ?? null,
+  updatedAt: Date.now(),
+};
 
     if (Number.isFinite(payloadServiceTypeId)) {
       baseMeta.service_type_id = payloadServiceTypeId;
@@ -485,10 +504,11 @@ module.exports = (io, socket) => {
     driverLocationService.updateMemory(socket.driverId, la, lo);
 
     // ✅ mark as online on any location ping
-    driverLocationService.updateMeta(socket.driverId, {
-      is_online: true,
-      updatedAt: now,
-    });
+driverLocationService.updateMeta(socket.driverId, {
+  is_online: true,
+  socket_disconnected: false,
+  updatedAt: now,
+});
 
     // ✅ ابعث تحديث المرشحين مع كل update-location مقبول
     emitCandidatesSummaryForDriver(socket.driverId);
@@ -1171,34 +1191,55 @@ module.exports = (io, socket) => {
     }
   });
 
-  socket.on("disconnect", () => {
-    if (socket.dbInterval) {
-      clearInterval(socket.dbInterval);
-      socket.dbInterval = null;
+socket.on("disconnect", () => {
+  if (socket.dbInterval) {
+    clearInterval(socket.dbInterval);
+    socket.dbInterval = null;
+  }
+
+  if (socket.laravelLocationInterval) {
+    clearInterval(socket.laravelLocationInterval);
+    socket.laravelLocationInterval = null;
+  }
+
+  if (socket.driverId) {
+    const now = Date.now();
+    const driverId = socket.driverId;
+    const activeRideId =
+      getActiveRideByDriver(driverId) ?? toNumber(socket.activeRideId);
+
+    const prefix = `${driverId}:`;
+    for (const key of lastRideStatusByKey.keys()) {
+      if (key.startsWith(prefix)) lastRideStatusByKey.delete(key);
     }
+    lastAcceptedLocationByDriver.delete(driverId);
 
-    if (socket.laravelLocationInterval) {
-      clearInterval(socket.laravelLocationInterval);
-      socket.laravelLocationInterval = null;
-    }
-
-    if (socket.driverId) {
-      const prefix = `${socket.driverId}:`;
-      for (const key of lastRideStatusByKey.keys()) {
-        if (key.startsWith(prefix)) lastRideStatusByKey.delete(key);
-      }
-      lastAcceptedLocationByDriver.delete(socket.driverId);
-
-      driverLocationService.updateMeta(socket.driverId, {
-        is_online: false,
-        lastSeen: Date.now(),
-        updatedAt: Date.now(),
+    if (activeRideId) {
+      // ✅ إذا عنده رحلة شغالة: لا تحوله offline
+      driverLocationService.updateMeta(driverId, {
+        is_online: true,
+        socket_disconnected: true,
+        lastSeen: now,
+        updatedAt: now,
       });
 
-      // ✅ حدّث المرشحين عند أوفلاين
-      emitCandidatesSummaryForDriver(socket.driverId);
-      console.log(`⚫ Driver ${socket.driverId} went offline (socket: ${socket.id})`);
-      logRooms(`after disconnect driver:${socket.driverId}`);
+      console.log(
+        `🟡 Driver ${driverId} disconnected but kept online because active ride ${activeRideId} is running (socket: ${socket.id})`
+      );
+    } else {
+      // ✅ إذا ما عنده رحلة: يصير offline طبيعي
+      driverLocationService.updateMeta(driverId, {
+        is_online: false,
+        socket_disconnected: true,
+        lastSeen: now,
+        updatedAt: now,
+      });
+
+      console.log(`⚫ Driver ${driverId} went offline (socket: ${socket.id})`);
     }
-  });
+
+    emitCandidatesSummaryForDriver(driverId);
+    logRooms(`after disconnect driver:${driverId}`);
+  }
+});
 };

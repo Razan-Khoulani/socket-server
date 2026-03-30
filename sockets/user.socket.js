@@ -14,25 +14,32 @@ const debugLog = (event, payload, socketId) => {
   if (!DEBUG_EVENTS) return;
   console.log("[user.socket]", event, "socket:", socketId, "payload:", payload);
 };
+const userRoom = (userId) => `user:${userId}`;
 
-const INITIAL_RADIUS = 5000;
-const MAX_RADIUS = 5000;
-const RADIUS_MULTIPLIER = 2;
+const DEFAULT_NEARBY_RADIUS_METERS = 5000;
 const NEARBY_EVERY_MS = 3000;
 const MAX_DRIVER_LOCATION_AGE_MS = 2 * 60 * 1000;
 
 // ✅ NEW: road-based filtering
-const ROAD_RADIUS_METERS = 5000; // الفلترة النهائية حسب الطريق
-const AIR_CANDIDATE_RADIUS_METERS = 8000; // مرشحين أوليين بشكل هوائي قبل فلترة الطريق
+const DEFAULT_AIR_CANDIDATE_RADIUS_METERS = 8000; // مرشحين أوليين بشكل هوائي قبل فلترة الطريق
 const MAX_ROAD_FILTER_CANDIDATES = Number.isFinite(Number(process.env.MAX_ROAD_FILTER_CANDIDATES))
   ? Math.max(1, Number(process.env.MAX_ROAD_FILTER_CANDIDATES))
   : 25;
+const SERVICE_RADIUS_CACHE_TTL_MS = Number.isFinite(
+  Number(process.env.SERVICE_RADIUS_CACHE_TTL_MS)
+)
+  ? Math.max(30 * 1000, Number(process.env.SERVICE_RADIUS_CACHE_TTL_MS))
+  : 5 * 60 * 1000;
+const serviceSearchRadiusCache = new Map();
 
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
   "https://aiactive.co.uk/backend/backend-laravel/public";
 
+const LARAVEL_SERVICE_SEARCH_RADIUS_PATH =
+  process.env.LARAVEL_SERVICE_SEARCH_RADIUS_PATH ||
+  "/api/customer/transport/search-radius";
 const LARAVEL_GET_ROUTE_PATH =
   process.env.LARAVEL_GET_ROUTE_PATH || "/api/getRoute";
 
@@ -53,10 +60,253 @@ const toNumber = (v) => {
   return Number.isFinite(n) ? n : null;
 };
 
+const getFirstNumber = (...values) => {
+  for (const value of values) {
+    const parsed = toNumber(value);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+};
+
+const normalizeNearbyRadiusMeters = (
+  value,
+  fallback = DEFAULT_NEARBY_RADIUS_METERS
+) => {
+  const parsed = toNumber(value);
+  if (parsed === null) return fallback;
+  return Math.max(200, Math.round(parsed));
+};
+
+const resolveNearbyRadiusFromPayload = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return null;
+
+  const explicitMeters = getFirstNumber(
+    payload?.dispatch_current_radius_m,
+    payload?.initial_dispatch_radius,
+    payload?.provider_search_radius_m,
+    payload?.search_radius_m
+  );
+  if (explicitMeters !== null) {
+    return normalizeNearbyRadiusMeters(explicitMeters);
+  }
+
+  const genericRadius = toNumber(payload?.radius);
+  if (genericRadius !== null) {
+    return genericRadius >= 100
+      ? normalizeNearbyRadiusMeters(genericRadius)
+      : normalizeNearbyRadiusMeters(Math.round(genericRadius * 1000));
+  }
+
+  const explicitKm = getFirstNumber(
+    payload?.provider_search_radius_km,
+    payload?.provider_search_radius,
+    payload?.search_radius_km,
+    payload?.radius_km
+  );
+  if (explicitKm !== null) {
+    return normalizeNearbyRadiusMeters(Math.round(explicitKm * 1000));
+  }
+
+  return null;
+};
+
+const getCachedServiceSearchRadius = (serviceCategoryId) => {
+  const safeServiceCategoryId = toNumber(serviceCategoryId);
+  if (!safeServiceCategoryId) return null;
+
+  const entry = serviceSearchRadiusCache.get(safeServiceCategoryId);
+  if (!entry) return null;
+
+  if (Date.now() - entry.cached_at > SERVICE_RADIUS_CACHE_TTL_MS) {
+    serviceSearchRadiusCache.delete(safeServiceCategoryId);
+    return null;
+  }
+
+  return entry.radius_m;
+};
+
+const setCachedServiceSearchRadius = (serviceCategoryId, radiusMeters) => {
+  const safeServiceCategoryId = toNumber(serviceCategoryId);
+  const safeRadiusMeters = toNumber(radiusMeters);
+  if (!safeServiceCategoryId || safeRadiusMeters === null) return;
+
+  serviceSearchRadiusCache.set(safeServiceCategoryId, {
+    radius_m: normalizeNearbyRadiusMeters(safeRadiusMeters),
+    cached_at: Date.now(),
+  });
+};
+
+const fetchServiceSearchRadiusFromApi = async (serviceCategoryId) => {
+  const safeServiceCategoryId = toNumber(serviceCategoryId);
+  if (!safeServiceCategoryId) return null;
+
+  const cachedRadius = getCachedServiceSearchRadius(safeServiceCategoryId);
+  if (cachedRadius !== null) return cachedRadius;
+
+  try {
+    const res = await axios.post(
+      `${LARAVEL_BASE_URL}${LARAVEL_SERVICE_SEARCH_RADIUS_PATH}`,
+      {
+        service_category_id: safeServiceCategoryId,
+      },
+      { timeout: LARAVEL_TIMEOUT_MS }
+    );
+
+    let data = res?.data;
+    if (typeof data === "string") {
+      try {
+        data = JSON.parse(data);
+      } catch (_) {}
+    }
+
+    if (!data || data.status !== 1) return null;
+
+    const radiusMeters = resolveNearbyRadiusFromPayload(data);
+    if (radiusMeters === null) return null;
+
+    setCachedServiceSearchRadius(safeServiceCategoryId, radiusMeters);
+    return radiusMeters;
+  } catch (e) {
+    console.warn(
+      "[service-search-radius] failed:",
+      e?.response?.data || e?.message || e
+    );
+    return null;
+  }
+};
+
 const roundMoney = (v) => {
   if (!Number.isFinite(v)) return null;
   return Math.round((v + Number.EPSILON) * 100) / 100;
 };
+
+const ECONOMY_SERVICE_TYPE_ID = toNumber(
+  process.env.NEARBY_ECONOMY_SERVICE_TYPE_ID ??
+    process.env.ECONOMY_SERVICE_TYPE_ID ??
+    null
+);
+const ECONOMY_NAME_PATTERNS = [
+  /econom/i,
+  /economic/i,
+  /eco\b/i,
+  /اقتصاد/i,
+  /اقتصادي/i,
+  /اقتصادية/i,
+];
+
+const matchesEconomyVehicleTypeName = (value) => {
+  const name = String(value ?? "").trim();
+  if (!name) return false;
+  return ECONOMY_NAME_PATTERNS.some((pattern) => pattern.test(name));
+};
+
+const getVehicleTypeSortPrice = (item) => {
+  const candidates = [
+    item?.estimated_fare,
+    item?.base_fare,
+    item?.min_price,
+    item?.cost_per_km,
+    item?.driver_to_pickup_distance_km,
+  ];
+
+  for (const value of candidates) {
+    const parsed = toNumber(value);
+    if (parsed !== null && parsed >= 0) return parsed;
+  }
+
+  const distanceMeters = toNumber(item?.driver_to_pickup_distance_m);
+  if (distanceMeters !== null && distanceMeters >= 0) {
+    return roundMoney(distanceMeters / 1000) ?? distanceMeters / 1000;
+  }
+
+  return Number.POSITIVE_INFINITY;
+};
+
+const resolveEconomyVehicleTypeId = (types = []) => {
+  if (!Array.isArray(types) || types.length === 0) return null;
+
+  if (
+    ECONOMY_SERVICE_TYPE_ID !== null &&
+    types.some((item) => toNumber(item?.service_type_id) === ECONOMY_SERVICE_TYPE_ID)
+  ) {
+    return ECONOMY_SERVICE_TYPE_ID;
+  }
+
+  const namedEconomyType = types.find((item) =>
+    matchesEconomyVehicleTypeName(item?.vehicle_type_name)
+  );
+  if (namedEconomyType) {
+    return toNumber(namedEconomyType?.service_type_id);
+  }
+
+  const cheapestType = [...types]
+    .filter((item) => toNumber(item?.service_type_id) !== null)
+    .sort((a, b) => {
+      const priceDiff = getVehicleTypeSortPrice(a) - getVehicleTypeSortPrice(b);
+      if (Number.isFinite(priceDiff) && priceDiff !== 0) return priceDiff;
+
+      const driversDiff =
+        (toNumber(b?.drivers_count ?? 0) ?? 0) - (toNumber(a?.drivers_count ?? 0) ?? 0);
+      if (driversDiff !== 0) return driversDiff;
+
+      return (toNumber(a?.service_type_id) ?? Number.MAX_SAFE_INTEGER) -
+        (toNumber(b?.service_type_id) ?? Number.MAX_SAFE_INTEGER);
+    })[0];
+
+  return toNumber(cheapestType?.service_type_id);
+};
+
+const decorateNearbyVehicleTypes = (types = [], selectedTypeId = null) => {
+  if (!Array.isArray(types) || types.length === 0) return [];
+
+  const availableTypeIds = new Set(
+    types.map((item) => toNumber(item?.service_type_id)).filter((item) => item !== null)
+  );
+  const economyTypeId = resolveEconomyVehicleTypeId(types);
+  const fallbackTypeId = economyTypeId ?? toNumber(types[0]?.service_type_id);
+  const requestedSelectedTypeId = toNumber(selectedTypeId);
+  const effectiveSelectedTypeId =
+    requestedSelectedTypeId !== null && availableTypeIds.has(requestedSelectedTypeId)
+      ? requestedSelectedTypeId
+      : fallbackTypeId;
+
+  return types
+    .map((item) => {
+      const typeId = toNumber(item?.service_type_id);
+      const isEconomy = typeId !== null && economyTypeId !== null && typeId === economyTypeId;
+      const isDefault = typeId !== null && fallbackTypeId !== null && typeId === fallbackTypeId;
+      const isSelected =
+        typeId !== null &&
+        effectiveSelectedTypeId !== null &&
+        typeId === effectiveSelectedTypeId;
+
+      return {
+        ...item,
+        is_economy: isEconomy ? 1 : 0,
+        is_default: isDefault ? 1 : 0,
+        is_selected: isSelected ? 1 : 0,
+      };
+    })
+    .sort((a, b) => {
+      const defaultDiff = (toNumber(b?.is_default ?? 0) ?? 0) - (toNumber(a?.is_default ?? 0) ?? 0);
+      if (defaultDiff !== 0) return defaultDiff;
+
+      const selectedDiff =
+        (toNumber(b?.is_selected ?? 0) ?? 0) - (toNumber(a?.is_selected ?? 0) ?? 0);
+      if (selectedDiff !== 0) return selectedDiff;
+
+      const driversDiff =
+        (toNumber(b?.drivers_count ?? 0) ?? 0) - (toNumber(a?.drivers_count ?? 0) ?? 0);
+      if (driversDiff !== 0) return driversDiff;
+
+      const priceDiff = getVehicleTypeSortPrice(a) - getVehicleTypeSortPrice(b);
+      if (Number.isFinite(priceDiff) && priceDiff !== 0) return priceDiff;
+
+      return (toNumber(a?.service_type_id) ?? Number.MAX_SAFE_INTEGER) -
+        (toNumber(b?.service_type_id) ?? Number.MAX_SAFE_INTEGER);
+    });
+};
+
 const buildPriceBounds = (baseFare) => {
   const base = toNumber(baseFare);
   if (base === null) {
@@ -94,6 +344,9 @@ const summarizeVehicleTypesForLog = (types) => {
     service_type_id: t?.service_type_id ?? null,
     service_category_id: t?.service_category_id ?? null,
     vehicle_type_name: t?.vehicle_type_name ?? null,
+    is_default: t?.is_default ?? 0,
+    is_selected: t?.is_selected ?? 0,
+    is_economy: t?.is_economy ?? 0,
     drivers_count: t?.drivers_count ?? null,
     base_fare: t?.base_fare ?? null,
     estimated_fare: t?.estimated_fare ?? null,
@@ -163,14 +416,17 @@ const buildVehicleTypesSignature = (types) => {
     return aId - bId;
   });
 
-  const compact = stable.map((t) => ({
-    service_type_id: toNumber(t?.service_type_id),
-    service_category_id: toNumber(t?.service_category_id),
-    drivers_count: toNumber(t?.drivers_count ?? 0),
+    const compact = stable.map((t) => ({
+      service_type_id: toNumber(t?.service_type_id),
+      service_category_id: toNumber(t?.service_category_id),
+      is_default: toNumber(t?.is_default ?? 0),
+      is_selected: toNumber(t?.is_selected ?? 0),
+      is_economy: toNumber(t?.is_economy ?? 0),
+      drivers_count: toNumber(t?.drivers_count ?? 0),
 
-    vehicle_type_name: t?.vehicle_type_name ?? "",
-    vehicle_type_icon: normalizeVehicleTypeIconUrl(t?.vehicle_type_icon),
-    driver_image: normalizeDriverImageUrl(t?.driver_image),
+      vehicle_type_name: t?.vehicle_type_name ?? "",
+      vehicle_type_icon: normalizeVehicleTypeIconUrl(t?.vehicle_type_icon),
+      driver_image: normalizeDriverImageUrl(t?.driver_image),
 
     distance_km: t?.distance_km != null ? roundMoney(toNumber(t?.distance_km)) : null,
     cost_per_km: t?.cost_per_km != null ? roundMoney(toNumber(t?.cost_per_km)) : null,
@@ -606,7 +862,7 @@ module.exports = (io, socket) => {
 
   socket.nearbyCenter = null; // { lat, long }
   socket.nearbyInterval = null;
-  socket.nearbyRadius = INITIAL_RADIUS;
+  socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
 
   socket.nearbyServiceTypeId = null;
   socket.nearbyServiceCategoryId = null;
@@ -621,6 +877,64 @@ module.exports = (io, socket) => {
 
   socket.nearbyFareCache = new Map();
   socket.lastPricingSnapshotSigByRide = new Map();
+
+  const canDriverAppearInNearby = (driverId) => {
+    const safeDriverId = toNumber(driverId);
+    if (!safeDriverId) return false;
+
+    if (typeof biddingSocket.canDriverReceiveNewRideRequests === "function") {
+      return !!biddingSocket.canDriverReceiveNewRideRequests(safeDriverId);
+    }
+
+    return !getActiveRideByDriver(safeDriverId);
+  };
+
+  const getNearbyRadiusFromRideSnapshot = () => {
+    const rideId = toNumber(socket.currentRideId);
+    if (!rideId || typeof biddingSocket.getRideDetails !== "function") {
+      return null;
+    }
+
+    const rideDetails = biddingSocket.getRideDetails(rideId);
+    return resolveNearbyRadiusFromPayload(rideDetails);
+  };
+
+  const syncNearbyRadius = async (payload = {}) => {
+    const serviceCategoryId = toNumber(
+      payload?.service_category_id ??
+        payload?.service_cat_id ??
+        socket.nearbyServiceCategoryId
+    );
+
+    let nextRadius = resolveNearbyRadiusFromPayload(payload);
+    let source = nextRadius !== null ? "payload" : null;
+
+    if (nextRadius === null) {
+      nextRadius = getNearbyRadiusFromRideSnapshot();
+      if (nextRadius !== null) source = "ride-snapshot";
+    }
+
+    if (nextRadius === null && serviceCategoryId) {
+      nextRadius = await fetchServiceSearchRadiusFromApi(serviceCategoryId);
+      if (nextRadius !== null) source = "service-setting-api";
+    }
+
+    const normalizedRadius = normalizeNearbyRadiusMeters(
+      nextRadius,
+      socket.nearbyRadius ?? DEFAULT_NEARBY_RADIUS_METERS
+    );
+
+    if (socket.nearbyRadius !== normalizedRadius) {
+      socket.nearbyRadius = normalizedRadius;
+      console.log("[nearby-radius] updated", {
+        service_category_id: serviceCategoryId ?? null,
+        radius_m: normalizedRadius,
+        source: source ?? "fallback",
+      });
+    }
+
+    return normalizedRadius;
+  };
 
   const applyNearbyFiltersFromPayload = (payload = {}, options = {}) => {
     const { resetMissing = false } = options || {};
@@ -723,6 +1037,7 @@ module.exports = (io, socket) => {
 
     socket.isUser = true;
     socket.userId = details.user_id;
+    socket.join(userRoom(details.user_id));
     setUserDetails(details.user_id, details);
 
     if (typeof biddingSocket.refreshUserDetailsForUserId === "function") {
@@ -891,6 +1206,9 @@ module.exports = (io, socket) => {
 
     socket.isUser = true;
     socket.userId = userId ?? socket.userId ?? null;
+    if (socket.userId) {
+      socket.join(userRoom(socket.userId));
+    }
 
     if (socket.currentRideId && socket.currentRideId !== rideId) {
       socket.leave(`ride:${socket.currentRideId}`);
@@ -933,6 +1251,7 @@ module.exports = (io, socket) => {
 
     socket.isUser = true;
     socket.userId = userId;
+    socket.join(userRoom(userId));
     if (socket.currentRideId && socket.currentRideId !== rideId) {
       socket.leave(`ride:${socket.currentRideId}`);
     }
@@ -962,10 +1281,19 @@ module.exports = (io, socket) => {
   };
 
   const buildNearbyVehicleTypes = async (lat, long) => {
+    const roadRadius = normalizeNearbyRadiusMeters(
+      socket.nearbyRadius,
+      DEFAULT_NEARBY_RADIUS_METERS
+    );
+    const airCandidateRadius = Math.max(
+      roadRadius,
+      DEFAULT_AIR_CANDIDATE_RADIUS_METERS
+    );
+
     const nearbyAll = driverLocationService.getNearbyDriversFromMemory(
       lat,
       long,
-      AIR_CANDIDATE_RADIUS_METERS,
+      airCandidateRadius,
       {
         only_online: true,
         max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
@@ -977,16 +1305,14 @@ module.exports = (io, socket) => {
 
     const nearbyAvailable = nearbyAll.filter((d) => {
       const dId = toNumber(d?.driver_id);
-      if (!dId) return false;
-      const activeRide = getActiveRideByDriver(dId);
-      return !activeRide;
+      return canDriverAppearInNearby(dId);
     });
 
     const nearbyDrivers = await filterDriversByRoadRadius(
       nearbyAvailable,
       lat,
       long,
-      ROAD_RADIUS_METERS
+      roadRadius
     );
 
     const typesMap = new Map();
@@ -1146,15 +1472,16 @@ item.max_price = priceBounds.max_price;
   const { lat, long } = socket.nearbyCenter;
 
   try {
-    const types = await buildNearbyVehicleTypes(lat, long);
+    const rawTypes = await buildNearbyVehicleTypes(lat, long);
+    const nearbyTypes = decorateNearbyVehicleTypes(rawTypes, socket.nearbyServiceTypeId);
 
-    const sig = buildVehicleTypesSignature(types);
+    const sig = buildVehicleTypesSignature(nearbyTypes);
     const vehicleTypesChanged = sig !== socket.lastVehicleTypesSig;
 
     if (vehicleTypesChanged) {
       socket.lastVehicleTypesSig = sig;
-      console.log("[user:nearbyVehicleTypes] emit ->", summarizeVehicleTypesForLog(types));
-      socket.emit("user:nearbyVehicleTypes", types);
+      console.log("[user:nearbyVehicleTypes] emit ->", summarizeVehicleTypesForLog(nearbyTypes));
+      socket.emit("user:nearbyVehicleTypes", nearbyTypes);
     } else if (DEBUG_EVENTS) {
       console.log("[user:nearbyVehicleTypes] skipped (no change)");
     }
@@ -1174,11 +1501,17 @@ item.max_price = priceBounds.max_price;
       null;
 
     const selectedVehicleTypeId = toNumber(rideDetails?.service_type_id ?? null);
+    const pricingTypes = decorateNearbyVehicleTypes(
+      rawTypes,
+      selectedVehicleTypeId ?? socket.nearbyServiceTypeId
+    );
 
     const selectedVehicleType =
       selectedVehicleTypeId !== null
-        ? types.find((t) => toNumber(t?.service_type_id) === selectedVehicleTypeId) ?? null
+        ? pricingTypes.find((t) => toNumber(t?.service_type_id) === selectedVehicleTypeId) ?? null
         : null;
+
+    const pricingTypesSig = buildVehicleTypesSignature(pricingTypes);
 
     const snapshotBaseFare =
       toNumber(selectedVehicleType?.base_fare) ??
@@ -1200,9 +1533,24 @@ item.max_price = priceBounds.max_price;
       null;
 
     const timer = ensureRideTimer(rideId, rideDetails);
+    const pricingCustomerOfferTimeout =
+      toNumber(rideDetails?.customer_offer_timeout_s) ??
+      toNumber(rideDetails?.user_timeout) ??
+      timer?.timeout_ms ??
+      null;
+    const pricingUserTimeout =
+      toNumber(rideDetails?.user_timeout) ??
+      toNumber(rideDetails?.customer_offer_timeout_s) ??
+      timer?.timeout_ms ??
+      null;
 
     const pricingSnapshotSig = JSON.stringify({
       ride_id: rideId,
+      server_time: timer?.server_time ?? null,
+      expires_at: timer?.expires_at ?? null,
+      timeout_ms: timer?.timeout_ms ?? null,
+      customer_offer_timeout_s: pricingCustomerOfferTimeout,
+      user_timeout: pricingUserTimeout,
       user_bid_price: userPrice ?? null,
       isPriceUpdated: !!rideDetails?.isPriceUpdated,
       updatedPrice: rideDetails?.updatedPrice ?? null,
@@ -1210,7 +1558,7 @@ item.max_price = priceBounds.max_price;
       base_fare: snapshotBaseFare ?? null,
       min_price: snapshotMinPrice ?? null,
       max_price: snapshotMaxPrice ?? null,
-      vehicle_types_sig: sig,
+      vehicle_types_sig: pricingTypesSig,
 
       pickup_lat: rideDetails?.pickup_lat ?? socket.nearbyCenter?.lat ?? null,
       pickup_long: rideDetails?.pickup_long ?? socket.nearbyCenter?.long ?? null,
@@ -1225,9 +1573,16 @@ item.max_price = priceBounds.max_price;
 
     socket.lastPricingSnapshotSigByRide.set(rideId, pricingSnapshotSig);
 
-    io.to(`ride:${rideId}`).emit("ride:pricingSnapshot", {
+    let pricingEmitter = io.to(`ride:${rideId}`);
+    if (socket.userId) {
+      pricingEmitter = pricingEmitter.to(userRoom(socket.userId));
+    }
+
+    pricingEmitter.emit("ride:pricingSnapshot", {
       ride_id: rideId,
       ...(timer ? timer : {}),
+      customer_offer_timeout_s: pricingCustomerOfferTimeout,
+      user_timeout: pricingUserTimeout,
       user_bid_price: userPrice,
       base_fare: snapshotBaseFare,
       estimated_fare: snapshotBaseFare,
@@ -1246,7 +1601,7 @@ item.max_price = priceBounds.max_price;
         long: rideDetails?.destination_long ?? null,
         address: rideDetails?.destination_address ?? null,
       },
-      vehicle_types: types,
+      vehicle_types: pricingTypes,
       at: Date.now(),
     });
   } catch (e) {
@@ -1259,6 +1614,14 @@ item.max_price = priceBounds.max_price;
     if (!socket.nearbyCenter) return;
 
     const { lat, long } = socket.nearbyCenter;
+    const roadRadius = normalizeNearbyRadiusMeters(
+      socket.nearbyRadius,
+      DEFAULT_NEARBY_RADIUS_METERS
+    );
+    const airCandidateRadius = Math.max(
+      roadRadius,
+      DEFAULT_AIR_CANDIDATE_RADIUS_METERS
+    );
 
     const opts = { only_online: true };
     if (socket.nearbyServiceTypeId !== null) {
@@ -1277,7 +1640,7 @@ item.max_price = priceBounds.max_price;
     const nearbyAll = driverLocationService.getNearbyDriversFromMemory(
       lat,
       long,
-      AIR_CANDIDATE_RADIUS_METERS,
+      airCandidateRadius,
       {
         ...opts,
         max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
@@ -1286,16 +1649,14 @@ item.max_price = priceBounds.max_price;
 
     const nearbyAvailable = nearbyAll.filter((d) => {
       const dId = toNumber(d?.driver_id);
-      if (!dId) return false;
-      const activeRide = getActiveRideByDriver(dId);
-      return !activeRide;
+      return canDriverAppearInNearby(dId);
     });
 
     const nearby = await filterDriversByRoadRadius(
       nearbyAvailable,
       lat,
       long,
-      ROAD_RADIUS_METERS
+      roadRadius
     );
 
     const nearbyWithNormalizedIcons = nearby.map((d) => ({
@@ -1307,11 +1668,11 @@ item.max_price = priceBounds.max_price;
     socket.emit(eventName, nearbyWithNormalizedIcons);
 
     console.log(
-      `👤 Nearby -> ${nearby.length} drivers within road radius ${ROAD_RADIUS_METERS}m`
+      `👤 Nearby -> ${nearby.length} drivers within road radius ${roadRadius}m`
     );
   };
 
-  socket.on("user:findNearbyDrivers", (payload = {}) => {
+  socket.on("user:findNearbyDrivers", async (payload = {}) => {
     debugLog("user:findNearbyDrivers", payload, socket.id);
     console.log("📦 payload from frontend:", payload);
     const { user_id, lat, long, service_type_id } = payload;
@@ -1336,7 +1697,7 @@ item.max_price = priceBounds.max_price;
     persistRideRouteMetrics(payload, routeKm, routeDurationMin, etaMin);
     emitRouteEtaToDriver(routeKm, etaMin, payload);
 
-    socket.nearbyRadius = INITIAL_RADIUS;
+    socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
 
     const la = toNumber(lat);
     const lo = toNumber(long);
@@ -1350,6 +1711,8 @@ item.max_price = priceBounds.max_price;
     const sc = toNumber(payload.service_category_id ?? payload.service_cat_id);
     if (sc !== null && sc > 0) socket.nearbyServiceCategoryId = sc;
 
+    await syncNearbyRadius(payload);
+
     if (routeKm !== null) {
       setNearbyRouteDistanceKm(routeKm);
     }
@@ -1359,8 +1722,8 @@ item.max_price = priceBounds.max_price;
 
     socket.lastVehicleTypesSig = null;
 
-    void sendNearby("user:nearbyDrivers");
-    void emitNearbyVehicleTypes();
+    await sendNearby("user:nearbyDrivers");
+    await emitNearbyVehicleTypes();
 
     stopNearby();
     socket.nearbyInterval = setInterval(() => {
@@ -1395,6 +1758,8 @@ item.max_price = priceBounds.max_price;
     const sc = toNumber(payload.service_category_id ?? payload.service_cat_id);
     if (sc !== null && sc > 0) socket.nearbyServiceCategoryId = sc;
 
+    await syncNearbyRadius(payload);
+
     if (routeKm !== null) {
       setNearbyRouteDistanceKm(routeKm);
     }
@@ -1427,6 +1792,8 @@ item.max_price = priceBounds.max_price;
     const sc = toNumber(payload.service_category_id ?? payload.service_cat_id);
     if (sc !== null && sc > 0) socket.nearbyServiceCategoryId = sc;
 
+    await syncNearbyRadius(payload);
+
     const routeKm = extractRouteDistanceKm(payload);
     const routeDurationMin = extractRouteDurationMin(payload);
     const etaMin = toNumber(payload?.eta_min ?? null) ?? routeDurationMin;
@@ -1448,8 +1815,10 @@ item.max_price = priceBounds.max_price;
     const st = toNumber(service_type_id);
     socket.nearbyServiceTypeId = st === null ? null : st;
 
-    socket.nearbyRadius = INITIAL_RADIUS;
+    socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
     socket.lastVehicleTypesSig = null;
+
+    await syncNearbyRadius({});
 
     void sendNearby("user:nearbyDrivers:update");
 
@@ -1470,10 +1839,10 @@ item.max_price = priceBounds.max_price;
     socket.nearbyRouteDistanceKm = null;
     socket.nearbyRouteDurationMin = null;
     socket.nearbyRequiredGender = null;
-    socket.nearbyNeedChildSeat = null;
-    socket.nearbyNeedHandicap = null;
-    socket.nearbyRadius = INITIAL_RADIUS;
-    socket.nearbyFareCache.clear();
+      socket.nearbyNeedChildSeat = null;
+      socket.nearbyNeedHandicap = null;
+      socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
+      socket.nearbyFareCache.clear();
     socket.lastVehicleTypesSig = null;
     socket.currentRideId = null;
   });
