@@ -10,6 +10,7 @@ const {
   setActiveRide,
   clearActiveRideByDriver,
 } = require("../store/activeRides.store");
+const { getRideStatusSnapshot } = require("../store/rideStatusSnapshots.store");
 const LARAVEL_GET_ROUTE_PATH =
   process.env.LARAVEL_GET_ROUTE_PATH || "/api/getRoute";
 
@@ -25,6 +26,7 @@ const driverRideInbox = new Map(); // driverId -> Map(rideId -> ridePayload)
 const driverLastBidStatus = new Map(); // driverId -> { rideId, responded }
 const acceptLocks = new Map(); // rideId -> timestamp (prevent double-accept race)
 const driverQueuedRide = new Map(); // driverId -> { ride_id, offered_price, ride_snapshot, reserved_at }
+const rideDriverStates = new Map(); // rideId -> Map(driverId -> { status, notified_at, updated_at })
 
 // ✅ NEW: per-driver patch sequence (ordering)
 const driverPatchSeq = new Map(); // driverId -> number
@@ -237,6 +239,7 @@ const DRIVER_TO_PICKUP_SPEED_KMPH = Number.isFinite(
 const RIDE_TIMEOUT_S = Number.isFinite(Number(process.env.RIDE_TIMEOUT_S))
   ? Number(process.env.RIDE_TIMEOUT_S)
   : 90; // ✅ fixed 90 seconds
+const CUSTOMER_SEARCH_TIMEOUT_S = 90;
 
 const CANCELLED_RIDE_TTL_MS = 10 * 60 * 1000;
 
@@ -292,11 +295,14 @@ const DEFAULT_CUSTOMER_IMAGE_URL = `${NORMALIZED_LARAVEL_BASE_URL}/assets/images
 
 const LARAVEL_ACCEPT_BID_PATH = "/api/customer/transport/accept-bid";
 const LARAVEL_DRIVER_BID_PATH = "/api/driver/bid-offer";
+const LARAVEL_DRIVER_REJECT_REQUEST_PATH = "/api/driver/reject-request";
+const LARAVEL_DRIVER_REJECT_NOTIFICATION_PATH = "/api/driver/driver-reject-notification";
 const LARAVEL_ACCEPT_BID_TIMEOUT_MS = Number.isFinite(
   Number(process.env.LARAVEL_ACCEPT_BID_TIMEOUT_MS)
 )
   ? Number(process.env.LARAVEL_ACCEPT_BID_TIMEOUT_MS)
   : 7000;
+const DISPATCH_EXPANSION_INTERVAL_S = 5;
 
 // ─────────────────────────────
 // ✅ Timer helpers (SECONDS ONLY + SERVER AUTHORITATIVE)
@@ -321,6 +327,69 @@ const makeTimer = (durationSec = RIDE_TIMEOUT_S) => {
     timeout_ms: durSec, // seconds (kept key name)
   };
 };
+
+async function syncDriverRejectNotification({
+  driverId,
+  rideId,
+  serviceCategoryId,
+  accessToken,
+  driverServiceId,
+}) {
+  if (!driverId || !rideId || !serviceCategoryId || !accessToken || !driverServiceId) {
+    console.log("[driver:declineRide] Laravel reject-notification sync skipped", {
+      driver_id: driverId ?? null,
+      ride_id: rideId ?? null,
+      service_category_id: serviceCategoryId ?? null,
+      has_access_token: !!accessToken,
+      driver_service_id: driverServiceId ?? null,
+    });
+    return false;
+  }
+
+  try {
+    const rejectPayload = {
+      driver_id: driverId,
+      access_token: accessToken,
+      driver_service_id: driverServiceId,
+      request_id: rideId,
+      service_category_id: serviceCategoryId,
+    };
+    const rejectPaths = [
+      LARAVEL_DRIVER_REJECT_REQUEST_PATH,
+      LARAVEL_DRIVER_REJECT_NOTIFICATION_PATH,
+    ];
+
+    for (const path of rejectPaths) {
+      try {
+        await axios.post(`${LARAVEL_BASE_URL}${path}`, rejectPayload, {
+          timeout: 7000,
+        });
+
+        console.log("[driver:declineRide] Laravel reject sync succeeded", {
+          driver_id: driverId,
+          ride_id: rideId,
+          service_category_id: serviceCategoryId,
+          path,
+        });
+        return true;
+      } catch (error) {
+        console.error("[driver:declineRide] Laravel reject sync failed", {
+          path,
+          driver_id: driverId,
+          ride_id: rideId,
+          service_category_id: serviceCategoryId,
+          error: error?.response?.data || error?.message || error,
+        });
+      }
+    }
+  } catch (error) {
+    console.error(
+      "[driver:declineRide] Laravel reject-notification sync failed:",
+      error?.response?.data || error?.message || error
+    );
+    return false;
+  }
+}
 
 // ─────────────────────────────
 // ✅ Patch system helpers
@@ -354,6 +423,7 @@ function emitDriverPatch(io, driverId, ops = []) {
     seq: nextDriverSeq(driverId),
     at: Date.now(),
   });
+  return true;
 }
 
 function isRideOfferExpired(ride) {
@@ -371,6 +441,68 @@ function isDriverOfferStillActive(driverId, rideId) {
   if (isRideOfferExpired(ride)) return false;
 
   return true;
+}
+
+function getRideDriverStatesMap(rideId, { create = false } = {}) {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return null;
+
+  const existing = rideDriverStates.get(safeRideId);
+  if (existing || !create) return existing ?? null;
+
+  const next = new Map();
+  rideDriverStates.set(safeRideId, next);
+  return next;
+}
+
+function getRideDriverState(rideId, driverId) {
+  const states = getRideDriverStatesMap(rideId);
+  if (!states) return null;
+  return states.get(toNumber(driverId)) ?? null;
+}
+
+function hasRideDriverBeenNotified(rideId, driverId) {
+  const state = getRideDriverState(rideId, driverId);
+  return !!(state && state.notified_at);
+}
+
+function markRideDriverState(rideId, driverId, status, extra = {}) {
+  const safeRideId = toNumber(rideId);
+  const safeDriverId = toNumber(driverId);
+  if (!safeRideId || !safeDriverId || !status) return null;
+
+  const states = getRideDriverStatesMap(safeRideId, { create: true });
+  const previous = states.get(safeDriverId) ?? null;
+  const now = Date.now();
+  const next = {
+    ...(previous ?? {}),
+    ...extra,
+    driver_id: safeDriverId,
+    status,
+    updated_at: now,
+    notified_at: previous?.notified_at ?? null,
+  };
+
+  if (status === "notified" && !next.notified_at) {
+    next.notified_at = now;
+  }
+
+  states.set(safeDriverId, next);
+  return next;
+}
+
+function clearRideDriverStates(rideId) {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return;
+  rideDriverStates.delete(safeRideId);
+}
+
+function isTerminalDriverRideState(status) {
+  return status === "declined" || status === "accepted" || status === "expired";
+}
+
+function isTerminalRideStatus(status) {
+  return status === 4 || status === 6 || status === 7 || status === 8 || status === 9 || status === 10 || status === 11;
 }
 
 function removeDriverFromRideCandidates(io, rideId, driverId, options = {}) {
@@ -1065,15 +1197,18 @@ const resolveDispatchTimeoutSeconds = (payload = null) => {
 };
 
 const resolveCustomerOfferTimeoutSeconds = (payload = null) => {
-  const parsed = toNumber(
-    payload?.customer_offer_timeout_s ??
-      payload?.user_timeout ??
-      payload?.offer_timeout_s ??
-      payload?.user_timeout_s ??
-      null
-  );
+  return CUSTOMER_SEARCH_TIMEOUT_S;
+};
 
-  return Math.max(1, Math.floor(parsed !== null ? parsed : RIDE_TIMEOUT_S));
+const resolveRideSearchLifetimeSeconds = (payload = null) => {
+  const forceNewSearchWindow =
+    toNumber(payload?.force_new_search_window ?? payload?.reset_search_window ?? null) === 1;
+  const expiresAt = toNumber(payload?.expires_at);
+  if (!forceNewSearchWindow && expiresAt !== null) {
+    return Math.max(0, Math.floor(expiresAt - nowSec()));
+  }
+
+  return resolveCustomerOfferTimeoutSeconds(payload);
 };
 
 function isAcceptLocked(rideId) {
@@ -1295,11 +1430,31 @@ function startRideTimeout(io, rideId, durationSec = RIDE_TIMEOUT_S) {
   rideTimers.set(rideId, timer);
 }
 
-function startRideTimeoutWithExpansion(io, rideId, durationSec = RIDE_TIMEOUT_S) {
+function startRideTimeoutWithExpansion(io, rideId, remainingLifetimeSec = RIDE_TIMEOUT_S) {
   cancelRideTimeout(rideId);
 
-  const sec = Math.max(0, toNumber(durationSec) ?? RIDE_TIMEOUT_S);
-  const ms = sec * 1000;
+  const snapshot = getRideSnapshotForRedispatch(rideId);
+  const resolvedRemainingLifetimeSec = Math.max(
+    0,
+    Math.floor(
+      toNumber(remainingLifetimeSec) ?? resolveRideSearchLifetimeSeconds(snapshot ?? null)
+    )
+  );
+  if (resolvedRemainingLifetimeSec <= 0) {
+    console.log(`Ride ${rideId} has timed out. Removing from memory.`);
+    removeRideFromAllInboxes(io, rideId, {
+      preserveSnapshot: true,
+      preserveUser: true,
+    });
+    rideCandidates.delete(rideId);
+    return;
+  }
+
+  const radiusPlan = snapshot ? resolveDispatchRadiusPlan(snapshot) : null;
+  const waitSeconds = radiusPlan?.hasNextStage
+    ? Math.min(DISPATCH_EXPANSION_INTERVAL_S, resolvedRemainingLifetimeSec)
+    : resolvedRemainingLifetimeSec;
+  const ms = waitSeconds * 1000;
 
   const timer = setTimeout(async () => {
     rideTimers.delete(rideId);
@@ -1317,22 +1472,32 @@ function startRideTimeoutWithExpansion(io, rideId, durationSec = RIDE_TIMEOUT_S)
       return;
     }
 
-    try {
-      const expanded = await expandRideDispatchRadius(io, rideId, "timeout");
-      if (expanded) return;
-    } catch (error) {
-      console.log(
-        `[dispatch][expand] timeout expansion failed for ride ${rideId}:`,
-        error?.message || error
-      );
+    const latestSnapshot = getRideSnapshotForRedispatch(rideId);
+    const latestRemainingLifetimeSec = resolveRideSearchLifetimeSeconds(latestSnapshot ?? null);
+    if (latestRemainingLifetimeSec <= 0) {
+      console.log(`Ride ${rideId} has timed out. Removing from memory.`);
+      removeRideFromAllInboxes(io, rideId, {
+        preserveSnapshot: true,
+        preserveUser: true,
+      });
+      rideCandidates.delete(rideId);
+      return;
     }
 
-    console.log(`Ride ${rideId} has timed out. Removing from memory.`);
-    removeRideFromAllInboxes(io, rideId, {
-      preserveSnapshot: true,
-      preserveUser: true,
-    });
-    rideCandidates.delete(rideId);
+    const latestRadiusPlan = latestSnapshot ? resolveDispatchRadiusPlan(latestSnapshot) : null;
+    if (latestRadiusPlan?.hasNextStage) {
+      try {
+        const expanded = await expandRideDispatchRadius(io, rideId, "interval");
+        if (expanded) return;
+      } catch (error) {
+        console.log(
+          `[dispatch][expand] interval expansion failed for ride ${rideId}:`,
+          error?.message || error
+        );
+      }
+    }
+
+    startRideTimeoutWithExpansion(io, rideId, latestRemainingLifetimeSec);
   }, ms);
 
   rideTimers.set(rideId, timer);
@@ -1371,6 +1536,7 @@ function refreshRideTimer(io, rideId, options = {}) {
       if (isRideOfferExpired(current)) {
         box.delete(rideId);
         clearDriverBidStatus(driverId, rideId);
+        markRideDriverState(rideId, driverId, "expired");
         removeDriverFromRideCandidates(io, rideId, driverId, { emitSummary: false });
         emitDriverPatch(io, driverId, [{ op: "remove", ride_id: rideId }]);
         affectedRideIds.add(rideId);
@@ -1403,11 +1569,10 @@ function refreshRideTimerWithDispatchTimeout(io, rideId, options = {}) {
   if (!rideId) return null;
 
   const rideSnapshot = getRideDetails(rideId);
-  const dispatchTimeoutSeconds = resolveDispatchTimeoutSeconds(rideSnapshot);
   const customerOfferTimeoutSeconds = resolveCustomerOfferTimeoutSeconds(rideSnapshot);
   const timer = makeTimer(customerOfferTimeoutSeconds);
 
-  startRideTimeoutWithExpansion(io, rideId, dispatchTimeoutSeconds);
+  startRideTimeoutWithExpansion(io, rideId, customerOfferTimeoutSeconds);
 
   if (update_snapshot) {
     const snap = getRideDetails(rideId);
@@ -1430,6 +1595,7 @@ function refreshRideTimerWithDispatchTimeout(io, rideId, options = {}) {
       if (isRideOfferExpired(current)) {
         box.delete(rideId);
         clearDriverBidStatus(driverId, rideId);
+        markRideDriverState(rideId, driverId, "expired");
         removeDriverFromRideCandidates(io, rideId, driverId, { emitSummary: false });
         emitDriverPatch(io, driverId, [{ op: "remove", ride_id: rideId }]);
         affectedRideIds.add(rideId);
@@ -1458,6 +1624,16 @@ function refreshRideTimerWithDispatchTimeout(io, rideId, options = {}) {
 }
 
 function inboxUpsert(driverId, rideId, payload) {
+  const currentState = getRideDriverState(rideId, driverId);
+  if (isTerminalDriverRideState(currentState?.status)) {
+    console.log("[inboxUpsert] skipped terminal driver ride state", {
+      driver_id: driverId,
+      ride_id: rideId,
+      status: currentState.status,
+    });
+    return false;
+  }
+
   if (!driverRideInbox.has(driverId)) driverRideInbox.set(driverId, new Map());
   const prepared = attachCustomerFields(payload, payload?.user_details ?? null);
   driverRideInbox.get(driverId).set(rideId, {
@@ -1496,6 +1672,7 @@ function pruneDriverInbox(io, driverId) {
     if (isRideOfferExpired(ride) || (ts && now - ts > INBOX_ENTRY_TTL_MS)) {
       box.delete(rideId);
       clearDriverBidStatus(driverId, rideId);
+      markRideDriverState(rideId, driverId, "expired");
       removeDriverFromRideCandidates(io, rideId, driverId, { emitSummary: false });
       removedOps.push({ op: "remove", ride_id: rideId });
       affectedRideIds.add(rideId);
@@ -1526,6 +1703,7 @@ setInterval(() => {
         if (isRideOfferExpired(ride) || (ts && now - ts > INBOX_ENTRY_TTL_MS)) {
           box.delete(rideId);
           clearDriverBidStatus(driverId, rideId);
+          markRideDriverState(rideId, driverId, "expired");
           removeDriverFromRideCandidates(null, rideId, driverId, { emitSummary: false });
         }
       }
@@ -1539,7 +1717,31 @@ setInterval(() => {
 function inboxList(driverId, limit = 30) {
   const box = driverRideInbox.get(driverId);
   if (!box) return [];
-  return Array.from(box.values())
+
+  const visibleRides = [];
+  for (const [rideId, ride] of box.entries()) {
+    const currentState = getRideDriverState(rideId, driverId);
+    const statusSnapshot = getRideStatusSnapshot(rideId);
+    const rideStatus =
+      toNumber(statusSnapshot?.ride_status) ??
+      toNumber(ride?.ride_status) ??
+      toNumber(ride?.status) ??
+      null;
+
+    if (
+      isTerminalDriverRideState(currentState?.status) ||
+      cancelledRides.has(toNumber(rideId)) ||
+      isTerminalRideStatus(rideStatus)
+    ) {
+      box.delete(rideId);
+      continue;
+    }
+    visibleRides.push(ride);
+  }
+
+  if (box.size === 0) driverRideInbox.delete(driverId);
+
+  return visibleRides
     .sort((a, b) => (b._ts || 0) - (a._ts || 0))
     .slice(0, limit);
 }
@@ -1791,6 +1993,52 @@ async function expandRideDispatchRadius(io, rideId, reason = "timeout") {
   return !!(await dispatchToNearbyDrivers(io, redispatchPayload));
 }
 
+async function restartRideDispatch(io, payload = {}) {
+  const safeRideId = toNumber(payload?.ride_id ?? payload?.id);
+  if (!safeRideId) return false;
+  if (cancelledRides.has(safeRideId)) return false;
+
+  const activeDriverId = getActiveDriverByRide(safeRideId);
+  if (activeDriverId) {
+    console.log(
+      `[dispatch][retry] blocked: ride ${safeRideId} already accepted by driver ${activeDriverId}`
+    );
+    return false;
+  }
+
+  const snapshot = getRideSnapshotForRedispatch(safeRideId);
+  const initialRadiusMeters =
+    normalizeDispatchRadiusMeters(
+      payload?.initial_dispatch_radius ??
+        snapshot?.initial_dispatch_radius ??
+        payload?.radius ??
+        snapshot?.radius ??
+        null
+    ) ?? ROAD_RADIUS_METERS;
+
+  removeRideFromAllInboxes(io, safeRideId, {
+    preserveSnapshot: true,
+    preserveUser: true,
+  });
+
+  const restartPayload = {
+    ...(snapshot && typeof snapshot === "object" ? snapshot : {}),
+    ...(payload && typeof payload === "object" ? payload : {}),
+    ride_id: safeRideId,
+    radius: initialRadiusMeters,
+    initial_dispatch_radius: initialRadiusMeters,
+    dispatch_stage_index: 0,
+    dispatch_incremental_only: 0,
+    dispatch_expand_reason: "retry",
+    force_new_search_window: 1,
+    server_time: null,
+    expires_at: null,
+    timeout_ms: null,
+  };
+
+  return !!(await dispatchToNearbyDrivers(io, restartPayload));
+}
+
 // ✅ remove ride from all drivers inboxes (safe global scan) + PATCH remove
 function removeRideFromAllInboxes(io, rideId, options = {}) {
   const {
@@ -1846,6 +2094,7 @@ function removeRideFromAllInboxes(io, rideId, options = {}) {
   }
 
   rideCandidates.delete(rideId);
+  clearRideDriverStates(rideId);
 }
 
 // ✅ Close bidding for a ride (remove from all inboxes) + PATCH remove
@@ -1886,6 +2135,7 @@ function closeRideBidding(io, rideId, opts = {}) {
   }
 
   rideCandidates.delete(rideId);
+  clearRideDriverStates(rideId);
 }
 
 // ─────────────────────────────
@@ -1971,6 +2221,16 @@ async function dispatchToNearbyDrivers(io, data) {
   const roadRadius = radiusPlan.currentRadiusMeters;
   const dispatchTimeoutSeconds = resolveDispatchTimeoutSeconds(data);
   const customerOfferTimeoutSeconds = resolveCustomerOfferTimeoutSeconds(data);
+  const searchTimeoutSeconds = resolveRideSearchLifetimeSeconds(data);
+  if (searchTimeoutSeconds <= 0) {
+    console.log(`[dispatch] blocked: ride ${rideId} search window already expired`);
+    removeRideFromAllInboxes(io, rideId, {
+      preserveSnapshot: true,
+      preserveUser: true,
+    });
+    rideCandidates.delete(rideId);
+    return false;
+  }
 
   const airCandidateRadius = Math.max(roadRadius, AIR_CANDIDATE_RADIUS_METERS);
 
@@ -2164,11 +2424,18 @@ async function dispatchToNearbyDrivers(io, data) {
     long,
     roadRadius
   );
+  const existingCandidateSet = rideCandidates.get(rideId) ?? new Set();
+  const eligibleForDispatch = roadFiltered.filter((driver) => {
+    const driverId = toNumber(driver?.driver_id);
+    if (!driverId) return false;
+    if (existingCandidateSet.has(driverId)) return true;
+    return !hasRideDriverBeenNotified(rideId, driverId);
+  });
 
   const candidates =
     MAX_DISPATCH_CANDIDATES > 0
-      ? roadFiltered.slice(0, MAX_DISPATCH_CANDIDATES)
-      : roadFiltered;
+      ? eligibleForDispatch.slice(0, MAX_DISPATCH_CANDIDATES)
+      : eligibleForDispatch;
   const incrementalExpansion =
     data?.dispatch_expand_reason === "timeout" ||
     toNumber(data?.dispatch_incremental_only) === 1;
@@ -2176,17 +2443,17 @@ async function dispatchToNearbyDrivers(io, data) {
     1,
     radiusPlan.stagesMeters.length - radiusPlan.currentStageIndex
   );
-  const remainingSearchTimeoutSeconds = dispatchTimeoutSeconds * remainingSearchStageCount;
-  const dispatchStageTimer = makeTimer(dispatchTimeoutSeconds);
-  const searchTimer = makeTimer(remainingSearchTimeoutSeconds);
+  const driverOfferTimer = makeTimer(searchTimeoutSeconds);
+  const searchTimer = makeTimer(searchTimeoutSeconds);
   console.log("[dispatch][dispatchToNearbyDrivers]", {
     ride_id: rideId,
     road_radius_m: roadRadius,
     air_candidate_radius_m: airCandidateRadius,
     dispatch_timeout_s: dispatchTimeoutSeconds,
     customer_offer_timeout_s: customerOfferTimeoutSeconds,
-    search_timeout_s: remainingSearchTimeoutSeconds,
+    search_timeout_s: searchTimeoutSeconds,
     dispatch_remaining_stages: remainingSearchStageCount,
+    dispatch_expand_every_s: DISPATCH_EXPANSION_INTERVAL_S,
     incremental_expansion: incrementalExpansion,
     initial_radius_m: radiusPlan.initialRadiusMeters,
     dispatch_stage_number: radiusPlan.currentStageIndex + 1,
@@ -2196,6 +2463,7 @@ async function dispatchToNearbyDrivers(io, data) {
     nearby_air: nearbyAir.length,
     available_air: availableAir.length,
     road_filtered: roadFiltered.length,
+    dispatch_eligible: eligibleForDispatch.length,
     candidates: candidates.length,
     required_gender: requiredGender ?? null,
     need_child_seat: needChildSeat ?? null,
@@ -2203,9 +2471,6 @@ async function dispatchToNearbyDrivers(io, data) {
     has_user_details: !!userDetails,
     token_present: !!tokenTmp,
   });
-
-  // ✅ start server timeout (seconds)
-  startRideTimeoutWithExpansion(io, rideId, dispatchTimeoutSeconds);
 
   const candidateSync = syncRideCandidates(
     io,
@@ -2223,8 +2488,9 @@ async function dispatchToNearbyDrivers(io, data) {
     dispatch_timeout_s: dispatchTimeoutSeconds,
     customer_offer_timeout_s: customerOfferTimeoutSeconds,
     user_timeout: customerOfferTimeoutSeconds,
-    search_timeout_s: remainingSearchTimeoutSeconds,
+    search_timeout_s: searchTimeoutSeconds,
     dispatch_remaining_stages: remainingSearchStageCount,
+    dispatch_expand_every_s: DISPATCH_EXPANSION_INTERVAL_S,
     initial_dispatch_radius: radiusPlan.initialRadiusMeters,
     dispatch_stage_index: radiusPlan.currentStageIndex,
     dispatch_stage_number: radiusPlan.currentStageIndex + 1,
@@ -2311,8 +2577,8 @@ async function dispatchToNearbyDrivers(io, data) {
     ...(updatedPrice !== null ? { updatedPrice } : {}),
     ...(updatedAt !== null ? { updatedAt } : {}),
 
-    // ✅ timer fields for drivers (current dispatch stage only)
-    ...dispatchStageTimer,
+    // ✅ timer fields for drivers (remaining search lifetime)
+    ...driverOfferTimer,
   };
   const ridePayload = attachCustomerFields(ridePayloadBase, ridePayloadBase.user_details ?? userDetails);
 
@@ -2393,6 +2659,9 @@ async function dispatchToNearbyDrivers(io, data) {
       userDetails
     )
   );
+
+  // ✅ expansion cadence is fixed; overall lifetime still follows the ride timer
+  startRideTimeoutWithExpansion(io, rideId, searchTimeoutSeconds);
 
   // Keep bidRequest user fields stable even when one source is partially missing.
   const bidReqUserId =
@@ -2508,7 +2777,7 @@ async function dispatchToNearbyDrivers(io, data) {
       ...(updatedPrice !== null ? { updatedPrice } : {}),
       ...(updatedAt !== null ? { updatedAt } : {}),
 
-      ...dispatchStageTimer,
+      ...driverOfferTimer,
     });
     console.log("[ride:bidRequest] payload", {
       driver_id: d.driver_id,
@@ -2559,12 +2828,16 @@ async function dispatchToNearbyDrivers(io, data) {
               }
             : {}),
         },
-        ...dispatchStageTimer,
+        ...driverOfferTimer,
       },
       ridePayload?.user_details ?? userDetails ?? null
     );
 
     inboxUpsert(d.driver_id, rideId, ridePayloadForDriver);
+    markRideDriverState(rideId, d.driver_id, "notified", {
+      last_dispatch_stage_index: radiusPlan.currentStageIndex,
+      last_dispatch_radius_m: roadRadius,
+    });
     emitDriverPatch(io, d.driver_id, [{ op: "upsert", ride: ridePayloadForDriver }]);
 
     console.log(`   -> Sent bidRequest + patch(upsert) to driver ${d.driver_id} (room:${room})`);
@@ -3448,6 +3721,7 @@ socket.emit("ride:candidatesSummary", {
     if (!driverId || !rideId || offeredPrice === null) return;
     if (!isDriverOfferStillActive(driverId, rideId)) {
       console.log(`⚠️ Driver ${driverId} cannot accept: offer expired for ride ${rideId}`);
+      markRideDriverState(rideId, driverId, "expired");
       inboxRemove(driverId, rideId);
       clearDriverBidStatus(driverId, rideId);
       removeDriverFromRideCandidates(io, rideId, driverId, { emitSummary: true });
@@ -3486,6 +3760,10 @@ socket.emit("ride:candidatesSummary", {
 
       console.log(`🧹 Removed ride ${rideId} from driver ${driverId} inbox after acceptOffer`);
     }
+
+    markRideDriverState(rideId, driverId, "accepted", {
+      last_offered_price: offeredPrice,
+    });
 
     const rideDetails = getRideDetails(rideId);
     const userId =
@@ -3605,6 +3883,7 @@ socket.emit("ride:candidatesSummary", {
     }
     if (!isDriverOfferStillActive(driverId, rideId)) {
       console.log(`⚠️ Driver ${driverId} cannot bid: offer expired for ride ${rideId}`);
+      markRideDriverState(rideId, driverId, "expired");
       inboxRemove(driverId, rideId);
       clearDriverBidStatus(driverId, rideId);
       removeDriverFromRideCandidates(io, rideId, driverId, { emitSummary: true });
@@ -3899,6 +4178,9 @@ socket.emit("ride:candidatesSummary", {
     }
 
     driverLastBidStatus.set(driverId, { rideId, responded: false });
+    markRideDriverState(rideId, driverId, "bid_submitted", {
+      last_offered_price: offeredPrice,
+    });
 
     if (!driverServiceId || !accessToken) {
       console.log(`⚠️ driver:submitBid API skipped: missing driver_service_id/access_token (driver ${driverId})`);
@@ -4405,6 +4687,10 @@ socket.emit("ride:candidatesSummary", {
       });
     }
 
+    markRideDriverState(rideId, driverId, "accepted", {
+      last_offered_price: finalPrice,
+    });
+
     finalizeAcceptedRide(io, rideId, driverId, finalPrice, {
       message: "User accepted the offer",
       rideDetails: acceptedRideSnapshot,
@@ -4446,6 +4732,27 @@ socket.emit("ride:candidatesSummary", {
 
     if (!driverId || !rideId) return;
 
+    const rideSnapshot =
+      driverRideInbox.get(driverId)?.get(rideId) ??
+      getRideDetails(rideId) ??
+      null;
+    const driverMeta = driverLocationService.getMeta(driverId) || {};
+    const serviceCategoryId = toNumber(
+      payload?.service_category_id ??
+        rideSnapshot?.service_category_id ??
+        rideSnapshot?.meta?.service_category_id ??
+        null
+    );
+    const driverServiceId =
+      toNumber(payload?.driver_service_id) ??
+      toNumber(socket.driverServiceId) ??
+      toNumber(driverMeta?.driver_service_id);
+    const accessToken =
+      payload?.access_token ??
+      socket.driverAccessToken ??
+      driverMeta?.access_token ??
+      null;
+
     const activeDriverId = getActiveDriverByRide(rideId);
     if (activeDriverId) {
       console.log(
@@ -4457,6 +4764,7 @@ socket.emit("ride:candidatesSummary", {
     removeDriverFromRideCandidates(io, rideId, driverId, { emitSummary: false });
     const existed = inboxRemove(driverId, rideId);
     clearDriverBidStatus(driverId, rideId);
+    markRideDriverState(rideId, driverId, "declined");
 
     if (existed) {
       emitDriverPatch(io, driverId, [{ op: "remove", ride_id: rideId }]);
@@ -4469,6 +4777,13 @@ socket.emit("ride:candidatesSummary", {
     });
 
     emitRideCandidatesSummary(io, rideId);
+    void syncDriverRejectNotification({
+      driverId,
+      rideId,
+      serviceCategoryId,
+      accessToken,
+      driverServiceId,
+    });
 
     console.log(`❌ Driver ${driverId} declined ride ${rideId}`);
   });
@@ -4493,6 +4808,7 @@ socket.emit("ride:candidatesSummary", {
 };
 
 module.exports.dispatchToNearbyDrivers = dispatchToNearbyDrivers;
+module.exports.restartRideDispatch = restartRideDispatch;
 module.exports.closeRideBidding = closeRideBidding;
 module.exports.refreshUserDetailsForUserId = refreshUserDetailsForUserId;
 module.exports.saveRideDetails = saveRideDetails;

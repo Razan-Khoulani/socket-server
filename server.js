@@ -974,19 +974,26 @@ app.post("/events/internal/driver-location", (req, res) => {
 });
 
 app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
+  const dispatchPayload =
+    req.body && typeof req.body === "object"
+      ? { ...req.body, force_new_search_window: 1 }
+      : { force_new_search_window: 1 };
+
   console.log(
     "[ride-bid-dispatch] Incoming request from Laravel",
-    req.body
+    dispatchPayload
   );
   console.log("[dispatch][ride-bid-dispatch]", {
-    ride_id: req.body?.ride_id ?? null,
-    service_type_id: req.body?.service_type_id ?? null,
-    radius: req.body?.radius ?? null,
-    dispatch_timeout_s: req.body?.dispatch_timeout_s ?? null,
+    ride_id: dispatchPayload?.ride_id ?? null,
+    service_type_id: dispatchPayload?.service_type_id ?? null,
+    radius: dispatchPayload?.radius ?? null,
+    dispatch_timeout_s: dispatchPayload?.dispatch_timeout_s ?? null,
+    dispatch_radius_stages_m: dispatchPayload?.dispatch_radius_stages_m ?? null,
+    force_new_search_window: dispatchPayload?.force_new_search_window ?? null,
   });
 
   try {
-    const ok = await biddingSocket.dispatchToNearbyDrivers(io, req.body);
+    const ok = await biddingSocket.restartRideDispatch(io, dispatchPayload);
     res.json({ status: ok ? 1 : 0 });
   } catch (e) {
     console.error("[ride-bid-dispatch] Failed:", e.message);

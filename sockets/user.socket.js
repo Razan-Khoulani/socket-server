@@ -48,11 +48,7 @@ const VEHICLE_ICON_RELATIVE_DIR = "assets/images/service-category/transport-serv
 const DRIVER_IMAGE_RELATIVE_DIR = "assets/images/profile-images/provider";
 
 // ✅ NEW: keep timer unit aligned with bidding.socket (SECONDS)
-const RIDE_TIMEOUT_S = Number.isFinite(Number(process.env.RIDE_TIMEOUT_S))
-  ? Number(process.env.RIDE_TIMEOUT_S)
-  : Number.isFinite(Number(process.env.RIDE_TIMEOUT_MS))
-  ? Math.round(Number(process.env.RIDE_TIMEOUT_MS) / 1000)
-  : 90;
+const RIDE_TIMEOUT_S = 90;
 
 const toNumber = (v) => {
   if (v === null || v === undefined || v === "") return null;
