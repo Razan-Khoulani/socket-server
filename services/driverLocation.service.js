@@ -82,6 +82,11 @@ exports.getMeta = (driverId) => driverLocations.get(driverId) || null;
 // Get single driver (كما هو)
 // ─────────────────────────────────────────────
 exports.getDriver = (driverId) => driverLocations.get(driverId);
+exports.listDrivers = () =>
+  Array.from(driverLocations.entries()).map(([driverId, data]) => ({
+    driver_id: driverId,
+    ...data,
+  }));
 
 // ─────────────────────────────────────────────
 // Remove driver (كما هو)

@@ -10,6 +10,7 @@ const {
   clearRideRoute,
 } = require("../store/rideRoutes.store");
 const { getDistanceMeters } = require("../utils/geo.util");
+const { emitAdminDriverUpdate } = require("../services/adminDriverFeed.service");
 const biddingSocket = require("./bidding.socket");
 const ENABLE_RIDE_TRACKING_SERVICE =
   process.env.ENABLE_RIDE_TRACKING_SERVICE === "1";
@@ -315,14 +316,21 @@ module.exports = (io, socket) => {
     console.log("✅ driver joined room", driverRoom(driverId), "socket:", socket.id);
 
     // ✅ خزّن أولياً لوكيشن + online (بدون upsert)
+    const onlineNow = Date.now();
     driverLocationService.updateMemory(driverId, la, lo);
+    lastAcceptedLocationByDriver.set(driverId, {
+      lat: la,
+      long: lo,
+      at: onlineNow,
+    });
 
 const baseMeta = {
   driver_id: driverId,
   is_online: true,
+  dashboard_is_online: true,
   socket_disconnected: false,
   driver_service_id: toNumber(driver_service_id) ?? null,
-  updatedAt: Date.now(),
+  updatedAt: onlineNow,
 };
 
     if (Number.isFinite(payloadServiceTypeId)) {
@@ -357,6 +365,8 @@ const baseMeta = {
             update_status: 1,
             access_token,
             driver_service_id,
+            current_lat: la,
+            current_long: lo,
           },
           { timeout: LARAVEL_TIMEOUT_MS }
         );
@@ -407,6 +417,16 @@ const baseMeta = {
         // بيانات سائق مفيدة للعرض
         const driver_name = d.driver_name ?? "";
         const rating = d.rating ?? null;
+        const phone =
+          d.phone ??
+          d.contact_number ??
+          d.mobile ??
+          "";
+        const country_code =
+          d.country_code ??
+          d.countryCode ??
+          d.mobile_country_code ??
+          "";
         const driver_image =
           d.driver_image ??
           d.driver_image_url ??
@@ -430,6 +450,7 @@ const baseMeta = {
         const metaUpdate = {
           // status/meta
           is_online: currentStatus === 1,
+          dashboard_is_online: currentStatus === 1,
           updatedAt: Date.now(),
           ...(Number.isFinite(service_type_id) ? { service_type_id } : {}),
           ...(Number.isFinite(service_category_id) ? { service_category_id } : {}),
@@ -448,6 +469,8 @@ const baseMeta = {
           // driver info
           ...(driver_name ? { driver_name } : {}),
           ...(rating != null ? { rating } : {}),
+          ...(phone ? { phone } : {}),
+          ...(country_code ? { country_code } : {}),
           ...(driver_image ? { driver_image } : {}),
           ...(driver_gender === 1 || driver_gender === 2 ? { driver_gender } : {}),
           ...(child_seat === 0 || child_seat === 1 ? { child_seat } : {}),
@@ -467,6 +490,7 @@ const baseMeta = {
 
     // ✅ ابعث المرشحين مباشرة عند أونلاين
     emitCandidatesSummaryForDriver(driverId);
+    emitAdminDriverUpdate(io, driverId);
     socket.emit("driver:ready", { driver_id: driverId });
   });
 
@@ -506,6 +530,7 @@ const baseMeta = {
     // ✅ mark as online on any location ping
 driverLocationService.updateMeta(socket.driverId, {
   is_online: true,
+  dashboard_is_online: true,
   socket_disconnected: false,
   updatedAt: now,
 });
@@ -528,6 +553,7 @@ driverLocationService.updateMeta(socket.driverId, {
       timestamp: now,
     };
 
+    emitAdminDriverUpdate(io, socket.driverId);
     io.to(driverRoom(socket.driverId)).emit("driver:moved", payload);
 
     const activeRideId =
@@ -1218,6 +1244,7 @@ socket.on("disconnect", () => {
       // ✅ إذا عنده رحلة شغالة: لا تحوله offline
       driverLocationService.updateMeta(driverId, {
         is_online: true,
+        dashboard_is_online: true,
         socket_disconnected: true,
         lastSeen: now,
         updatedAt: now,
@@ -1230,6 +1257,7 @@ socket.on("disconnect", () => {
       // ✅ إذا ما عنده رحلة: يصير offline طبيعي
       driverLocationService.updateMeta(driverId, {
         is_online: false,
+        dashboard_is_online: false,
         socket_disconnected: true,
         lastSeen: now,
         updatedAt: now,
@@ -1239,6 +1267,7 @@ socket.on("disconnect", () => {
     }
 
     emitCandidatesSummaryForDriver(driverId);
+    emitAdminDriverUpdate(io, driverId);
     logRooms(`after disconnect driver:${driverId}`);
   }
 });

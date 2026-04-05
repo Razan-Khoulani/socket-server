@@ -30,11 +30,16 @@ const {
   upsertRideStatusSnapshot,
   getRideStatusSnapshot,
 } = require("./store/rideStatusSnapshots.store");
+const {
+  emitAdminDriverUpdate,
+} = require("./services/adminDriverFeed.service");
+const { getDriverAdminProfile } = require("./services/adminDriverProfile.service");
 
 // ✅ sockets
 const driverSocket = require("./sockets/driver.socket");
 const biddingSocket = require("./sockets/bidding.socket");
 const userSocket = require("./sockets/user.socket");
+const adminSocket = require("./sockets/admin.socket");
 
 
 const DEBUG_SOCKET_EVENTS = process.env.DEBUG_SOCKET_EVENTS === "1";
@@ -59,7 +64,8 @@ const SIMPLE_PASSED_DEST_DISTANCE_M = Number.isFinite(
 )
   ? Number(process.env.SIMPLE_PASSED_DEST_DISTANCE_M)
   : 25;
-// ride statuses that should be treated as final (clear active ride mapping)
+// ride statuses treated as terminal flow states.
+// Note: status 8 is handled as a transition state in terminal handling below.
 const FINAL_STATUSES = new Set([4, 6, 7, 8, 9, 11]);
 // Keep status 6 route cache until payment statuses (7/8/9) so trip summary/invoice
 // can still read full distance even after destination reached.
@@ -869,6 +875,7 @@ io.on("connection", (socket) => {
   driverSocket(io, socket);
   userSocket(io, socket); // ✅ لازم هالسطر
   biddingSocket(io, socket);
+  adminSocket(io, socket);
   // ✅ bidding
   // Enable only if biddingSocket is implemented as a socket handler
   // biddingSocket(io, socket);
@@ -882,7 +889,7 @@ io.on("connection", (socket) => {
 // Internal Endpoints (from Laravel)
 // ────────────────────────────────────────────────
 
-app.post("/events/internal/driver-status-updated", (req, res) => {
+app.post("/events/internal/driver-status-updated", async (req, res) => {
   const { driver_id, old_status, new_status } = req.body;
 
   if (!driver_id) {
@@ -895,17 +902,53 @@ app.post("/events/internal/driver-status-updated", (req, res) => {
   );
 
   const room = `driver:${driver_id}`;
+  const safeDriverId = Number(driver_id);
 
   if (Number(new_status) === 1) {
     io.in(room).socketsJoin("drivers:online");
     console.log(`[ONLINE] driver:${driver_id} joined drivers:online`);
+
+    try {
+      const profile = await getDriverAdminProfile({ driverId: safeDriverId });
+      const profileLat = Number(profile?.current_lat);
+      const profileLong = Number(profile?.current_long);
+
+      if (Number.isFinite(profileLat) && Number.isFinite(profileLong)) {
+        driverLocationService.updateMemory(safeDriverId, profileLat, profileLong);
+      }
+
+      driverLocationService.updateMeta(safeDriverId, {
+        ...(profile || {}),
+        dashboard_is_online: true,
+        is_online: true,
+        last_activity_at: Date.now(),
+        updatedAt: Date.now(),
+      });
+    } catch (error) {
+      console.warn("[driver-status-updated] admin profile sync failed", {
+        driver_id: safeDriverId,
+        error: error?.message || error,
+      });
+    }
+
+    emitAdminDriverUpdate(io, safeDriverId);
   } else {
+    const previousMeta = driverLocationService.getMeta(safeDriverId) || {};
     io.in(room).socketsLeave("drivers:online");
     console.log(`[OFFLINE] driver:${driver_id} left drivers:online`);
 
-    // ✅ add this line so offline drivers stop appearing in nearby
-    driverLocationService.remove(Number(driver_id));
-    console.log(`[MEMORY] driver:${driver_id} removed from memory`);
+    const offlineNow = Date.now();
+    driverLocationService.updateMeta(safeDriverId, {
+      ...previousMeta,
+      is_online: false,
+      dashboard_is_online: false,
+      socket_disconnected: true,
+      last_activity_at: offlineNow,
+      lastSeen: offlineNow,
+      updatedAt: offlineNow,
+    });
+    console.log(`[MEMORY] driver:${driver_id} marked offline`);
+    emitAdminDriverUpdate(io, safeDriverId);
   }
   
 
@@ -915,7 +958,7 @@ app.post("/events/internal/driver-status-updated", (req, res) => {
 
 });
 
-app.post("/events/internal/driver-location", (req, res) => {
+app.post("/events/internal/driver-location", async (req, res) => {
   const { driver_id, lat, lng, long } = req.body;
 
   if (!driver_id) {
@@ -936,20 +979,69 @@ app.post("/events/internal/driver-location", (req, res) => {
   );
 
   const driverId = Number(driver_id);
+  const driverServiceId = Number(req.body.driver_service_id);
+  const vehicleTypeId = Number(req.body.vehicle_type_id);
+  const explicitStatusNumber = Number(req.body.current_status ?? req.body.new_status);
+  const hasExplicitStatus = Number.isFinite(explicitStatusNumber);
 
   // ✅ update memory
   driverLocationService.updateMemory(driverId, la, lo);
 
+  try {
+    const profile = await getDriverAdminProfile({
+      driverId,
+      driverServiceId,
+    });
+
+    if (profile) {
+      driverLocationService.updateMeta(driverId, {
+        ...profile,
+        updatedAt: Date.now(),
+      });
+    }
+  } catch (error) {
+    console.warn("[driver-location] admin profile sync failed", {
+      driver_id: driverId,
+      driver_service_id: Number.isFinite(driverServiceId) ? driverServiceId : null,
+      error: error?.message || error,
+    });
+  }
+
   // ✅ mark online only if socket is connected to driver room
+  const existingMeta = driverLocationService.getMeta(driverId) || {};
   const driverRoom = `driver:${driverId}`;
   const room = io.sockets.adapter.rooms.get(driverRoom);
-  const isOnline = !!room && room.size > 0;
+  const isOnlineByRoom = !!room && room.size > 0;
+  const profileStatusNumber = Number(
+    existingMeta.current_status ??
+      existingMeta.driver_current_status ??
+      existingMeta.new_status ??
+      existingMeta.provider_current_status
+  );
+  const hasProfileStatus = Number.isFinite(profileStatusNumber);
+  const resolvedOnline = hasExplicitStatus
+    ? explicitStatusNumber === 1
+    : hasProfileStatus
+    ? profileStatusNumber === 1
+    : (existingMeta.is_online === false ? false : isOnlineByRoom);
+  const resolvedDashboardOnline = hasExplicitStatus
+    ? explicitStatusNumber === 1
+    : hasProfileStatus
+    ? profileStatusNumber === 1
+    : (existingMeta.dashboard_is_online === false ? false : isOnlineByRoom);
+
   driverLocationService.updateMeta(driverId, {
-    is_online: isOnline,
-    lastSeen: isOnline ? undefined : Date.now(),
+    ...(Number.isFinite(driverServiceId) ? { driver_service_id: driverServiceId } : {}),
+    ...(Number.isFinite(vehicleTypeId) ? { vehicle_type_id: vehicleTypeId } : {}),
+    dashboard_is_online: resolvedDashboardOnline,
+    last_activity_at: Date.now(),
+    is_online: resolvedOnline,
+    lastSeen: resolvedOnline ? undefined : Date.now(),
+    updatedAt: Date.now(),
   });
 
   // ✅ broadcast to driver's room
+  emitAdminDriverUpdate(io, driverId);
   io.to(`driver:${driverId}`).emit("driver:moved", {
     driver_id: driverId,
     lat: la,
@@ -1134,7 +1226,6 @@ app.post("/events/internal/ride-extra-distance-accepted", (req, res) => {
     console.log(
       `[extra-distance][emit] ride:${rideNum} driver:${resolvedDriverId ?? "none"} events:ride:extraDistanceAccepted,ride:passedDestinationAccepted${invoicePayload ? ",ride:invoice" : ""} adjustment:${evt.adjustment_id ?? "none"} extra_km:${evt.extra_distance_km ?? "null"} extra_fare:${evt.extra_fare_amount ?? "null"} invoice:${invoicePayload ? "yes" : "no"}`
     );
-
     return res.json({ status: 1 });
   } catch (e) {
     console.error("❌ /events/internal/ride-extra-distance-accepted error:", e);
@@ -1294,6 +1385,28 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       updated_at: Date.now(),
       source: "ride-status-updated",
     });
+
+    const latestStatusSnapshot = getRideStatusSnapshot(rideId);
+    const adminDriverIdFromSnapshot = Number.isFinite(
+      Number(latestStatusSnapshot?.driver_id)
+    )
+      ? Number(latestStatusSnapshot.driver_id)
+      : null;
+    const adminDriverId =
+      driverId ?? getActiveDriverByRide(rideId) ?? adminDriverIdFromSnapshot ?? null;
+
+    if (adminDriverId) {
+      const shouldReleaseRideRef = FINAL_STATUSES.has(status) && status !== 8;
+      driverLocationService.updateMeta(adminDriverId, {
+        current_ride_id: shouldReleaseRideRef ? null : rideId,
+        current_ride_status: status,
+        raw_ride_status: status,
+        latest_ride_status: status,
+        last_activity_at: Date.now(),
+        updatedAt: Date.now(),
+      });
+      emitAdminDriverUpdate(io, adminDriverId);
+    }
 
     if (status === 4) {
       if (typeof biddingSocket.markRideCancelled === "function") {
@@ -1514,19 +1627,63 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       });
     }
 
-    // ✅ If ride reached a terminal status, clear active mapping + notify
+    // ✅ If ride reached a terminal status, handle active mapping + notify
     if (FINAL_STATUSES.has(status)) {
-      clearActiveRideByRideId(rideId);
+      const activeDriverIdBeforeClear =
+        driverId ?? getActiveDriverByRide(rideId) ?? null;
+      const isTransitionStatus = status === 8;
+      const shouldActivateQueuedRide = status === 9;
+
+      if (isTransitionStatus) {
+        console.log("[ride-status][transition-status]", {
+          ride_id: rideId,
+          status,
+          activeDriverIdBeforeClear,
+          message: "skip clear/close; waiting for final completion status 9",
+        });
+      } else if (shouldActivateQueuedRide) {
+        clearActiveRideByRideId(rideId);
+
+        const activated =
+          activeDriverIdBeforeClear &&
+          typeof biddingSocket.activateQueuedRideForDriver === "function"
+            ? biddingSocket.activateQueuedRideForDriver(io, activeDriverIdBeforeClear)
+            : false;
+
+        console.log("[ride-status][queue-activation-after-terminal]", {
+          ride_id: rideId,
+          status,
+          activeDriverIdBeforeClear,
+          activated,
+        });
+
+        if (!activated && typeof biddingSocket.closeRideBidding === "function") {
+          biddingSocket.closeRideBidding(io, rideId);
+          console.log("[ride-status][queue-activation-fallback-close]", {
+            ride_id: rideId,
+            status,
+          });
+        }
+      } else {
+        clearActiveRideByRideId(rideId);
+
+        if (status !== 4 && typeof biddingSocket.closeRideBidding === "function") {
+          biddingSocket.closeRideBidding(io, rideId);
+        }
+
+        console.log("[ride-status][terminal-close]", {
+          ride_id: rideId,
+          status,
+          activeDriverIdBeforeClear,
+        });
+      }
+
       if (ROUTE_CLEAR_STATUSES.has(status)) {
         clearRideRoute(rideId);
       } else {
         console.log(
           `[status][route-cache] keep route for ride:${rideId} status:${status}`
         );
-      }
-
-      if (status !== 4 && typeof biddingSocket.closeRideBidding === "function") {
-        biddingSocket.closeRideBidding(io, rideId);
       }
 
       const endEvt = { ...evt, ended: true };
@@ -1536,18 +1693,26 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
         updated_at: Date.now(),
         source: "ride-ended",
       });
-      const isDupEnded = shouldSkipDedupe(
-        endedDedupe,
-        rideId,
-        ENDED_DEDUPE_TTL_MS
-      );
-      if (!isDupEnded) {
-        io.to(`ride:${rideId}`).emit("ride:ended", endEvt);
-        if (driverId) {
-          io.to(`driver:${driverId}`).emit("ride:ended", endEvt);
+      const shouldEmitEndedEvent = status !== 8;
+      if (shouldEmitEndedEvent) {
+        const isDupEnded = shouldSkipDedupe(
+          endedDedupe,
+          rideId,
+          ENDED_DEDUPE_TTL_MS
+        );
+        if (!isDupEnded) {
+          io.to(`ride:${rideId}`).emit("ride:ended", endEvt);
+          const emitDriverId = driverId ?? activeDriverIdBeforeClear ?? null;
+          if (emitDriverId) {
+            io.to(`driver:${emitDriverId}`).emit("ride:ended", endEvt);
+          }
+        } else {
+          console.log(`[status][dedupe] skip ride:ended ride:${rideId}`);
         }
       } else {
-        console.log(`[status][dedupe] skip ride:ended ride:${rideId}`);
+        console.log(
+          `[status][skip] ride:ended ride:${rideId} status:${status} (transition status)`
+        );
       }
     }
 
@@ -1660,7 +1825,8 @@ app.post("/ride/stop-tracking", (req, res) => {
 
     const rideId = Number(ride_id);
     const stopped = rideTracking.stopTracking(io, rideId);
-    clearActiveRideByRideId(rideId);
+    // Do not clear active ride mapping here.
+    // Terminal status handling (especially 8 -> 9 transition) owns this lifecycle.
 
     console.log(`[tracking][stop] ride ${rideId} stopped`);
 
@@ -1932,6 +2098,3 @@ server.listen(SOCKET_BIND_PORT, SOCKET_BIND_HOST, () => {
   );
   console.log("Started at:", new Date().toLocaleString());
 });
-
-
-
