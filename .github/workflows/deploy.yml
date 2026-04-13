@@ -1,0 +1,121 @@
+name: Deploy Socket Server
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy_dev:
+    if: github.ref_name == 'develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+
+      - name: Trust server host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEV_SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy via SSH
+        env:
+          SSH_HOST: ${{ secrets.DEV_SSH_HOST }}
+          SSH_USER: ${{ secrets.DEV_SSH_USER }}
+          SERVER_APP_DIR: ${{ secrets.DEV_SERVER_APP_DIR }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          TARGET_BRANCH: develop
+        run: |
+          ssh "${SSH_USER}@${SSH_HOST}" << EOF
+            set -e
+            mkdir -p "${SERVER_APP_DIR}"
+            cd "${SERVER_APP_DIR}"
+
+            if [ ! -d .git ]; then
+              git clone "${REPO_URL}" .
+            fi
+
+            git fetch origin "${TARGET_BRANCH}"
+            git checkout "${TARGET_BRANCH}"
+            git pull --ff-only origin "${TARGET_BRANCH}"
+
+            if [ -x "\$HOME/.nodenv/versions/22/bin/node" ]; then
+              export PATH="\$HOME/.nodenv/versions/22/bin:\$PATH"
+            elif [ -x "\$HOME/.nodenv/versions/24/bin/node" ]; then
+              export PATH="\$HOME/.nodenv/versions/24/bin:\$PATH"
+            fi
+
+            node -v
+            npm -v
+
+            npm ci --omit=dev
+            if npx pm2 describe socket-server > /dev/null 2>&1; then
+              npx pm2 restart socket-server --update-env
+            else
+              npx pm2 start ecosystem.config.cjs --env production
+            fi
+            npx pm2 save
+          EOF
+
+  deploy_prod:
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+
+      - name: Trust server host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.PROD_SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy via SSH
+        env:
+          SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          SERVER_APP_DIR: ${{ secrets.PROD_SERVER_APP_DIR }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          TARGET_BRANCH: main
+        run: |
+          ssh "${SSH_USER}@${SSH_HOST}" << EOF
+            set -e
+            mkdir -p "${SERVER_APP_DIR}"
+            cd "${SERVER_APP_DIR}"
+
+            if [ ! -d .git ]; then
+              git clone "${REPO_URL}" .
+            fi
+
+            git fetch origin "${TARGET_BRANCH}"
+            git checkout "${TARGET_BRANCH}"
+            git pull --ff-only origin "${TARGET_BRANCH}"
+
+            if [ -x "\$HOME/.nodenv/versions/22/bin/node" ]; then
+              export PATH="\$HOME/.nodenv/versions/22/bin:\$PATH"
+            elif [ -x "\$HOME/.nodenv/versions/24/bin/node" ]; then
+              export PATH="\$HOME/.nodenv/versions/24/bin:\$PATH"
+            fi
+
+            node -v
+            npm -v
+
+            npm ci --omit=dev
+            if npx pm2 describe socket-server > /dev/null 2>&1; then
+              npx pm2 restart socket-server --update-env
+            else
+              npx pm2 start ecosystem.config.cjs --env production
+            fi
+            npx pm2 save
+          EOF
