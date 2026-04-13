@@ -63,11 +63,7 @@ jobs:
             npm -v
 
             npm ci --omit=dev
-            if npx pm2 describe socket-server > /dev/null 2>&1; then
-              npx pm2 restart socket-server --update-env
-            else
-              npx pm2 start ecosystem.config.cjs --env production
-            fi
+            npx pm2 startOrReload ecosystem.config.cjs --env production --update-env
             npx pm2 save
           EOF
 
@@ -126,10 +122,6 @@ jobs:
             npm -v
 
             npm ci --omit=dev
-            if npx pm2 describe socket-server > /dev/null 2>&1; then
-              npx pm2 restart socket-server --update-env
-            else
-              npx pm2 start ecosystem.config.cjs --env production
-            fi
+            npx pm2 startOrReload ecosystem.config.cjs --env production --update-env
             npx pm2 save
           EOF
