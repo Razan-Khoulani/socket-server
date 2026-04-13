@@ -27,7 +27,8 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           PORT="${SSH_PORT:-22}"
-          ssh-keyscan -p "${PORT}" -H "${SSH_HOST}" >> ~/.ssh/known_hosts
+          echo "Scanning host key for ${SSH_HOST}:${PORT}"
+          ssh-keyscan -T 10 -p "${PORT}" -H "${SSH_HOST}" >> ~/.ssh/known_hosts || true
 
       - name: Deploy via SSH
         env:
@@ -39,7 +40,7 @@ jobs:
           TARGET_BRANCH: develop
         run: |
           PORT="${SSH_PORT:-22}"
-          ssh -p "${PORT}" "${SSH_USER}@${SSH_HOST}" << EOF
+          ssh -p "${PORT}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${SSH_HOST}" << EOF
             set -e
             mkdir -p "${SERVER_APP_DIR}"
             cd "${SERVER_APP_DIR}"
@@ -89,7 +90,8 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           PORT="${SSH_PORT:-22}"
-          ssh-keyscan -p "${PORT}" -H "${SSH_HOST}" >> ~/.ssh/known_hosts
+          echo "Scanning host key for ${SSH_HOST}:${PORT}"
+          ssh-keyscan -T 10 -p "${PORT}" -H "${SSH_HOST}" >> ~/.ssh/known_hosts || true
 
       - name: Deploy via SSH
         env:
@@ -101,7 +103,7 @@ jobs:
           TARGET_BRANCH: main
         run: |
           PORT="${SSH_PORT:-22}"
-          ssh -p "${PORT}" "${SSH_USER}@${SSH_HOST}" << EOF
+          ssh -p "${PORT}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${SSH_HOST}" << EOF
             set -e
             mkdir -p "${SERVER_APP_DIR}"
             cd "${SERVER_APP_DIR}"
