@@ -11,12 +11,14 @@ Set these repository secrets.
 
 DEV:
 - `DEV_SSH_HOST`
+- `DEV_SSH_PORT` (optional, default `22`)
 - `DEV_SSH_USER`
 - `DEV_SSH_PRIVATE_KEY`
 - `DEV_SERVER_APP_DIR`
 
 PROD:
 - `PROD_SSH_HOST`
+- `PROD_SSH_PORT` (optional, default `22`)
 - `PROD_SSH_USER`
 - `PROD_SSH_PRIVATE_KEY`
 - `PROD_SERVER_APP_DIR`
