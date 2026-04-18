@@ -1194,6 +1194,8 @@ module.exports = (io, socket) => {
 
     const rideId = toNumber(payload?.ride_id);
     const userId = toNumber(payload?.user_id) ?? toNumber(socket.userId);
+    const joinToken =
+      payload?.access_token ?? payload?.token ?? payload?.user_token ?? null;
 
     if (!rideId) {
       console.log("[user:joinRideRoom] missing/invalid ride_id", payload);
@@ -1202,6 +1204,13 @@ module.exports = (io, socket) => {
 
     socket.isUser = true;
     socket.userId = userId ?? socket.userId ?? null;
+    if (socket.userId && joinToken) {
+      setUserDetails(socket.userId, {
+        user_id: socket.userId,
+        user_token: joinToken,
+        token: joinToken,
+      });
+    }
     if (socket.userId) {
       socket.join(userRoom(socket.userId));
     }

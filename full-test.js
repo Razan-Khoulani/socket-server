@@ -3,7 +3,7 @@ const io = require("socket.io-client");
 // =============
 // CONFIG
 // =============
-const SERVER    = "https://aiactive.co.uk:4000";
+const SERVER    = "https://socket.gocab.net";
 const RIDE_ID   = 42;
 const USER_ID   = 7;
 const PICKUP    = { lat: 33.6, long: 36.28 };

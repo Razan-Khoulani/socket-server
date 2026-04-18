@@ -24,7 +24,7 @@ const LARAVEL_LOCATION_PUSH_EVERY_MS = 10000; // how often to push driver locati
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
-  "https://osbackend.gocab.net";
+  "https://aiactive.co.uk/backend/backend-laravel/public";
 const LARAVEL_TIMEOUT_MS = 7000;
 const STATUS_DEDUPE_TTL_MS = Number.isFinite(
   Number(process.env.STATUS_DEDUPE_TTL_MS)

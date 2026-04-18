@@ -4,7 +4,7 @@ const { spawn } = require("child_process");
 const path = require("path");
 
 const LARAVEL_URL = process.env.LARAVEL_URL || "https://osbackend.gocab.net";
-const SOCKET_URL = process.env.SOCKET_URL || "https://aiactive.co.uk:4000";
+const SOCKET_URL = process.env.SOCKET_URL || "https://socket.gocab.net";
 const SCENARIO = (process.env.SCENARIO || "happy").toLowerCase();
 
 const USER_ID = Number(process.env.USER_ID || 9);

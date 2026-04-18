@@ -46,7 +46,7 @@
 
   <div class="card">
     <div class="row">
-      <input id="socketUrl" class="w-320" value="https://aiactive.co.uk:4000" placeholder="Socket URL">
+      <input id="socketUrl" class="w-320" value="https://socket.gocab.net" placeholder="Socket URL">
       <button onclick="connect()">Connect</button>
       <button class="secondary" onclick="disconnect()">Disconnect</button>
       <span id="status" class="badge">disconnected</span>
@@ -155,7 +155,7 @@
   </div>
 
   <!-- لازم يكون من نفس سيرفر السوكيت -->
-  <script src="https://aiactive.co.uk:4000/socket.io/socket.io.js"></script>
+  <script src="https://socket.gocab.net/socket.io/socket.io.js"></script>
 
   <script>
     let socket = null;

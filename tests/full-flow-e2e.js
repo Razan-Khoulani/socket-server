@@ -5,7 +5,7 @@ const axios = require("axios");
 // =========================
 // CONFIG (override via env)
 // =========================
-const SOCKET_URL = process.env.SOCKET_URL || "https://aiactive.co.uk:4000";
+const SOCKET_URL = process.env.SOCKET_URL || "https://socket.gocab.net";
 const SOCKET_HTTP_URL = process.env.SOCKET_HTTP_URL || SOCKET_URL;
 const LARAVEL_URL = process.env.LARAVEL_URL || "https://osbackend.gocab.net";
 

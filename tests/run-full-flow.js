@@ -14,7 +14,7 @@ const withEnv = (extra = {}) => ({
   LARAVEL_BASE_URL:
     process.env.LARAVEL_BASE_URL ||
     process.env.LARAVEL_URL ||
-    "http://192.168.1.12:8000",
+    "https://osbackend.gocab.net",
   SOCKET_BIND_HOST: SOCKET_HOST,
   SOCKET_BIND_PORT: String(SOCKET_PORT),
   ...extra,

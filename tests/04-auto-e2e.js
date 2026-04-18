@@ -18,7 +18,7 @@ const num = (v, def = null) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const SOCKET_URL =
-  getArg("socket", process.env.SOCKET_URL) || "https://aiactive.co.uk:4000";
+  getArg("socket", process.env.SOCKET_URL) || "https://socket.gocab.net";
 const SOCKET_HTTP_URL =
   getArg("socketHttp", process.env.SOCKET_HTTP_URL) || SOCKET_URL;
 const LARAVEL_BASE_URL =

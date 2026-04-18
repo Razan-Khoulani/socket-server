@@ -1,4 +1,4 @@
-// sockets/bidding.socket.js
+﻿// sockets/bidding.socket.js
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios"); // لضمان استدعاء Laravel API عند قبول العرض
 const { getDistanceMeters } = require("../utils/geo.util");
@@ -460,7 +460,7 @@ const MAX_QUEUED_RIDES_PER_DRIVER = Number.isFinite(Number(process.env.MAX_QUEUE
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
-  "https://osbackend.gocab.net";
+  "https://aiactive.co.uk/backend/backend-laravel/public";
 const NORMALIZED_LARAVEL_BASE_URL = String(LARAVEL_BASE_URL || "").trim().replace(/\/+$/, "");
 const DEFAULT_CUSTOMER_IMAGE_URL = `${NORMALIZED_LARAVEL_BASE_URL}/assets/images/user.svg`;
 

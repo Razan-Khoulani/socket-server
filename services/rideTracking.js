@@ -32,7 +32,7 @@ const emitLocation = (io, rideId, lat, long) => {
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
-  "https://osbackend.gocab.net";
+  "https://aiactive.co.uk/backend/backend-laravel/public";
 
 const LARAVEL_GET_ROUTE_PATH =
   process.env.LARAVEL_GET_ROUTE_PATH || "/api/getRoute";
