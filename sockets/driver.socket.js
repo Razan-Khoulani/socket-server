@@ -53,7 +53,7 @@ const LOCATION_DUPLICATE_WINDOW_MS = Number.isFinite(
   ? Math.max(500, Number(process.env.LOCATION_DUPLICATE_WINDOW_MS))
   : 1500;
 // Keep status=6 active for extra-distance tracking until status=7 settlement.
-const FINAL_RIDE_STATUSES = new Set([4, 7, 8, 9, 10]);
+const FINAL_RIDE_STATUSES = new Set([4, 6, 7, 8, 9, 10]);
 
 const lastRideStatusByKey = new Map(); // key -> { status, at }
 const lastAcceptedLocationByDriver = new Map(); // driverId -> { lat, long, at }
