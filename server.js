@@ -298,46 +298,36 @@ const resolveTripDistanceKm = ({
     directDistanceKm: direct,
   });
 
-  const normalizedComputed =
-    computed != null && computed > 0 ? round2(computed) ?? computed : null;
-  const normalizedStored =
-    stored != null && stored > 0 ? round2(stored) ?? stored : null;
+if (computed != null && computed > 0) {
+  return round2(computed) ?? computed;
+}
 
-  let normalizedPayload = null;
-  if (payload != null && payload > 0) {
-    if (
-      direct != null &&
-      direct > 0 &&
-      payload > direct * TRIP_DISTANCE_MAX_DIRECT_RATIO
-    ) {
-      console.log("[distance][payload-rejected]", {
-        payloadDistanceKm: payload,
-        directDistanceKm: direct,
-        ratioLimit: TRIP_DISTANCE_MAX_DIRECT_RATIO,
-      });
-      normalizedPayload = round2(direct) ?? direct;
-    } else {
-      normalizedPayload = round2(payload) ?? payload;
-    }
-  }
+if (stored != null && stored > 0) {
+  return round2(stored) ?? stored;
+}
 
-  const candidates = [normalizedComputed, normalizedStored, normalizedPayload]
-    .filter((value) => value != null && value > 0);
-
-  if (candidates.length > 0) {
-    const resolved = round2(Math.max(...candidates)) ?? Math.max(...candidates);
-    console.log("[distance][resolved-from-candidates]", {
-      candidates,
-      resolved,
+if (payload != null && payload > 0) {
+  if (
+    direct != null &&
+    direct > 0 &&
+    payload > direct * TRIP_DISTANCE_MAX_DIRECT_RATIO
+  ) {
+    console.log("[distance][payload-rejected]", {
+      payloadDistanceKm: payload,
+      directDistanceKm: direct,
+      ratioLimit: TRIP_DISTANCE_MAX_DIRECT_RATIO,
     });
-    return resolved;
-  }
-
-  if (direct != null && direct > 0) {
     return round2(direct) ?? direct;
   }
 
-  return 0;
+  return round2(payload) ?? payload;
+}
+
+if (direct != null && direct > 0) {
+  return round2(direct) ?? direct;
+}
+
+return 0;
 };
 
 const extractInvoiceDistanceKm = (payload) => {
@@ -346,12 +336,9 @@ const extractInvoiceDistanceKm = (payload) => {
     toFiniteNumber(payload?.total_distance) ??
     toFiniteNumber(payload?.trip_distance_km) ??
     toFiniteNumber(payload?.distance_km) ??
-    toFiniteNumber(payload?.updated_total_distance) ??
     toFiniteNumber(payload?.updated_total_distance_km) ??
     toFiniteNumber(payload?.invoice?.total_distance) ??
     toFiniteNumber(payload?.invoice?.trip_distance_km) ??
-    toFiniteNumber(payload?.invoice?.updated_total_distance) ??
-    toFiniteNumber(payload?.invoice?.updated_total_distance_km) ??
     toFiniteNumber(payload?.trip_summary?.distance_km) ??
     toFiniteNumber(payload?.invoice?.trip_summary?.distance_km) ??
     null
@@ -1420,32 +1407,6 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       } else {
         startRideRoute(rideId, null, routeOpts);
       }
-    }
-    const shouldCaptureStatusPoint =
-      Number.isFinite(la) &&
-      Number.isFinite(lo) &&
-      (status === 6 || status === 7 || status === 8 || status === 9 || status === 11);
-    if (shouldCaptureStatusPoint) {
-      const statusPointAdded = appendRidePoint(
-        rideId,
-        { lat: la, lng: lo, at: Date.now() },
-        {
-          minMs: 0,
-          minMeters: 0,
-          jitterMeters: 0,
-          jitterWindowMs: 0,
-          maxSpeedMps: 1000,
-          maxJumpMeters: 1000000,
-          maxJumpWindowMs: 0,
-        }
-      );
-      console.log("[status][route-point-capture]", {
-        ride_id: rideId,
-        ride_status: status,
-        added: statusPointAdded,
-        lat: la,
-        long: lo,
-      });
     }
     const userId =
       user_id ??

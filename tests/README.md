@@ -101,3 +101,49 @@ Example (timeout scenario):
 SCENARIO=timeout RIDE_TIMEOUT_MS=5000 TIMEOUT_CHECK_MS=9000 TEST_DURATION_MS=20000 \
 node socket-server/tests/run-full-flow.js
 ```
+
+---
+
+## 6) Live passed-destination verification (real ride)
+This script is built for **active real rides** to verify the flow:
+`ride:passedDestination` -> decision ack -> `ride:passedDestinationAccepted` -> `ride:extraDistanceAccepted`.
+
+By default it is **observe-only** (does not send accept/status updates).
+
+Run:
+
+```bash
+DRIVER_ID=77 \
+DRIVER_SERVICE_ID=15 \
+DRIVER_ACCESS_TOKEN="DRIVER_ACCESS_TOKEN" \
+RIDE_ID=12345 \
+SOCKET_URL="https://socket.gocab.net" \
+node tests/05-passed-destination-live.js
+```
+
+Optional flags:
+- `AUTO_ACCEPT=1`: auto-send `driver:passedDestinationDecision` after `ride:passedDestination`.
+- `AUTO_STATUS_7=1`: auto-send `driver:updateRideStatus` with status `7` after accepted ack.
+  - requires `SERVICE_CATEGORY_ID`.
+- `FORCE_DECISION=1`: send `driver:passedDestinationDecision` directly after connect (without waiting for `ride:passedDestination`).
+- `CURRENT_LAT`, `CURRENT_LONG`: force coordinates sent with auto events.
+- `DECISION_LAT`, `DECISION_LONG`: coordinates used specifically for the decision event.
+- `STATUS7_LAT`, `STATUS7_LONG`: coordinates used specifically for status `7` update.
+- `TIMEOUT_MS` (default: `180000`)
+- `STRICT=1|0` (default: `1`)
+  - `1`: exits non-zero unless all expected events arrive with positive `extra_distance_km`
+  - `0`: summary-only mode
+
+Example (active mode):
+
+```bash
+DRIVER_ID=77 \
+DRIVER_SERVICE_ID=15 \
+DRIVER_ACCESS_TOKEN="DRIVER_ACCESS_TOKEN" \
+RIDE_ID=12345 \
+SERVICE_CATEGORY_ID=5 \
+SOCKET_URL="https://socket.gocab.net" \
+AUTO_ACCEPT=1 \
+AUTO_STATUS_7=1 \
+node tests/05-passed-destination-live.js
+```
