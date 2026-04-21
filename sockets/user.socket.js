@@ -970,14 +970,53 @@ module.exports = (io, socket) => {
     return false;
   };
 
+  const syncRideContextFromPayload = (payload = {}, source = "unknown") => {
+    const payloadRideId = toNumber(
+      payload?.ride_id ?? payload?.booking_id ?? payload?.trip_id ?? null
+    );
+    const payloadUserId = toNumber(payload?.user_id ?? socket.userId ?? null);
+    const activeRideIdFromUser =
+      payloadUserId && typeof biddingSocket.getActiveRideIdForUser === "function"
+        ? toNumber(biddingSocket.getActiveRideIdForUser(payloadUserId))
+        : null;
+    const resolvedRideId =
+      payloadRideId ?? activeRideIdFromUser ?? toNumber(socket.currentRideId) ?? null;
+
+    if (resolvedRideId && socket.currentRideId !== resolvedRideId) {
+      socket.currentRideId = resolvedRideId;
+      socket.lastVehicleTypesSig = null;
+    }
+
+    const snapshotServiceCategoryId = getNearbyServiceCategoryFromRideSnapshot();
+    if (snapshotServiceCategoryId !== null) {
+      const payloadServiceCategoryId = extractServiceCategoryIdFromPayload(payload);
+      if (
+        payloadServiceCategoryId !== null &&
+        payloadServiceCategoryId !== snapshotServiceCategoryId
+      ) {
+        console.log("[nearby-service-category] payload/snapshot mismatch", {
+          source,
+          payload_service_category_id: payloadServiceCategoryId,
+          snapshot_service_category_id: snapshotServiceCategoryId,
+          ride_id: resolvedRideId ?? null,
+        });
+      }
+      setNearbyServiceCategoryId(snapshotServiceCategoryId, `${source}:ride-snapshot`);
+    }
+  };
+
   const syncNearbyRadius = async (payload = {}) => {
     const payloadServiceCategoryId = extractServiceCategoryIdFromPayload(payload);
     if (payloadServiceCategoryId !== null) {
       setNearbyServiceCategoryId(payloadServiceCategoryId, "payload");
     }
+    const snapshotServiceCategoryId = getNearbyServiceCategoryFromRideSnapshot();
+    if (snapshotServiceCategoryId !== null) {
+      setNearbyServiceCategoryId(snapshotServiceCategoryId, "ride-snapshot");
+    }
     const serviceCategoryId =
       normalizeServiceCategoryId(socket.nearbyServiceCategoryId) ??
-      getNearbyServiceCategoryFromRideSnapshot();
+      snapshotServiceCategoryId;
 
     let nextRadius = resolveNearbyRadiusFromPayload(payload);
     let source = nextRadius !== null ? "payload" : null;
@@ -1777,6 +1816,7 @@ item.max_price = priceBounds.max_price;
     socket.isUser = true;
     socket.userId = toNumber(user_id) ?? socket.userId;
     applyNearbyFiltersFromPayload(payload, { resetMissing: true });
+    syncRideContextFromPayload(payload, "user:findNearbyDrivers");
 
     const details = extractUserDetails(payload);
     const routeKm = extractRouteDistanceKm(payload);
@@ -1839,6 +1879,7 @@ item.max_price = priceBounds.max_price;
     const lo = toNumber(long);
     if (la === null || lo === null) return;
     applyNearbyFiltersFromPayload(payload, { resetMissing: true });
+    syncRideContextFromPayload(payload, "user:getNearbyVehicleTypes");
 
     const details = extractUserDetails(payload);
     const routeKm = extractRouteDistanceKm(payload);
@@ -1883,6 +1924,7 @@ item.max_price = priceBounds.max_price;
     const lo = toNumber(long);
     if (la === null || lo === null) return;
     applyNearbyFiltersFromPayload(payload, { resetMissing: false });
+    syncRideContextFromPayload(payload, "user:updateNearbyCenter");
 
     socket.nearbyCenter = { lat: la, long: lo };
 

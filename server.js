@@ -66,7 +66,7 @@ const SIMPLE_PASSED_DEST_DISTANCE_M = Number.isFinite(
   : 25;
 // ride statuses treated as terminal flow states.
 // Note: status 8 is handled as a transition state in terminal handling below.
-const FINAL_STATUSES = new Set([4, 6, 7, 8, 9, 11]);
+const FINAL_STATUSES = new Set([4, 7, 8, 9, 11]);
 // const parseStatusSet = (raw, fallback = []) => {
 //   const source = String(raw ?? "")
 //     .split(",")
