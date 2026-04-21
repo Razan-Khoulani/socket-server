@@ -303,9 +303,12 @@ const decorateNearbyVehicleTypes = (types = [], selectedTypeId = null) => {
     });
 };
 
-const buildPriceBounds = (baseFare) => {
+const buildPriceBounds = (baseFare, estimatedFare = null, minFare = null) => {
   const base = toNumber(baseFare);
-  if (base === null) {
+  const estimated = toNumber(estimatedFare);
+  const min = toNumber(minFare);
+  const hasAny = base !== null || estimated !== null;
+  if (!hasAny) {
     return {
       base_fare: null,
       estimated_fare: null,
@@ -314,13 +317,18 @@ const buildPriceBounds = (baseFare) => {
     };
   }
 
-  const roundedBase = roundMoney(base);
+  const roundedBase = base !== null ? roundMoney(base) : null;
+  const roundedEstimated =
+    estimated !== null
+      ? roundMoney(estimated)
+      : roundedBase;
+  const anchor = roundedEstimated ?? roundedBase;
 
   return {
     base_fare: roundedBase,
-    estimated_fare: roundedBase,
-    min_price: roundMoney(base / 2),
-    max_price: roundMoney(base * 2),
+    estimated_fare: roundedEstimated,
+    min_price: min !== null ? roundMoney(min) : anchor !== null ? roundMoney(anchor / 2) : null,
+    max_price: anchor !== null ? roundMoney(anchor * 2) : null,
   };
 };
 
@@ -1444,7 +1452,11 @@ module.exports = (io, socket) => {
            item.cost_per_km = roundMoney(toNumber(fare.cost_per_km ?? 0));
 item.distance_km = roundMoney(distanceKm);
 
-const priceBounds = buildPriceBounds(fare.estimated_fare);
+const priceBounds = buildPriceBounds(
+  fare.base_fare,
+  fare.estimated_fare,
+  fare.min_fare_amount
+);
 item.base_fare = priceBounds.base_fare;
 item.estimated_fare = priceBounds.estimated_fare;
 item.min_price = priceBounds.min_price;
@@ -1526,6 +1538,14 @@ item.max_price = priceBounds.max_price;
       toNumber(rideDetails?.user_bid_price) ??
       toNumber(rideDetails?.min_fare_amount) ??
       null;
+    const snapshotEstimatedFare =
+      toNumber(selectedVehicleType?.estimated_fare) ??
+      toNumber(selectedVehicleType?.base_fare) ??
+      toNumber(rideDetails?.estimated_fare) ??
+      toNumber(rideDetails?.base_fare) ??
+      toNumber(rideDetails?.user_bid_price) ??
+      toNumber(rideDetails?.min_fare_amount) ??
+      null;
 
     const snapshotMinPrice =
       toNumber(selectedVehicleType?.min_price) ??
@@ -1561,6 +1581,7 @@ item.max_price = priceBounds.max_price;
       updatedPrice: rideDetails?.updatedPrice ?? null,
       updatedAt: rideDetails?.updatedAt ?? null,
       base_fare: snapshotBaseFare ?? null,
+      estimated_fare: snapshotEstimatedFare ?? null,
       min_price: snapshotMinPrice ?? null,
       max_price: snapshotMaxPrice ?? null,
       vehicle_types_sig: pricingTypesSig,
@@ -1590,7 +1611,7 @@ item.max_price = priceBounds.max_price;
       user_timeout: pricingUserTimeout,
       user_bid_price: userPrice,
       base_fare: snapshotBaseFare,
-      estimated_fare: snapshotBaseFare,
+      estimated_fare: snapshotEstimatedFare,
       min_price: snapshotMinPrice,
       max_price: snapshotMaxPrice,
       isPriceUpdated: !!rideDetails?.isPriceUpdated,
