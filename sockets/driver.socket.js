@@ -403,7 +403,13 @@ module.exports = (io, socket) => {
     const payloadServiceTypeId = toNumber(
       service_type_id ?? vehicle_type_id ?? payload?.service_type ?? null
     );
-    const payloadServiceCategoryId = toNumber(service_category_id ?? null);
+    const payloadServiceCategoryId = toNumber(
+      service_category_id ??
+        payload?.service_cat_id ??
+        payload?.sub_service_cat_id ??
+        payload?.active_service_category_id ??
+        null
+    );
 
     socket.driverServiceId = toNumber(driver_service_id) ?? null;
     socket.driverDetailId = toNumber(payload?.driver_detail_id ?? null);
@@ -467,6 +473,9 @@ module.exports = (io, socket) => {
             driver_service_id,
             current_lat: la,
             current_long: lo,
+            ...(Number.isFinite(payloadServiceCategoryId)
+              ? { service_category_id: payloadServiceCategoryId }
+              : {}),
           },
           { timeout: LARAVEL_TIMEOUT_MS }
         );
@@ -498,7 +507,9 @@ module.exports = (io, socket) => {
           "";
 
         const service_category_id = Number(
-          d.service_category_id ??
+          d.active_service_category_id ??
+            d.sub_service_cat_id ??
+            d.service_category_id ??
             payloadServiceCategoryId ??
             baseMeta.service_category_id ??
             null
