@@ -19,6 +19,7 @@ const userRoom = (userId) => `user:${userId}`;
 const DEFAULT_NEARBY_RADIUS_METERS = 5000;
 const NEARBY_EVERY_MS = 3000;
 const MAX_DRIVER_LOCATION_AGE_MS = 2 * 60 * 1000;
+const KNOWN_SERVICE_CATEGORY_IDS = new Set([1, 2, 3, 4, 5, 6, 7, 31, 32]);
 
 // ? NEW: road-based filtering
 const DEFAULT_AIR_CANDIDATE_RADIUS_METERS = 8000; // ?????? ?????? ???? ????? ??? ????? ??????
@@ -101,6 +102,39 @@ const resolveNearbyRadiusFromPayload = (payload = {}) => {
   );
   if (explicitKm !== null) {
     return normalizeNearbyRadiusMeters(Math.round(explicitKm * 1000));
+  }
+
+  return null;
+};
+
+const normalizeServiceCategoryId = (value) => {
+  const parsed = toNumber(value);
+  if (parsed === null) return null;
+  const normalized = Math.trunc(parsed);
+  return normalized > 0 ? normalized : null;
+};
+
+const extractServiceCategoryIdFromPayload = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return null;
+
+  const explicit = getFirstNumber(
+    payload?.service_category_id,
+    payload?.service_cat_id,
+    payload?.sub_service_cat_id,
+    payload?.selected_service_category_id,
+    payload?.selectedServiceCategoryId,
+    payload?.service_category,
+    payload?.serviceCategoryId,
+    payload?.category_id,
+    payload?.categoryId
+  );
+  const normalizedExplicit = normalizeServiceCategoryId(explicit);
+  if (normalizedExplicit !== null) return normalizedExplicit;
+
+  // Some clients send service_id/serviceId for category. Guard with known category ids.
+  const ambiguous = normalizeServiceCategoryId(payload?.service_id ?? payload?.serviceId ?? null);
+  if (ambiguous !== null && KNOWN_SERVICE_CATEGORY_IDS.has(ambiguous)) {
+    return ambiguous;
   }
 
   return null;
@@ -903,12 +937,47 @@ module.exports = (io, socket) => {
     return resolveNearbyRadiusFromPayload(rideDetails);
   };
 
-  const syncNearbyRadius = async (payload = {}) => {
-    const serviceCategoryId = toNumber(
-      payload?.service_category_id ??
-        payload?.service_cat_id ??
-        socket.nearbyServiceCategoryId
+  const getNearbyServiceCategoryFromRideSnapshot = () => {
+    const rideId = toNumber(socket.currentRideId);
+    if (!rideId || typeof biddingSocket.getRideDetails !== "function") {
+      return null;
+    }
+
+    const rideDetails = biddingSocket.getRideDetails(rideId);
+    if (!rideDetails || typeof rideDetails !== "object") return null;
+
+    return (
+      extractServiceCategoryIdFromPayload(rideDetails) ??
+      normalizeServiceCategoryId(rideDetails?.service_category_id ?? rideDetails?.service_cat_id)
     );
+  };
+
+  const setNearbyServiceCategoryId = (value, source = "payload") => {
+    const normalized = normalizeServiceCategoryId(value);
+    if (normalized === null) return false;
+
+    if (socket.nearbyServiceCategoryId !== normalized) {
+      socket.nearbyServiceCategoryId = normalized;
+      socket.nearbyFareCache.clear();
+      socket.lastVehicleTypesSig = null;
+      console.log("[nearby-service-category] updated", {
+        service_category_id: normalized,
+        source,
+      });
+      return true;
+    }
+
+    return false;
+  };
+
+  const syncNearbyRadius = async (payload = {}) => {
+    const payloadServiceCategoryId = extractServiceCategoryIdFromPayload(payload);
+    if (payloadServiceCategoryId !== null) {
+      setNearbyServiceCategoryId(payloadServiceCategoryId, "payload");
+    }
+    const serviceCategoryId =
+      normalizeServiceCategoryId(socket.nearbyServiceCategoryId) ??
+      getNearbyServiceCategoryFromRideSnapshot();
 
     let nextRadius = resolveNearbyRadiusFromPayload(payload);
     let source = nextRadius !== null ? "payload" : null;
@@ -1394,8 +1463,10 @@ module.exports = (io, socket) => {
 
     const distanceKm = toNumber(socket.nearbyRouteDistanceKm);
     const fixedServiceCatIdRaw = toNumber(socket.nearbyServiceCategoryId);
+    const snapshotServiceCatId = getNearbyServiceCategoryFromRideSnapshot();
     const fixedServiceCatId =
-      fixedServiceCatIdRaw !== null && fixedServiceCatIdRaw > 0 ? fixedServiceCatIdRaw : null;
+      (fixedServiceCatIdRaw !== null && fixedServiceCatIdRaw > 0 ? fixedServiceCatIdRaw : null) ??
+      snapshotServiceCatId;
     const pickupLat = toNumber(lat);
     const pickupLong = toNumber(long);
 
@@ -1734,8 +1805,8 @@ item.max_price = priceBounds.max_price;
     const st = toNumber(service_type_id);
     socket.nearbyServiceTypeId = st === null ? null : st;
 
-    const sc = toNumber(payload.service_category_id ?? payload.service_cat_id);
-    if (sc !== null && sc > 0) socket.nearbyServiceCategoryId = sc;
+    const sc = extractServiceCategoryIdFromPayload(payload);
+    if (sc !== null) setNearbyServiceCategoryId(sc, "user:findNearbyDrivers");
 
     await syncNearbyRadius(payload);
 
@@ -1781,8 +1852,8 @@ item.max_price = priceBounds.max_price;
     persistRideRouteMetrics(payload, routeKm, routeDurationMin, etaMin);
     emitRouteEtaToDriver(routeKm, etaMin, payload);
 
-    const sc = toNumber(payload.service_category_id ?? payload.service_cat_id);
-    if (sc !== null && sc > 0) socket.nearbyServiceCategoryId = sc;
+    const sc = extractServiceCategoryIdFromPayload(payload);
+    if (sc !== null) setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes");
 
     await syncNearbyRadius(payload);
 
@@ -1815,8 +1886,8 @@ item.max_price = priceBounds.max_price;
 
     socket.nearbyCenter = { lat: la, long: lo };
 
-    const sc = toNumber(payload.service_category_id ?? payload.service_cat_id);
-    if (sc !== null && sc > 0) socket.nearbyServiceCategoryId = sc;
+    const sc = extractServiceCategoryIdFromPayload(payload);
+    if (sc !== null) setNearbyServiceCategoryId(sc, "user:updateNearbyCenter");
 
     await syncNearbyRadius(payload);
 
