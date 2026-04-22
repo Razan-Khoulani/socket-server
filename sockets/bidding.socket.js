@@ -2,7 +2,11 @@
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios"); // لضمان استدعاء Laravel API عند قبول العرض
 const { getDistanceMeters } = require("../utils/geo.util");
-const { getUserDetails, getUserDetailsByToken } = require("../store/users.store");
+const {
+  getUserDetails,
+  getUserDetailsByToken,
+  setUserDetails,
+} = require("../store/users.store");
 const {
   clearActiveRideByRideId,
   getActiveRideByDriver,
@@ -47,6 +51,36 @@ const toNumber = (v) => {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+};
+const normalizeToken = (value) => {
+  if (value === null || value === undefined) return null;
+  const token = String(value).trim();
+  return token.length ? token : null;
+};
+const getSocketUserToken = (sock) => {
+  return normalizeToken(
+    sock?.userToken ??
+      sock?.handshake?.auth?.user_token ??
+      sock?.handshake?.auth?.token ??
+      sock?.handshake?.query?.user_token ??
+      sock?.handshake?.query?.token ??
+      null
+  );
+};
+const getLiveUserTokenFromRoom = (io, userId) => {
+  const safeUserId = toNumber(userId);
+  if (!io || !safeUserId) return null;
+
+  const roomSockets = io?.sockets?.adapter?.rooms?.get(userRoom(safeUserId));
+  if (!roomSockets || roomSockets.size === 0) return null;
+
+  for (const socketId of roomSockets) {
+    const roomSocket = io?.sockets?.sockets?.get(socketId);
+    const token = getSocketUserToken(roomSocket);
+    if (token) return token;
+  }
+
+  return null;
 };
 const toRouteMetricNumber = (v) => {
   if (v === null || v === undefined || v === "") return null;
@@ -4050,18 +4084,36 @@ module.exports = (io, socket) => {
 
   });
 
-  socket.on("user:joinRideRoom", ({ user_id, ride_id }) => {
+  socket.on("user:joinRideRoom", (payload = {}) => {
+    const { user_id, ride_id } = payload;
     debugLog("user:joinRideRoom", { user_id, ride_id }, socket.id);
     const rideId = toNumber(ride_id);
+    const joinToken = normalizeToken(
+      payload?.access_token ??
+        payload?.token ??
+        payload?.user_token ??
+        null
+    );
     if (!rideId) {
       console.log(`undefined ride`);
       return;
     }
     socket.isUser = true;
     socket.userId = toNumber(user_id) ?? null;
+    if (joinToken) {
+      socket.userToken = joinToken;
+    }
 
     if (socket.userId) {
       socket.join(userRoom(socket.userId));
+      if (joinToken) {
+        setUserDetails(socket.userId, {
+          user_id: socket.userId,
+          user_token: joinToken,
+          token: joinToken,
+          access_token: joinToken,
+        });
+      }
     }
     socket.join(rideRoom(rideId));
     socket.currentRideId = rideId;
@@ -5335,8 +5387,9 @@ if (removed) {
     // }
 
 const payloadUserId = toNumber(payload?.user_id);
-const payloadToken =
-  payload?.access_token ?? payload?.token ?? payload?.user_token ?? null;
+const payloadToken = normalizeToken(
+  payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
+);
 const userFromPayloadToken = payloadToken ? getUserDetailsByToken(payloadToken) : null;
 const payloadTokenUserId = toNumber(userFromPayloadToken?.user_id ?? null);
 
@@ -5366,26 +5419,42 @@ const rideSnapshotToken =
   null;
 
 const storedOwnerUser = rideOwnerUserId ? getUserDetails(rideOwnerUserId) : null;
-const storedOwnerToken =
+const storedOwnerToken = normalizeToken(
   storedOwnerUser?.user_token ??
   storedOwnerUser?.token ??
   storedOwnerUser?.access_token ??
-  null;
+  null
+);
 
 const socketUserId = toNumber(socket.userId) ?? null;
+const socketUser = socketUserId ? getUserDetails(socketUserId) : null;
+const socketUserToken = normalizeToken(
+  socket?.userToken ??
+    socketUser?.user_token ??
+    socketUser?.token ??
+    socketUser?.access_token ??
+    null
+);
+const liveOwnerRoomToken = normalizeToken(getLiveUserTokenFromRoom(io, rideOwnerUserId));
+const preferredOwnerToken = normalizeToken(
+  storedOwnerToken ?? liveOwnerRoomToken ?? rideSnapshotToken ?? null
+);
+
 const hasPayloadOwnerMismatch =
   !!(payloadUserId && rideOwnerUserId && payloadUserId !== rideOwnerUserId);
 const hasTokenOwnerMismatch =
   !!(payloadTokenUserId && rideOwnerUserId && payloadTokenUserId !== rideOwnerUserId);
 
 let userId = payloadUserId ?? payloadTokenUserId ?? socketUserId ?? rideOwnerUserId;
-let tokenTmp = payloadToken ?? storedOwnerToken ?? rideSnapshotToken ?? null;
+let tokenTmp = normalizeToken(
+  payloadToken ?? preferredOwnerToken ?? socketUserToken ?? null
+);
 
 if (rideOwnerUserId && (hasPayloadOwnerMismatch || hasTokenOwnerMismatch)) {
   // Payload can carry stale identity from a previous login/session on frontend.
   // For accepting a ride, prefer the ride owner identity to avoid auth mismatch.
   userId = rideOwnerUserId;
-  tokenTmp = storedOwnerToken ?? rideSnapshotToken ?? payloadToken ?? null;
+  tokenTmp = normalizeToken(preferredOwnerToken ?? socketUserToken ?? null);
 
   console.warn("[user:acceptOffer] mismatch detected, using ride owner auth", {
     ride_id: rideId,
@@ -5394,6 +5463,7 @@ if (rideOwnerUserId && (hasPayloadOwnerMismatch || hasTokenOwnerMismatch)) {
     socket_user_id: socketUserId,
     ride_owner_user_id: rideOwnerUserId,
     has_owner_token: !!storedOwnerToken,
+    has_room_owner_token: !!liveOwnerRoomToken,
   });
 } else if (
   payloadTokenUserId &&
@@ -5402,11 +5472,21 @@ if (rideOwnerUserId && (hasPayloadOwnerMismatch || hasTokenOwnerMismatch)) {
 ) {
   // If payload user id and payload token map to different users, trust token mapping.
   userId = payloadTokenUserId;
+  const tokenMappedUser = getUserDetails(payloadTokenUserId);
+  tokenTmp = normalizeToken(
+    payloadToken ??
+      tokenMappedUser?.user_token ??
+      tokenMappedUser?.token ??
+      tokenMappedUser?.access_token ??
+      tokenTmp
+  );
   console.warn("[user:acceptOffer] payload user/token mismatch, using token user", {
     ride_id: rideId,
     payload_user_id: payloadUserId,
     payload_token_user_id: payloadTokenUserId,
   });
+} else if (rideOwnerUserId && userId === rideOwnerUserId) {
+  tokenTmp = normalizeToken(preferredOwnerToken ?? socketUserToken ?? tokenTmp);
 }
 
 const driverCurrentActiveRide = getActiveRideByDriver(driverId);

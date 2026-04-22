@@ -897,6 +897,7 @@ const ensureRideTimer = (rideId, rideDetails) => {
 module.exports = (io, socket) => {
   socket.isUser = false;
   socket.userId = null;
+  socket.userToken = null;
 
   socket.nearbyCenter = null; // { lat, long }
   socket.nearbyInterval = null;
@@ -1149,6 +1150,7 @@ module.exports = (io, socket) => {
 
     socket.isUser = true;
     socket.userId = details.user_id;
+    socket.userToken = details.user_token ?? socket.userToken ?? null;
     socket.join(userRoom(details.user_id));
     setUserDetails(details.user_id, details);
 
@@ -1320,6 +1322,9 @@ module.exports = (io, socket) => {
 
     socket.isUser = true;
     socket.userId = userId ?? socket.userId ?? null;
+    if (joinToken) {
+      socket.userToken = joinToken;
+    }
     if (socket.userId && joinToken) {
       setUserDetails(socket.userId, {
         user_id: socket.userId,

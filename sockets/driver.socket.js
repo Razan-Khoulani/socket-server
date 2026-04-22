@@ -47,6 +47,11 @@ const LOCATION_MAX_SPEED_MPS = Number.isFinite(
 )
   ? Math.max(10, Number(process.env.LOCATION_MAX_SPEED_MPS))
   : 45;
+const LOCATION_MIN_SPEED_WINDOW_MS = Number.isFinite(
+  Number(process.env.LOCATION_MIN_SPEED_WINDOW_MS)
+)
+  ? Math.max(200, Number(process.env.LOCATION_MIN_SPEED_WINDOW_MS))
+  : 1200;
 const LOCATION_DUPLICATE_WINDOW_MS = Number.isFinite(
   Number(process.env.LOCATION_DUPLICATE_WINDOW_MS)
 )
@@ -126,7 +131,7 @@ const validateDriverLocationPoint = (driverId, lat, long, at = Date.now()) => {
     elapsedMs < LOCATION_MAX_JUMP_WINDOW_MS;
 
   const isSpeed =
-    elapsedMs > 0 &&
+    elapsedMs >= LOCATION_MIN_SPEED_WINDOW_MS &&
     Number.isFinite(speedMps) &&
     speedMps > LOCATION_MAX_SPEED_MPS;
 
@@ -418,6 +423,26 @@ module.exports = (io, socket) => {
 
     socket.join(driverRoom(driverId));
     console.log("✅ driver joined room", driverRoom(driverId), "socket:", socket.id);
+
+    // Keep one active socket per driver to avoid mixed location streams.
+    const roomName = driverRoom(driverId);
+    const roomSockets = io.sockets.adapter.rooms.get(roomName);
+    if (roomSockets && roomSockets.size > 1) {
+      for (const socketId of roomSockets) {
+        if (socketId === socket.id) continue;
+        const staleSocket = io.sockets.sockets.get(socketId);
+        if (!staleSocket) continue;
+        staleSocket.emit("driver:sessionReplaced", {
+          driver_id: driverId,
+          replaced_by_socket: socket.id,
+          at: Date.now(),
+        });
+        staleSocket.disconnect(true);
+      }
+      console.log(
+        `[driver-online] replaced old sockets for driver ${driverId}; active socket: ${socket.id}`
+      );
+    }
 
     // ✅ خزّن أولياً لوكيشن + online (بدون upsert)
     const onlineNow = Date.now();
@@ -1369,6 +1394,18 @@ module.exports = (io, socket) => {
     if (socket.driverId) {
       const now = Date.now();
       const driverId = socket.driverId;
+      const roomName = driverRoom(driverId);
+      const remainingRoomMembers = io.sockets.adapter.rooms.get(roomName);
+      const hasOtherActiveSockets =
+        !!remainingRoomMembers && remainingRoomMembers.size > 0;
+
+      if (hasOtherActiveSockets) {
+        console.log(
+          `[disconnect] driver ${driverId} socket ${socket.id} closed; keeping driver online because another socket is active`
+        );
+        return;
+      }
+
       const activeRideId =
         getActiveRideByDriver(driverId) ?? toNumber(socket.activeRideId);
 
