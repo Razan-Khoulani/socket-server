@@ -5348,31 +5348,11 @@ const rideOwnerUserId =
   payloadUserId;
 
 if (payloadUserId && rideOwnerUserId && payloadUserId !== rideOwnerUserId) {
-  console.warn("[user:acceptOffer] blocked: payload user mismatch ride owner", {
+  console.warn("[user:acceptOffer] payload user mismatch ride owner (non-blocking)", {
     ride_id: rideId,
     payload_user_id: payloadUserId,
     ride_owner_user_id: rideOwnerUserId,
   });
-
-  const mismatchPayload = {
-    success: false,
-    status: USER_ACCEPT_OFFER_STATUS.ACCEPT_FAILED,
-    ride_id: rideId,
-    driver_id: customerFacingDriverId ?? driverId,
-    message: "المستخدم غير مطابق لصاحب الرحلة",
-    reason: "user_ride_mismatch",
-    details: {
-      payload_user_id: payloadUserId,
-      ride_owner_user_id: rideOwnerUserId,
-    },
-  };
-
-  emitUserAcceptOfferResult(io, rideOwnerUserId, mismatchPayload);
-  socket.emit("ride:acceptOfferFailed", {
-    ...mismatchPayload,
-    at: Date.now(),
-  });
-  return;
 }
 
 const rideSnapshotToken =
@@ -5391,8 +5371,10 @@ const storedOwnerToken =
   storedOwnerUser?.access_token ??
   null;
 
-const tokenTmp = storedOwnerToken ?? rideSnapshotToken ?? payloadToken ?? null;
-const userId = rideOwnerUserId;
+const fallbackPayloadUserId =
+  toNumber(userFromPayloadToken?.user_id) ?? toNumber(socket.userId) ?? null;
+const userId = payloadUserId ?? fallbackPayloadUserId ?? rideOwnerUserId;
+const tokenTmp = payloadToken ?? storedOwnerToken ?? rideSnapshotToken ?? null;
 
 const driverCurrentActiveRide = getActiveRideByDriver(driverId);
 if (

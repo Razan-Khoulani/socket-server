@@ -862,7 +862,7 @@ module.exports = (io, socket) => {
   let fetchedTotalAmount = null;
 
   if (
-    rideStatus === 7 &&
+    rideStatus === 6 &&
     extraSession &&
     extraSession.driverId === driverId &&
     extraSession.settled !== true
