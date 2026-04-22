@@ -5334,19 +5334,65 @@ if (removed) {
     //   return;
     // }
 
-   const payloadToken =
+const payloadUserId = toNumber(payload?.user_id);
+const payloadToken =
   payload?.access_token ?? payload?.token ?? payload?.user_token ?? null;
+const userFromPayloadToken = payloadToken ? getUserDetailsByToken(payloadToken) : null;
 
-const tokenTmp = payloadToken ?? null;
-
-const userFromToken = tokenTmp ? getUserDetailsByToken(tokenTmp) : null;
-
-const userId =
-  toNumber(payload?.user_id) ??
+const rideOwnerUserId =
+  toNumber(getUserIdForRide(rideId)) ??
+  toNumber(rideSnapshot?.user_id ?? rideSnapshot?.user_details?.user_id ?? null) ??
+  toNumber(rideDetails?.user_id ?? rideDetails?.user_details?.user_id ?? null) ??
   toNumber(socket.userId) ??
-  toNumber(rideOwnerByRide.get(rideId)) ??
-  toNumber(rideDetails?.user_id) ??
-  toNumber(userFromToken?.user_id);
+  toNumber(userFromPayloadToken?.user_id) ??
+  payloadUserId;
+
+if (payloadUserId && rideOwnerUserId && payloadUserId !== rideOwnerUserId) {
+  console.warn("[user:acceptOffer] blocked: payload user mismatch ride owner", {
+    ride_id: rideId,
+    payload_user_id: payloadUserId,
+    ride_owner_user_id: rideOwnerUserId,
+  });
+
+  const mismatchPayload = {
+    success: false,
+    status: USER_ACCEPT_OFFER_STATUS.ACCEPT_FAILED,
+    ride_id: rideId,
+    driver_id: customerFacingDriverId ?? driverId,
+    message: "المستخدم غير مطابق لصاحب الرحلة",
+    reason: "user_ride_mismatch",
+    details: {
+      payload_user_id: payloadUserId,
+      ride_owner_user_id: rideOwnerUserId,
+    },
+  };
+
+  emitUserAcceptOfferResult(io, rideOwnerUserId, mismatchPayload);
+  socket.emit("ride:acceptOfferFailed", {
+    ...mismatchPayload,
+    at: Date.now(),
+  });
+  return;
+}
+
+const rideSnapshotToken =
+  rideSnapshot?.token ??
+  rideSnapshot?.user_details?.user_token ??
+  rideSnapshot?.user_details?.token ??
+  rideDetails?.token ??
+  rideDetails?.user_details?.user_token ??
+  rideDetails?.user_details?.token ??
+  null;
+
+const storedOwnerUser = rideOwnerUserId ? getUserDetails(rideOwnerUserId) : null;
+const storedOwnerToken =
+  storedOwnerUser?.user_token ??
+  storedOwnerUser?.token ??
+  storedOwnerUser?.access_token ??
+  null;
+
+const tokenTmp = storedOwnerToken ?? rideSnapshotToken ?? payloadToken ?? null;
+const userId = rideOwnerUserId;
 
 const driverCurrentActiveRide = getActiveRideByDriver(driverId);
 if (
