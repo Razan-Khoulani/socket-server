@@ -1,7 +1,11 @@
 // sockets/user.socket.js
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios");
-const { setUserDetails } = require("../store/users.store");
+const {
+  setUserDetails,
+  getUserDetailsByToken,
+  deleteUserDetails,
+} = require("../store/users.store");
 const { getRideStatusSnapshot } = require("../store/rideStatusSnapshots.store");
 
 // ? UPDATED: add getActiveRideByDriver so we can exclude busy drivers from nearby/types
@@ -55,6 +59,11 @@ const toNumber = (v) => {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+};
+const normalizeToken = (value) => {
+  if (value === null || value === undefined) return null;
+  const token = String(value).trim();
+  return token.length ? token : null;
 };
 
 const getFirstNumber = (...values) => {
@@ -1140,6 +1149,77 @@ module.exports = (io, socket) => {
     }
   };
 
+  const resetNearbyStateForUserSwitch = () => {
+    stopNearby();
+    socket.nearbyCenter = null;
+    socket.nearbyServiceTypeId = null;
+    socket.nearbyServiceCategoryId = null;
+    socket.nearbyRouteDistanceKm = null;
+    socket.nearbyRouteDurationMin = null;
+    socket.nearbyRequiredGender = null;
+    socket.nearbyNeedChildSeat = null;
+    socket.nearbyNeedHandicap = null;
+    socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
+    socket.nearbyFareCache.clear();
+    socket.lastVehicleTypesSig = null;
+    socket.lastPricingSnapshotSigByRide.clear();
+  };
+
+  const switchSocketUserSession = (
+    nextUserIdRaw,
+    nextTokenRaw = null,
+    source = "session"
+  ) => {
+    const previousUserId = toNumber(socket.userId);
+    const nextUserId = toNumber(nextUserIdRaw);
+    const nextToken = normalizeToken(nextTokenRaw);
+
+    if (previousUserId && nextUserId && previousUserId !== nextUserId) {
+      const previousUserRoom = userRoom(previousUserId);
+      const previousRideId = toNumber(socket.currentRideId);
+
+      socket.leave(previousUserRoom);
+      if (previousRideId) {
+        socket.leave(`ride:${previousRideId}`);
+      }
+      socket.currentRideId = null;
+      socket.userToken = null;
+      resetNearbyStateForUserSwitch();
+
+      const roomMembers = io?.sockets?.adapter?.rooms?.get(previousUserRoom);
+      if (!roomMembers || roomMembers.size === 0) {
+        deleteUserDetails(previousUserId);
+      }
+
+      console.log(
+        `[${source}] switched account on socket ${socket.id}: ${previousUserId} -> ${nextUserId}`
+      );
+    }
+
+    if (nextUserId) {
+      socket.isUser = true;
+      socket.userId = nextUserId;
+      socket.join(userRoom(nextUserId));
+    }
+
+    if (nextToken) {
+      socket.userToken = nextToken;
+    }
+  };
+
+  const resolvePayloadUserId = (payload = {}) => {
+    const explicitUserId = toNumber(payload?.user_id ?? null);
+    if (explicitUserId) return explicitUserId;
+
+    const payloadToken = normalizeToken(
+      payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
+    );
+    if (!payloadToken) return null;
+
+    const byToken = getUserDetailsByToken(payloadToken);
+    return toNumber(byToken?.user_id ?? null);
+  };
+
   const registerUser = (payload, source = "user:loginInfo") => {
     debugLog(source, payload, socket.id);
     const details = extractUserDetails(payload);
@@ -1148,21 +1228,37 @@ module.exports = (io, socket) => {
       return;
     }
 
-    socket.isUser = true;
-    socket.userId = details.user_id;
-    socket.userToken = details.user_token ?? socket.userToken ?? null;
-    socket.join(userRoom(details.user_id));
-    setUserDetails(details.user_id, details);
+    const loginToken = normalizeToken(
+      details?.user_token ??
+        payload?.access_token ??
+        payload?.token ??
+        payload?.user_token ??
+        null
+    );
+    switchSocketUserSession(details.user_id, loginToken, source);
+
+    const normalizedDetails = {
+      ...details,
+      user_id: toNumber(details.user_id),
+      ...(socket.userToken
+        ? {
+            user_token: socket.userToken,
+            token: socket.userToken,
+            access_token: socket.userToken,
+          }
+        : {}),
+    };
+    setUserDetails(normalizedDetails.user_id, normalizedDetails);
 
     if (typeof biddingSocket.refreshUserDetailsForUserId === "function") {
-      biddingSocket.refreshUserDetailsForUserId(io, details.user_id, details);
+      biddingSocket.refreshUserDetailsForUserId(io, normalizedDetails.user_id, normalizedDetails);
     }
 
     const rideIdFromPayload = toNumber(payload?.ride_id ?? payload?.booking_id ?? null);
     const activeRideId =
       rideIdFromPayload ??
       (typeof biddingSocket.getActiveRideIdForUser === "function"
-        ? toNumber(biddingSocket.getActiveRideIdForUser(details.user_id))
+        ? toNumber(biddingSocket.getActiveRideIdForUser(normalizedDetails.user_id))
         : null);
 
     if (activeRideId) {
@@ -1170,16 +1266,16 @@ module.exports = (io, socket) => {
       socket.currentRideId = activeRideId;
       socket.lastVehicleTypesSig = null;
       if (typeof biddingSocket.touchUserActiveRide === "function") {
-        biddingSocket.touchUserActiveRide(details.user_id, activeRideId);
+        biddingSocket.touchUserActiveRide(normalizedDetails.user_id, activeRideId);
       }
       socket.emit("ride:joined", { ride_id: activeRideId });
       emitRideStatusCatchup(activeRideId, source);
       console.log(
-        `[${source}] auto-rejoin user ${details.user_id} -> ride:${activeRideId} (socket:${socket.id})`
+        `[${source}] auto-rejoin user ${normalizedDetails.user_id} -> ride:${activeRideId} (socket:${socket.id})`
       );
     }
 
-    console.log(`[${source}] user details:`, details);
+    console.log(`[${source}] user details:`, normalizedDetails);
   };
 
   const resolveRideIdFromPayload = (payload = {}) => {
@@ -1311,29 +1407,25 @@ module.exports = (io, socket) => {
     debugLog("user:joinRideRoom", payload, socket.id);
 
     const rideId = toNumber(payload?.ride_id);
-    const userId = toNumber(payload?.user_id) ?? toNumber(socket.userId);
-    const joinToken =
-      payload?.access_token ?? payload?.token ?? payload?.user_token ?? null;
+    const joinToken = normalizeToken(
+      payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
+    );
+    const userId =
+      resolvePayloadUserId(payload) ?? toNumber(payload?.user_id) ?? toNumber(socket.userId);
 
     if (!rideId) {
       console.log("[user:joinRideRoom] missing/invalid ride_id", payload);
       return;
     }
 
-    socket.isUser = true;
-    socket.userId = userId ?? socket.userId ?? null;
-    if (joinToken) {
-      socket.userToken = joinToken;
-    }
-    if (socket.userId && joinToken) {
+    switchSocketUserSession(userId ?? socket.userId, joinToken, "user:joinRideRoom");
+    if (socket.userId && socket.userToken) {
       setUserDetails(socket.userId, {
         user_id: socket.userId,
-        user_token: joinToken,
-        token: joinToken,
+        user_token: socket.userToken,
+        token: socket.userToken,
+        access_token: socket.userToken,
       });
-    }
-    if (socket.userId) {
-      socket.join(userRoom(socket.userId));
     }
 
     if (socket.currentRideId && socket.currentRideId !== rideId) {
@@ -1357,7 +1449,11 @@ module.exports = (io, socket) => {
   socket.on("user:rejoinRideRoom", (payload = {}) => {
     debugLog("user:rejoinRideRoom", payload, socket.id);
 
-    const userId = toNumber(payload?.user_id) ?? toNumber(socket.userId);
+    const rejoinToken = normalizeToken(
+      payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
+    );
+    const userId =
+      resolvePayloadUserId(payload) ?? toNumber(payload?.user_id) ?? toNumber(socket.userId);
     const rideIdFromPayload = toNumber(payload?.ride_id ?? payload?.booking_id);
     const rideIdFromState =
       userId && typeof biddingSocket.getActiveRideIdForUser === "function"
@@ -1375,9 +1471,15 @@ module.exports = (io, socket) => {
       return;
     }
 
-    socket.isUser = true;
-    socket.userId = userId;
-    socket.join(userRoom(userId));
+    switchSocketUserSession(userId, rejoinToken, "user:rejoinRideRoom");
+    if (socket.userId && socket.userToken) {
+      setUserDetails(socket.userId, {
+        user_id: socket.userId,
+        user_token: socket.userToken,
+        token: socket.userToken,
+        access_token: socket.userToken,
+      });
+    }
     if (socket.currentRideId && socket.currentRideId !== rideId) {
       socket.leave(`ride:${socket.currentRideId}`);
     }
@@ -1817,9 +1919,13 @@ item.max_price = priceBounds.max_price;
     debugLog("user:findNearbyDrivers", payload, socket.id);
     console.log("?? payload from frontend:", payload);
     const { user_id, lat, long, service_type_id } = payload;
+    const nearbyToken = normalizeToken(
+      payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
+    );
+    const resolvedUserId =
+      toNumber(user_id) ?? resolvePayloadUserId(payload) ?? toNumber(socket.userId);
 
-    socket.isUser = true;
-    socket.userId = toNumber(user_id) ?? socket.userId;
+    switchSocketUserSession(resolvedUserId, nearbyToken, "user:findNearbyDrivers");
     applyNearbyFiltersFromPayload(payload, { resetMissing: true });
     syncRideContextFromPayload(payload, "user:findNearbyDrivers");
 
@@ -1830,6 +1936,11 @@ item.max_price = priceBounds.max_price;
     if (details) {
       if (routeKm !== null) details.route = routeKm;
       if (etaMin !== null) details.eta_min = etaMin;
+      if (socket.userToken) {
+        details.user_token = socket.userToken;
+        details.token = socket.userToken;
+        details.access_token = socket.userToken;
+      }
 
       setUserDetails(details.user_id, details);
       if (typeof biddingSocket.refreshUserDetailsForUserId === "function") {
@@ -1880,6 +1991,12 @@ item.max_price = priceBounds.max_price;
     const { lat, long } = payload;
     debugLog("user:getNearbyVehicleTypes", { lat, long }, socket.id);
     console.log("[user:getNearbyVehicleTypes] payload:", payload);
+    const nearbyTypesToken = normalizeToken(
+      payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
+    );
+    const resolvedUserId =
+      resolvePayloadUserId(payload) ?? toNumber(payload?.user_id) ?? toNumber(socket.userId);
+    switchSocketUserSession(resolvedUserId, nearbyTypesToken, "user:getNearbyVehicleTypes");
     const la = toNumber(lat);
     const lo = toNumber(long);
     if (la === null || lo === null) return;
@@ -1893,6 +2010,11 @@ item.max_price = priceBounds.max_price;
     if (details) {
       if (routeKm !== null) details.route = routeKm;
       if (etaMin !== null) details.eta_min = etaMin;
+      if (socket.userToken) {
+        details.user_token = socket.userToken;
+        details.token = socket.userToken;
+        details.access_token = socket.userToken;
+      }
       setUserDetails(details.user_id, details);
     }
     persistRideRouteMetrics(payload, routeKm, routeDurationMin, etaMin);
@@ -1991,9 +2113,59 @@ item.max_price = priceBounds.max_price;
     socket.currentRideId = null;
   });
 
+  const clearSocketUserSession = (source = "user:logout") => {
+    const previousUserId = toNumber(socket.userId);
+    const previousRideId = toNumber(socket.currentRideId);
+    const previousUserRoom = previousUserId ? userRoom(previousUserId) : null;
+
+    if (previousRideId) {
+      socket.leave(`ride:${previousRideId}`);
+    }
+    if (previousUserRoom) {
+      socket.leave(previousUserRoom);
+    }
+
+    resetNearbyStateForUserSwitch();
+    socket.currentRideId = null;
+    socket.isUser = false;
+    socket.userToken = null;
+    socket.userId = null;
+
+    if (previousUserId && previousUserRoom) {
+      const roomMembers = io?.sockets?.adapter?.rooms?.get(previousUserRoom);
+      if (!roomMembers || roomMembers.size === 0) {
+        deleteUserDetails(previousUserId);
+      }
+    }
+
+    console.log(
+      `[${source}] cleared socket session ${socket.id} (user:${previousUserId ?? "unknown"})`
+    );
+  };
+
+  socket.on("user:logout", (payload = {}) => {
+    debugLog("user:logout", payload, socket.id);
+    clearSocketUserSession("user:logout");
+  });
+
   socket.on("disconnect", () => {
     debugLog("disconnect", {}, socket.id);
+    const disconnectedUserId = toNumber(socket.userId);
+    const disconnectedUserRoom = disconnectedUserId
+      ? userRoom(disconnectedUserId)
+      : null;
     stopNearby();
     socket.lastPricingSnapshotSigByRide.clear();
+    socket.userToken = null;
+    socket.currentRideId = null;
+    socket.isUser = false;
+
+    if (disconnectedUserId && disconnectedUserRoom) {
+      const roomMembers = io?.sockets?.adapter?.rooms?.get(disconnectedUserRoom);
+      if (!roomMembers || roomMembers.size === 0) {
+        deleteUserDetails(disconnectedUserId);
+      }
+    }
+    socket.userId = null;
   });
 };

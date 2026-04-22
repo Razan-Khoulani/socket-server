@@ -5564,18 +5564,10 @@ const accessToken = tokenTmp;
     let acceptApiResponse = null;
     let acceptApiError = null;
 
-    if (!userId || !accessToken) {
-      acceptApiError = {
-        message: "Missing user_id or access_token",
-        reason: "missing_auth_data",
-      };
-      console.log(
-        `[user:acceptOffer] blocked: missing user_id/access_token (ride ${rideId})`
-      );
-    } else {
+    const callAcceptApi = async (candidateToken, attempt = "primary") => {
       const acceptPayload = {
         user_id: userId,
-        access_token: accessToken,
+        access_token: candidateToken,
         ...buildDriverIdentityPayload(driverIdentity, customerFacingDriverId),
         ride_id: rideId,
         offered_price: finalPrice,
@@ -5602,47 +5594,118 @@ const accessToken = tokenTmp;
           }
         );
 
-        acceptApiResponse = response?.data ?? null;
-
-        let parsed = acceptApiResponse;
+        const raw = response?.data ?? null;
+        let parsed = raw;
         if (typeof parsed === "string") {
           try {
             parsed = JSON.parse(parsed);
           } catch (_) {}
         }
 
-        acceptApiOk =
+        const ok =
           parsed?.status === 1 ||
           parsed?.success === true ||
           parsed?.result === true;
 
-        if (!acceptApiOk) {
-          acceptApiError = {
+        console.log(`[user:acceptOffer] accept API response (${attempt}):`, parsed);
+
+        if (ok) {
+          return {
+            ok: true,
+            parsed,
+            response: raw,
+            error: null,
+          };
+        }
+
+        return {
+          ok: false,
+          parsed,
+          response: raw,
+          error: {
             message:
               parsed?.message ||
               parsed?.error ||
               "Accept bid API returned unsuccessful response",
             reason: "accept_api_rejected",
             details: parsed,
-          };
-        }
-
-        console.log("[user:acceptOffer] accept API response:", parsed);
-      } catch (error) {
-        acceptApiError = {
-          message:
-            error?.response?.data?.message ||
-            error?.response?.data?.error ||
-            error?.message ||
-            "Accept bid API request failed",
-          reason: "accept_api_failed",
-          details: error?.response?.data || null,
+          },
         };
-
+      } catch (error) {
+        const details = error?.response?.data || null;
         console.error(
-          "[user:acceptOffer] Error while calling accept bid API:",
-          error?.response?.data || error.message
+          `[user:acceptOffer] Error while calling accept bid API (${attempt}):`,
+          details || error.message
         );
+        return {
+          ok: false,
+          parsed: details,
+          response: details,
+          error: {
+            message:
+              details?.message ||
+              details?.error ||
+              error?.message ||
+              "Accept bid API request failed",
+            reason: "accept_api_failed",
+            details,
+          },
+        };
+      }
+    };
+
+    if (!userId || !accessToken) {
+      acceptApiError = {
+        message: "Missing user_id or access_token",
+        reason: "missing_auth_data",
+      };
+      console.log(
+        `[user:acceptOffer] blocked: missing user_id/access_token (ride ${rideId})`
+      );
+    } else {
+      const primaryResult = await callAcceptApi(accessToken, "primary");
+      acceptApiOk = primaryResult.ok;
+      acceptApiResponse = primaryResult.response;
+      acceptApiError = primaryResult.ok ? null : primaryResult.error;
+
+      const payloadTokenFallback = normalizeToken(payloadToken);
+      const primaryMessageCode = toNumber(primaryResult?.parsed?.message_code);
+      const primaryMessage = String(
+        primaryResult?.parsed?.message ?? primaryResult?.error?.message ?? ""
+      );
+      const isSessionExpired =
+        !acceptApiOk &&
+        (primaryMessageCode === 4 ||
+          /session\s*expired|login\s*session\s*expired/i.test(primaryMessage));
+
+      if (isSessionExpired && payloadTokenFallback && payloadTokenFallback !== accessToken) {
+        console.warn(
+          "[user:acceptOffer] primary token expired, retrying once with payload token",
+          {
+            ride_id: rideId,
+            user_id: userId,
+            has_payload_token: true,
+          }
+        );
+
+        const retryResult = await callAcceptApi(
+          payloadTokenFallback,
+          "payload-token-retry"
+        );
+
+        acceptApiOk = retryResult.ok;
+        acceptApiResponse = retryResult.response;
+        acceptApiError = retryResult.ok ? null : retryResult.error;
+
+        if (retryResult.ok && userId) {
+          socket.userToken = payloadTokenFallback;
+          setUserDetails(userId, {
+            user_id: userId,
+            user_token: payloadTokenFallback,
+            token: payloadTokenFallback,
+            access_token: payloadTokenFallback,
+          });
+        }
       }
     }
 
