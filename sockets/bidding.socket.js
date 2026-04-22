@@ -5338,6 +5338,7 @@ const payloadUserId = toNumber(payload?.user_id);
 const payloadToken =
   payload?.access_token ?? payload?.token ?? payload?.user_token ?? null;
 const userFromPayloadToken = payloadToken ? getUserDetailsByToken(payloadToken) : null;
+const payloadTokenUserId = toNumber(userFromPayloadToken?.user_id ?? null);
 
 const rideOwnerUserId =
   toNumber(getUserIdForRide(rideId)) ??
@@ -5371,10 +5372,42 @@ const storedOwnerToken =
   storedOwnerUser?.access_token ??
   null;
 
-const fallbackPayloadUserId =
-  toNumber(userFromPayloadToken?.user_id) ?? toNumber(socket.userId) ?? null;
-const userId = payloadUserId ?? fallbackPayloadUserId ?? rideOwnerUserId;
-const tokenTmp = payloadToken ?? storedOwnerToken ?? rideSnapshotToken ?? null;
+const socketUserId = toNumber(socket.userId) ?? null;
+const hasPayloadOwnerMismatch =
+  !!(payloadUserId && rideOwnerUserId && payloadUserId !== rideOwnerUserId);
+const hasTokenOwnerMismatch =
+  !!(payloadTokenUserId && rideOwnerUserId && payloadTokenUserId !== rideOwnerUserId);
+
+let userId = payloadUserId ?? payloadTokenUserId ?? socketUserId ?? rideOwnerUserId;
+let tokenTmp = payloadToken ?? storedOwnerToken ?? rideSnapshotToken ?? null;
+
+if (rideOwnerUserId && (hasPayloadOwnerMismatch || hasTokenOwnerMismatch)) {
+  // Payload can carry stale identity from a previous login/session on frontend.
+  // For accepting a ride, prefer the ride owner identity to avoid auth mismatch.
+  userId = rideOwnerUserId;
+  tokenTmp = storedOwnerToken ?? rideSnapshotToken ?? payloadToken ?? null;
+
+  console.warn("[user:acceptOffer] mismatch detected, using ride owner auth", {
+    ride_id: rideId,
+    payload_user_id: payloadUserId,
+    payload_token_user_id: payloadTokenUserId,
+    socket_user_id: socketUserId,
+    ride_owner_user_id: rideOwnerUserId,
+    has_owner_token: !!storedOwnerToken,
+  });
+} else if (
+  payloadTokenUserId &&
+  payloadUserId &&
+  payloadTokenUserId !== payloadUserId
+) {
+  // If payload user id and payload token map to different users, trust token mapping.
+  userId = payloadTokenUserId;
+  console.warn("[user:acceptOffer] payload user/token mismatch, using token user", {
+    ride_id: rideId,
+    payload_user_id: payloadUserId,
+    payload_token_user_id: payloadTokenUserId,
+  });
+}
 
 const driverCurrentActiveRide = getActiveRideByDriver(driverId);
 if (
