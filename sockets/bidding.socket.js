@@ -227,8 +227,9 @@ function resolveRideDriverIdentity(rideId, payload = {}, options = {}) {
 }
 
 const round2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
-const buildPriceBounds = (baseFare) => {
+const buildPriceBounds = (baseFare, distanceKm = null) => {
   const base = toNumber(baseFare);
+  const distance = toNumber(distanceKm);
   if (base === null) {
     return {
       base_fare: null,
@@ -239,9 +240,28 @@ const buildPriceBounds = (baseFare) => {
 
   return {
     base_fare: round2(base),
-    min_price: round2(base / 2),
+    min_price: round2(distance !== null && distance <= 1 ? base : base * 0.7),
     max_price: round2(base * 2),
   };
+};
+
+const getPayloadDistanceKm = (payload = {}) => {
+  const distance = pickFirstValue(
+    toRouteMetricNumber(payload?.distance_km),
+    toRouteMetricNumber(payload?.route_api_distance_km),
+    toRouteMetricNumber(payload?.ride_details?.route_api_distance_km),
+    toRouteMetricNumber(payload?.meta?.route_api_distance_km),
+    toRouteMetricNumber(payload?.meta?.route_api_data?.distance_km),
+    toRouteMetricNumber(payload?.meta?.route_api_data?.total_distance),
+    toRouteMetricNumber(payload?.distance),
+    toRouteMetricNumber(payload?.route),
+    toRouteMetricNumber(payload?.total_distance),
+    toRouteMetricNumber(payload?.meta?.distance),
+    toRouteMetricNumber(payload?.meta?.route),
+    toRouteMetricNumber(payload?.meta?.total_distance)
+  );
+
+  return distance !== null && distance >= 0 ? distance : null;
 };
 
 const getRidePriceBounds = (payload = {}) => {
@@ -251,6 +271,7 @@ const getRidePriceBounds = (payload = {}) => {
 
   const explicitMin = toNumber(payload?.min_price ?? payload?.meta?.min_price ?? null);
   const explicitMax = toNumber(payload?.max_price ?? payload?.meta?.max_price ?? null);
+  const distanceKm = getPayloadDistanceKm(payload);
   const explicitBase = toNumber(
     payload?.base_fare ??
       payload?.estimated_fare ??
@@ -260,11 +281,11 @@ const getRidePriceBounds = (payload = {}) => {
   );
 
   if (explicitBase !== null) {
-    const built = buildPriceBounds(explicitBase);
+    const built = buildPriceBounds(explicitBase, distanceKm);
     return {
       base_fare: built.base_fare,
-      min_price: explicitMin ?? built.min_price,
-      max_price: explicitMax ?? built.max_price,
+      min_price: built.min_price ?? explicitMin,
+      max_price: built.max_price ?? explicitMax,
     };
   }
 
@@ -272,12 +293,12 @@ const getRidePriceBounds = (payload = {}) => {
     payload?.user_bid_price ?? payload?.updatedPrice ?? payload?.min_fare_amount ?? null
   );
 
-  const built = buildPriceBounds(fallbackBase);
+  const built = buildPriceBounds(fallbackBase, distanceKm);
 
   return {
     base_fare: built.base_fare,
-    min_price: explicitMin ?? built.min_price,
-    max_price: explicitMax ?? built.max_price,
+    min_price: built.min_price ?? explicitMin,
+    max_price: built.max_price ?? explicitMax,
   };
 };
 

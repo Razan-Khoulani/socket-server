@@ -354,10 +354,10 @@ const decorateNearbyVehicleTypes = (types = [], selectedTypeId = null) => {
     });
 };
 
-const buildPriceBounds = (baseFare, estimatedFare = null, minFare = null) => {
+const buildPriceBounds = (baseFare, estimatedFare = null, distanceKm = null) => {
   const base = toNumber(baseFare);
   const estimated = toNumber(estimatedFare);
-  const min = toNumber(minFare);
+  const distance = toNumber(distanceKm);
   const hasAny = base !== null || estimated !== null;
   if (!hasAny) {
     return {
@@ -378,7 +378,10 @@ const buildPriceBounds = (baseFare, estimatedFare = null, minFare = null) => {
   return {
     base_fare: roundedBase,
     estimated_fare: roundedEstimated,
-    min_price: min !== null ? roundMoney(min) : anchor !== null ? roundMoney(anchor / 2) : null,
+    min_price:
+      anchor !== null
+        ? roundMoney(distance !== null && distance <= 1 ? anchor : anchor * 0.7)
+        : null,
     max_price: anchor !== null ? roundMoney(anchor * 2) : null,
   };
 };
@@ -1725,7 +1728,7 @@ item.distance_km = roundMoney(distanceKm);
 const priceBounds = buildPriceBounds(
   fare.base_fare,
   fare.estimated_fare,
-  fare.min_fare_amount
+  distanceKm
 );
 item.base_fare = priceBounds.base_fare;
 item.estimated_fare = priceBounds.estimated_fare;
