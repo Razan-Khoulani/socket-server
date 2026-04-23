@@ -60,6 +60,14 @@ const toNumber = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
+const parseLatLongPair = (value) => {
+  if (typeof value !== "string" || !value.includes(",")) return null;
+  const [rawLat, rawLong] = value.split(",").map((part) => part.trim());
+  const lat = toNumber(rawLat);
+  const long = toNumber(rawLong);
+  if (lat === null || long === null) return null;
+  return { lat, long };
+};
 const normalizeToken = (value) => {
   if (value === null || value === undefined) return null;
   const token = String(value).trim();
@@ -1270,6 +1278,8 @@ module.exports = (io, socket) => {
       }
       socket.emit("ride:joined", { ride_id: activeRideId });
       emitRideStatusCatchup(activeRideId, source);
+      ensureNearbyCenterFromRide(activeRideId);
+      void emitNearbyVehicleTypes();
       console.log(
         `[${source}] auto-rejoin user ${normalizedDetails.user_id} -> ride:${activeRideId} (socket:${socket.id})`
       );
@@ -1285,6 +1295,45 @@ module.exports = (io, socket) => {
       toNumber(socket.currentRideId) ??
       null
     );
+  };
+
+  const ensureNearbyCenterFromRide = (rideId) => {
+    const safeRideId = toNumber(rideId);
+    if (!safeRideId) return false;
+    if (socket.nearbyCenter?.lat != null && socket.nearbyCenter?.long != null) {
+      return true;
+    }
+    if (typeof biddingSocket.getRideDetails !== "function") return false;
+
+    const rideDetails = biddingSocket.getRideDetails(safeRideId);
+    if (!rideDetails || typeof rideDetails !== "object") return false;
+
+    let lat = toNumber(
+      rideDetails?.pickup_lat ??
+        rideDetails?.pickupLat ??
+        rideDetails?.meta?.pickup_lat ??
+        null
+    );
+    let long = toNumber(
+      rideDetails?.pickup_long ??
+        rideDetails?.pickupLong ??
+        rideDetails?.meta?.pickup_long ??
+        null
+    );
+
+    if (lat === null || long === null) {
+      const parsedPair = parseLatLongPair(
+        rideDetails?.pickup_latlong ?? rideDetails?.pickupLatLong ?? null
+      );
+      if (parsedPair) {
+        lat = parsedPair.lat;
+        long = parsedPair.long;
+      }
+    }
+
+    if (lat === null || long === null) return false;
+    socket.nearbyCenter = { lat, long };
+    return true;
   };
 
   const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
@@ -1440,6 +1489,8 @@ module.exports = (io, socket) => {
 
     socket.emit("ride:joined", { ride_id: rideId });
     emitRideStatusCatchup(rideId, "user:joinRideRoom");
+    ensureNearbyCenterFromRide(rideId);
+    void emitNearbyVehicleTypes();
 
     console.log(
       `?? User ${socket.userId || "unknown"} joined ride room ride:${rideId} (socket:${socket.id})`
@@ -1497,6 +1548,8 @@ module.exports = (io, socket) => {
       at: Date.now(),
     });
     emitRideStatusCatchup(rideId, "user:rejoinRideRoom");
+    ensureNearbyCenterFromRide(rideId);
+    void emitNearbyVehicleTypes();
 
     console.log(`?? User ${userId} rejoined ride room ride:${rideId} (socket:${socket.id})`);
   });
@@ -1720,8 +1773,15 @@ item.max_price = priceBounds.max_price;
       console.log("[user:nearbyVehicleTypes] skipped (no change)");
     }
 
-    const rideId = socket.currentRideId;
+    const activeRideIdForUser =
+      socket.userId && typeof biddingSocket.getActiveRideIdForUser === "function"
+        ? toNumber(biddingSocket.getActiveRideIdForUser(socket.userId))
+        : null;
+    const rideId = toNumber(socket.currentRideId) ?? activeRideIdForUser;
     if (!rideId) return;
+    if (!socket.currentRideId) {
+      socket.currentRideId = rideId;
+    }
 
     const rideDetails =
       typeof biddingSocket.getRideDetails === "function"
@@ -1847,6 +1907,14 @@ item.max_price = priceBounds.max_price;
       vehicle_types: pricingTypes,
       at: Date.now(),
     });
+    if (DEBUG_EVENTS) {
+      console.log("[ride:pricingSnapshot] emitted", {
+        ride_id: rideId,
+        user_id: socket.userId ?? null,
+        socket_id: socket.id,
+        vehicle_types: pricingTypes.length,
+      });
+    }
   } catch (e) {
     console.warn("[nearbyVehicleTypes] emit failed:", e?.message || e);
   }

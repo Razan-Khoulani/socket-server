@@ -886,91 +886,150 @@ module.exports = (io, socket) => {
   const extraSession = extraDistanceSessions.get(rideId);
   let fetchedTotalAmount = null;
 
-  if (
-    rideStatus === 6 &&
-    extraSession &&
-    extraSession.driverId === driverId &&
-    extraSession.settled !== true
-  ) {
-    try {
-      if (Number.isFinite(currentLat) && Number.isFinite(currentLong)) {
-        appendRidePoint(rideId, {
-          lat: currentLat,
-          lng: currentLong,
-          at: Date.now(),
-        });
-      }
+ if (
+  rideStatus === 6 &&
+  extraSession &&
+  extraSession.driverId === driverId &&
+  extraSession.settled !== true
+) {
+  try {
+    const fullRoutePoints = getRideRoutePoints(rideId);
+    const finalTotalDistanceKm = computeDistanceKmFromPoints(fullRoutePoints);
+    const baselineTotalDistanceKm = round2(extraSession.baselineTotalDistanceKm ?? 0);
+    const extraDistanceKm = round2(
+      Math.max(0, (finalTotalDistanceKm ?? 0) - (baselineTotalDistanceKm ?? 0))
+    );
 
-      const fullRoutePoints = getRideRoutePoints(rideId);
-      const finalTotalDistanceKm = computeDistanceKmFromPoints(fullRoutePoints);
-      const baselineTotalDistanceKm = round2(extraSession.baselineTotalDistanceKm ?? 0);
-      const extraDistanceKm = round2(
-        Math.max(0, (finalTotalDistanceKm ?? 0) - (baselineTotalDistanceKm ?? 0))
+    console.log("[extra-distance][finalize-before-status-7]", {
+      ride_id: rideId,
+      driver_id: driverId,
+      baseline_total_distance_km: baselineTotalDistanceKm,
+      final_total_distance_km: finalTotalDistanceKm,
+      extra_distance_km: extraDistanceKm,
+      route_points_count: Array.isArray(fullRoutePoints) ? fullRoutePoints.length : 0,
+    });
+
+    if (
+      Number.isFinite(finalTotalDistanceKm) &&
+      finalTotalDistanceKm > 0 &&
+      Number.isFinite(extraDistanceKm) &&
+      extraDistanceKm > 0
+    ) {
+      const acceptExtraPayload = {
+        driver_id: driverId,
+        access_token: accessToken,
+        driver_service_id: driverServiceId,
+        ride_id: rideId,
+        extra_distance_km: extraDistanceKm,
+        updated_total_distance_km: finalTotalDistanceKm,
+        route_lat_long_list: JSON.stringify(fullRoutePoints),
+      };
+
+      const extraRes = await axios.post(
+        `${LARAVEL_BASE_URL}/api/driver/accept-not-reached-destination`,
+        acceptExtraPayload,
+        { timeout: LARAVEL_TIMEOUT_MS }
       );
 
-      console.log("[extra-distance][finalize-before-status-7]", {
-        ride_id: rideId,
-        driver_id: driverId,
-        baseline_total_distance_km: baselineTotalDistanceKm,
-        final_total_distance_km: finalTotalDistanceKm,
-        extra_distance_km: extraDistanceKm,
-        route_points_count: Array.isArray(fullRoutePoints) ? fullRoutePoints.length : 0,
-      });
+      let extraData = extraRes?.data ?? null;
+      if (typeof extraData === "string") {
+        try {
+          extraData = JSON.parse(extraData);
+        } catch (_) {}
+      }
 
-      if (
-        Number.isFinite(finalTotalDistanceKm) &&
-        finalTotalDistanceKm > 0 &&
-        Number.isFinite(extraDistanceKm) &&
-        extraDistanceKm > 0
-      ) {
-        const acceptExtraPayload = {
-          driver_id: driverId,
-          access_token: accessToken,
-          driver_service_id: driverServiceId,
+      if (extraData?.status !== 1) {
+        console.log("[extra-distance][finalize-before-status-7] backend rejected", {
           ride_id: rideId,
-          extra_distance_km: extraDistanceKm,
-          updated_total_distance_km: finalTotalDistanceKm,
-          route_lat_long_list: JSON.stringify(fullRoutePoints),
+          driver_id: driverId,
+          response: extraData,
+        });
+        return;
+      }
+
+      let invoiceData =
+        extraData?.invoice && typeof extraData?.invoice === "object"
+          ? extraData.invoice
+          : null;
+
+      if (!invoiceData && (extraData?.status == null || Number(extraData?.status) === 1)) {
+        try {
+          const invoiceRes = await axios.post(
+            `${LARAVEL_BASE_URL}/api/driver/transport-ride-invoice`,
+            {
+              driver_id: driverId,
+              access_token: accessToken,
+              driver_service_id: driverServiceId,
+              ride_id: rideId,
+            },
+            { timeout: LARAVEL_TIMEOUT_MS }
+          );
+
+          invoiceData = invoiceRes?.data ?? null;
+          if (typeof invoiceData === "string") {
+            try {
+              invoiceData = JSON.parse(invoiceData);
+            } catch (_) {}
+          }
+        } catch (invoiceErr) {
+          console.warn(
+            "[extra-distance][finalize-before-status-7] invoice refresh failed:",
+            invoiceErr?.response?.data || invoiceErr?.message || invoiceErr
+          );
+        }
+      }
+
+      const ack = {
+        status: extraData?.status ?? 1,
+        accepted: 1,
+        ride_id: rideId,
+        request: {
+          extra_distance_km: acceptExtraPayload.extra_distance_km ?? null,
+          updated_total_distance_km:
+            acceptExtraPayload.updated_total_distance_km ?? null,
+        },
+        response: extraData,
+        ...(invoiceData && typeof invoiceData === "object"
+          ? { invoice: invoiceData }
+          : {}),
+        at: Date.now(),
+      };
+
+      socket.emit("ride:passedDestinationDecisionAck", ack);
+      io.to(driverRoom(driverId)).emit("ride:passedDestinationDecisionAck", ack);
+
+      if (invoiceData && typeof invoiceData === "object") {
+        const invoiceEvt = {
+          ride_id: rideId,
+          ride_status:
+            toNumber(invoiceData?.ride_status) ??
+            toNumber(extraData?.ride_status) ??
+            null,
+          invoice: invoiceData,
+          source: "driver:passedDestinationDecision",
+          at: Date.now(),
         };
 
-        const extraRes = await axios.post(
-          `${LARAVEL_BASE_URL}/api/driver/accept-not-reached-destination`,
-          acceptExtraPayload,
-          { timeout: LARAVEL_TIMEOUT_MS }
-        );
-
-        let extraData = extraRes?.data ?? null;
-        if (typeof extraData === "string") {
-          try {
-            extraData = JSON.parse(extraData);
-          } catch (_) {}
-        }
-
-        if (extraData?.status !== 1) {
-          console.log("[extra-distance][finalize-before-status-7] backend rejected", {
-            ride_id: rideId,
-            driver_id: driverId,
-            response: extraData,
-          });
-          return;
-        }
-
-        extraSession.settled = true;
-        extraDistanceSessions.set(rideId, extraSession);
-      } else {
-        extraSession.settled = true;
-        extraDistanceSessions.set(rideId, extraSession);
+        socket.emit("ride:invoice", invoiceEvt);
+        io.to(driverRoom(driverId)).emit("ride:invoice", invoiceEvt);
       }
-    } catch (e) {
-      console.error("[extra-distance][finalize-before-status-7] failed", {
-        ride_id: rideId,
-        driver_id: driverId,
-        message: e?.message ?? null,
-        data: e?.response?.data ?? null,
-      });
-      return;
+
+      extraSession.settled = true;
+      extraDistanceSessions.set(rideId, extraSession);
+    } else {
+      extraSession.settled = true;
+      extraDistanceSessions.set(rideId, extraSession);
     }
+  } catch (e) {
+    console.error("[extra-distance][finalize-before-status-7] failed", {
+      ride_id: rideId,
+      driver_id: driverId,
+      message: e?.message ?? null,
+      data: e?.response?.data ?? null,
+    });
+    return;
   }
+}
   if (rideStatus === 7) {
     if (!extraSession) {
       console.log("[extra-distance][finalize-before-status-7][skip]", {
