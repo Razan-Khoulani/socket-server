@@ -1,7 +1,24 @@
-const db = require("../db");
+const axios = require("axios");
 
 const PROFILE_CACHE_TTL_MS = 5 * 60 * 1000;
 const profileCache = new Map();
+
+const LARAVEL_BASE_URL = String(
+  process.env.LARAVEL_BASE_URL ||
+    process.env.LARAVEL_URL ||
+    "https://osbackend.gocab.net"
+).replace(/\/+$/, "");
+
+const LARAVEL_DRIVER_ADMIN_PROFILE_PATH = String(
+  process.env.LARAVEL_DRIVER_ADMIN_PROFILE_PATH ||
+    "/api/internal/driver-admin-profile"
+);
+
+const LARAVEL_PROFILE_TIMEOUT_MS = Number.isFinite(
+  Number(process.env.LARAVEL_PROFILE_TIMEOUT_MS)
+)
+  ? Math.max(1000, Number(process.env.LARAVEL_PROFILE_TIMEOUT_MS))
+  : 7000;
 
 const toNumber = (value) => {
   if (value === null || value === undefined || value === "") return null;
@@ -27,14 +44,6 @@ const parseServiceCategoryIds = (value) => {
   return safeValue ? [safeValue] : [];
 };
 
-const query = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.query(sql, params, (error, rows) => {
-      if (error) return reject(error);
-      resolve(Array.isArray(rows) ? rows : []);
-    });
-  });
-
 const getCachedProfile = (key) => {
   const cached = profileCache.get(key);
   if (!cached) return null;
@@ -46,7 +55,7 @@ const getCachedProfile = (key) => {
 };
 
 const setCachedProfile = (profile = {}) => {
-  const safeDriverId = toNumber(profile.driver_id);
+  const safeDriverId = toNumber(profile.driver_id ?? profile.provider_id);
   const safeDriverServiceId = toNumber(profile.driver_service_id);
   const safeDriverDetailId = toNumber(
     profile.driver_detail_id ?? profile.driver_details_id
@@ -66,22 +75,27 @@ const setCachedProfile = (profile = {}) => {
     driver_current_status: toNumber(
       profile.driver_current_status ?? profile.current_status ?? profile.new_status
     ),
-    service_category_id: toNumber(profile.service_category_id),
-    service_cat_id: toNumber(profile.service_category_id),
+    service_category_id: toNumber(
+      profile.service_category_id ?? profile.service_cat_id
+    ),
+    service_cat_id: toNumber(profile.service_category_id ?? profile.service_cat_id),
     service_category_ids: parseServiceCategoryIds(
       profile.service_category_ids ?? profile.driver_vehicle_service_lists
     ),
     vehicle_type_id: toNumber(profile.vehicle_type_id),
-    driver_name: String(profile.driver_name ?? "").trim(),
+    driver_name: String(profile.driver_name ?? profile.name ?? "").trim(),
     name: String(profile.name ?? profile.driver_name ?? "").trim(),
-    image: profile.image ?? null,
-    driver_image: profile.driver_image ?? profile.image ?? null,
-    phone: String(profile.phone ?? "").trim(),
+    image: profile.image ?? profile.driver_profile ?? null,
+    driver_image: profile.driver_image ?? profile.image ?? profile.driver_profile ?? null,
+    phone: String(profile.phone ?? profile.contact_number ?? "").trim(),
     country_code: String(profile.country_code ?? "").trim(),
-    current_lat: toNumber(profile.current_lat),
-    current_long: toNumber(profile.current_long),
+    current_lat: toNumber(profile.current_lat ?? profile.lat),
+    current_long: toNumber(profile.current_long ?? profile.lng ?? profile.long),
     remaining_balance: toNumber(profile.remaining_balance),
     not_valid_wallet_balance: toNumber(profile.not_valid_wallet_balance) ?? 0,
+    not_valid_wallet_balance_msg: String(
+      profile.not_valid_wallet_balance_msg ?? ""
+    ),
   };
 
   const cachedValue = { ...payload };
@@ -99,6 +113,62 @@ const setCachedProfile = (profile = {}) => {
   }
 
   return cachedValue;
+};
+
+const buildProfileUrl = () => {
+  const path = LARAVEL_DRIVER_ADMIN_PROFILE_PATH.startsWith("/")
+    ? LARAVEL_DRIVER_ADMIN_PROFILE_PATH
+    : `/${LARAVEL_DRIVER_ADMIN_PROFILE_PATH}`;
+
+  return `${LARAVEL_BASE_URL}${path}`;
+};
+
+const buildHeaders = () => {
+  const headers = {
+    Accept: "application/json",
+  };
+  const secret =
+    process.env.SOCKET_INTERNAL_SECRET || process.env.LARAVEL_INTERNAL_SECRET;
+
+  if (secret) {
+    headers["X-Socket-Internal-Secret"] = secret;
+  }
+
+  return headers;
+};
+
+const extractProfile = (body) => {
+  if (!body || typeof body !== "object") return null;
+  if (body.status === 0 || body.status === false) return null;
+
+  const profile = body.data ?? body.profile ?? body.driver ?? body;
+  return profile && typeof profile === "object" ? profile : null;
+};
+
+const fetchDriverAdminProfile = async ({ driverId, driverServiceId }) => {
+  const payload = {};
+  if (driverId) payload.driver_id = driverId;
+  if (driverServiceId) payload.driver_service_id = driverServiceId;
+
+  try {
+    const response = await axios.post(buildProfileUrl(), payload, {
+      timeout: LARAVEL_PROFILE_TIMEOUT_MS,
+      headers: buildHeaders(),
+    });
+
+    return extractProfile(response.data);
+  } catch (error) {
+    if (error?.response?.status === 404) {
+      return null;
+    }
+
+    const message =
+      error?.response?.data?.message ||
+      error?.response?.data?.error ||
+      error?.message ||
+      "Laravel driver profile API failed";
+    throw new Error(message);
+  }
 };
 
 const getDriverAdminProfile = async ({
@@ -122,107 +192,12 @@ const getDriverAdminProfile = async ({
     if (cached) return cached;
   }
 
-  const conditions = [];
-  const params = [];
-
-  if (safeDriverServiceId) {
-    conditions.push("ps.id = ?");
-    params.push(safeDriverServiceId);
-  }
-
-  if (safeDriverId) {
-    conditions.push("ps.provider_id = ?");
-    params.push(safeDriverId);
-  }
-
-  const sql = `
-    SELECT
-      ps.provider_id,
-      ps.id AS driver_service_id,
-      ps.service_cat_id AS service_category_id,
-      ps.current_status AS current_status,
-      d.id AS driver_details_id,
-      d.current_lat,
-      d.current_long,
-      d.vehicle_type_id,
-      tv.driver_vehicle_service_lists,
-      uwt.remaining_balance,
-      gs.wallet_payment,
-      gs.auto_settle_wallet,
-      gs.min_driver_wallet,
-      gs.driver_negative_wallet_enabled,
-      gs.driver_negative_wallet_limit,
-      COALESCE(p.first_name, '') AS first_name,
-      COALESCE(p.last_name, '') AS last_name,
-      p.avatar,
-      p.country_code,
-      p.contact_number
-    FROM provider_services ps
-    JOIN providers p ON p.id = ps.provider_id
-    JOIN general_settings gs ON gs.id = 1
-    LEFT JOIN transport_driver_details d ON d.provider_service_id = ps.id
-    LEFT JOIN transport_driver_vehicle_lists tv ON tv.id = d.vehicle_type_id
-    LEFT JOIN user_wallet_transaction uwt
-      ON uwt.user_id = ps.provider_id
-      AND uwt.wallet_provider_type = 2
-      AND uwt.id = (
-        SELECT MAX(id)
-        FROM user_wallet_transaction
-        WHERE user_id = ps.provider_id
-          AND wallet_provider_type = 2
-      )
-    WHERE (${conditions.join(" OR ")})
-      AND ps.status = 1
-      AND p.status = 1
-      AND p.deleted_at IS NULL
-    ORDER BY ps.id DESC
-    LIMIT 1
-  `;
-
-  const rows = await query(sql, params);
-  if (!rows.length) return null;
-
-  const row = rows[0];
-  const driverName = `${row.first_name || ""} ${row.last_name || ""}`.trim();
-  const remainingBalance = toNumber(row.remaining_balance) ?? 0;
-  const walletPaymentEnabled = toNumber(row.wallet_payment) === 1;
-  const autoSettleWallet = toNumber(row.auto_settle_wallet) === 1;
-  const minDriverWallet = toNumber(row.min_driver_wallet) ?? 0;
-  const negativeWalletEnabled = toNumber(row.driver_negative_wallet_enabled) === 1;
-  const rawNegativeLimit = toNumber(row.driver_negative_wallet_limit) ?? 0;
-  const negativeLimit = rawNegativeLimit > 0 ? -rawNegativeLimit : rawNegativeLimit;
-  const notValidWalletBalance =
-    walletPaymentEnabled && autoSettleWallet
-      ? negativeWalletEnabled
-        ? remainingBalance < negativeLimit
-        : minDriverWallet > 0 && remainingBalance < minDriverWallet
-      : false;
-
-  return setCachedProfile({
-    driver_id: row.provider_id,
-    provider_id: row.provider_id,
-    driver_service_id: row.driver_service_id,
-    driver_detail_id: row.driver_details_id,
-    driver_details_id: row.driver_details_id,
-    current_status: row.current_status,
-    new_status: row.current_status,
-    driver_current_status: row.current_status,
-    service_category_id: row.service_category_id,
-    service_category_ids: parseServiceCategoryIds(
-      row.driver_vehicle_service_lists ?? row.service_category_id
-    ),
-    vehicle_type_id: row.vehicle_type_id,
-    driver_name: driverName,
-    name: driverName,
-    image: row.avatar ?? null,
-    driver_image: row.avatar ?? null,
-    phone: row.contact_number ?? "",
-    country_code: row.country_code ?? "",
-    current_lat: row.current_lat ?? null,
-    current_long: row.current_long ?? null,
-    remaining_balance: remainingBalance,
-    not_valid_wallet_balance: notValidWalletBalance ? 1 : 0,
+  const profile = await fetchDriverAdminProfile({
+    driverId: safeDriverId,
+    driverServiceId: safeDriverServiceId,
   });
+
+  return profile ? setCachedProfile(profile) : null;
 };
 
 module.exports = {
