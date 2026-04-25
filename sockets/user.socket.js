@@ -35,6 +35,11 @@ const SERVICE_RADIUS_CACHE_TTL_MS = Number.isFinite(
 )
   ? Math.max(30 * 1000, Number(process.env.SERVICE_RADIUS_CACHE_TTL_MS))
   : 5 * 60 * 1000;
+const NEARBY_FARE_CACHE_TTL_MS = Number.isFinite(
+  Number(process.env.NEARBY_FARE_CACHE_TTL_MS)
+)
+  ? Math.max(0, Number(process.env.NEARBY_FARE_CACHE_TTL_MS))
+  : 5000;
 const serviceSearchRadiusCache = new Map();
 
 const LARAVEL_BASE_URL =
@@ -506,7 +511,8 @@ const fetchVehicleFaresFromApi = async (
   distanceKm,
   vehicleTypeIds = [],
   pickupLat = null,
-  pickupLong = null
+  pickupLong = null,
+  userId = null
 ) => {
   if (!serviceCategoryId || distanceKm === null) return new Map();
   try {
@@ -515,6 +521,9 @@ const fetchVehicleFaresFromApi = async (
       distance_km: distanceKm,
       vehicle_type_ids: vehicleTypeIds,
     };
+    if (toNumber(userId)) {
+      payload.user_id = toNumber(userId);
+    }
     if (pickupLat !== null && pickupLong !== null) {
       payload.pickup_lat = pickupLat;
       payload.pickup_long = pickupLong;
@@ -1683,33 +1692,56 @@ module.exports = (io, socket) => {
         }
 
         for (const [serviceCatId, typeSet] of groups.entries()) {
+          const currentUserId = toNumber(socket.userId);
           let cacheEntry = socket.nearbyFareCache.get(serviceCatId);
-          if (
+          const cacheKeyChanged =
             !cacheEntry ||
             cacheEntry.distanceKm !== distanceKm ||
             cacheEntry.pickupLat !== pickupLat ||
-            cacheEntry.pickupLong !== pickupLong
-          ) {
-            cacheEntry = { distanceKm, pickupLat, pickupLong, map: new Map() };
+            cacheEntry.pickupLong !== pickupLong ||
+            cacheEntry.userId !== currentUserId;
+
+          if (cacheKeyChanged) {
+            cacheEntry = {
+              distanceKm,
+              pickupLat,
+              pickupLong,
+              userId: currentUserId,
+              cachedAt: 0,
+              map: new Map(),
+            };
             socket.nearbyFareCache.set(serviceCatId, cacheEntry);
             socket.lastVehicleTypesSig = null;
           }
+
+          const cacheExpired =
+            NEARBY_FARE_CACHE_TTL_MS === 0 ||
+            !Number.isFinite(Number(cacheEntry.cachedAt)) ||
+            Date.now() - Number(cacheEntry.cachedAt) > NEARBY_FARE_CACHE_TTL_MS;
 
           const missingTypeIds = [];
           for (const typeId of typeSet) {
             if (!cacheEntry.map.has(typeId)) missingTypeIds.push(typeId);
           }
 
-          if (missingTypeIds.length > 0) {
+          const typeIdsToRefresh = cacheExpired
+            ? Array.from(typeSet)
+            : missingTypeIds;
+
+          if (typeIdsToRefresh.length > 0) {
             const fareMap = await fetchVehicleFaresFromApi(
               serviceCatId,
               distanceKm,
-              missingTypeIds,
+              typeIdsToRefresh,
               pickupLat,
-              pickupLong
+              pickupLong,
+              socket.userId
             );
             for (const [id, item] of fareMap.entries()) {
               cacheEntry.map.set(id, item);
+            }
+            if (fareMap.size > 0) {
+              cacheEntry.cachedAt = Date.now();
             }
           }
 
