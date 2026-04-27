@@ -1,4 +1,4 @@
-// sockets/driver.socket.js
+// sockets/driver100.socket.js 
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios");
 const { getActiveRideByDriver } = require("../store/activeRides.store");
@@ -47,18 +47,13 @@ const LOCATION_MAX_SPEED_MPS = Number.isFinite(
 )
   ? Math.max(10, Number(process.env.LOCATION_MAX_SPEED_MPS))
   : 45;
-const LOCATION_MIN_SPEED_WINDOW_MS = Number.isFinite(
-  Number(process.env.LOCATION_MIN_SPEED_WINDOW_MS)
-)
-  ? Math.max(200, Number(process.env.LOCATION_MIN_SPEED_WINDOW_MS))
-  : 1200;
 const LOCATION_DUPLICATE_WINDOW_MS = Number.isFinite(
   Number(process.env.LOCATION_DUPLICATE_WINDOW_MS)
 )
   ? Math.max(500, Number(process.env.LOCATION_DUPLICATE_WINDOW_MS))
   : 1500;
 // Keep status=6 active for extra-distance tracking until status=7 settlement.
-const FINAL_RIDE_STATUSES = new Set([4, 7, 8, 9, 10]);
+const FINAL_RIDE_STATUSES = new Set([4, 6, 7, 8, 9, 10]);
 
 const lastRideStatusByKey = new Map(); // key -> { status, at }
 const lastAcceptedLocationByDriver = new Map(); // driverId -> { lat, long, at }
@@ -131,7 +126,7 @@ const validateDriverLocationPoint = (driverId, lat, long, at = Date.now()) => {
     elapsedMs < LOCATION_MAX_JUMP_WINDOW_MS;
 
   const isSpeed =
-    elapsedMs >= LOCATION_MIN_SPEED_WINDOW_MS &&
+    elapsedMs > 0 &&
     Number.isFinite(speedMps) &&
     speedMps > LOCATION_MAX_SPEED_MPS;
 
@@ -191,7 +186,7 @@ const getDriverActiveRideId = (driverId) => {
 
 const rejectOfflineIfBusy = (driverId, targetSocket = socket) => {
   const activeRideId = getDriverActiveRideId(driverId);
-
+ 
   if (!activeRideId) return false;
 
   targetSocket.emit("driver:offlineRejected", {
@@ -325,17 +320,6 @@ module.exports = (io, socket) => {
     return false;
   };
 
-  const resolveAcceptedDecision = (payload = {}) =>
-    isAcceptedDecision(
-      payload?.accepted ??
-        payload?.yes ??
-        payload?.answer ??
-        payload?.decision ??
-        payload?.is_accept ??
-        payload?.accept ??
-        payload?.isAccepted
-    );
-
   const driverRoom = (driverId) => `driver:${driverId}`;
 
   const bindDriverOnce = (newDriverId) => {
@@ -408,13 +392,7 @@ module.exports = (io, socket) => {
     const payloadServiceTypeId = toNumber(
       service_type_id ?? vehicle_type_id ?? payload?.service_type ?? null
     );
-    const payloadServiceCategoryId = toNumber(
-      service_category_id ??
-        payload?.service_cat_id ??
-        payload?.sub_service_cat_id ??
-        payload?.active_service_category_id ??
-        null
-    );
+    const payloadServiceCategoryId = toNumber(service_category_id ?? null);
 
     socket.driverServiceId = toNumber(driver_service_id) ?? null;
     socket.driverDetailId = toNumber(payload?.driver_detail_id ?? null);
@@ -423,26 +401,6 @@ module.exports = (io, socket) => {
 
     socket.join(driverRoom(driverId));
     console.log("✅ driver joined room", driverRoom(driverId), "socket:", socket.id);
-
-    // Keep one active socket per driver to avoid mixed location streams.
-    const roomName = driverRoom(driverId);
-    const roomSockets = io.sockets.adapter.rooms.get(roomName);
-    if (roomSockets && roomSockets.size > 1) {
-      for (const socketId of roomSockets) {
-        if (socketId === socket.id) continue;
-        const staleSocket = io.sockets.sockets.get(socketId);
-        if (!staleSocket) continue;
-        staleSocket.emit("driver:sessionReplaced", {
-          driver_id: driverId,
-          replaced_by_socket: socket.id,
-          at: Date.now(),
-        });
-        staleSocket.disconnect(true);
-      }
-      console.log(
-        `[driver-online] replaced old sockets for driver ${driverId}; active socket: ${socket.id}`
-      );
-    }
 
     // ✅ خزّن أولياً لوكيشن + online (بدون upsert)
     const onlineNow = Date.now();
@@ -498,9 +456,6 @@ module.exports = (io, socket) => {
             driver_service_id,
             current_lat: la,
             current_long: lo,
-            ...(Number.isFinite(payloadServiceCategoryId)
-              ? { service_category_id: payloadServiceCategoryId }
-              : {}),
           },
           { timeout: LARAVEL_TIMEOUT_MS }
         );
@@ -532,9 +487,7 @@ module.exports = (io, socket) => {
           "";
 
         const service_category_id = Number(
-          d.active_service_category_id ??
-            d.sub_service_cat_id ??
-            d.service_category_id ??
+          d.service_category_id ??
             payloadServiceCategoryId ??
             baseMeta.service_category_id ??
             null
@@ -886,7 +839,7 @@ module.exports = (io, socket) => {
   const extraSession = extraDistanceSessions.get(rideId);
   let fetchedTotalAmount = null;
 
- if (
+if (
   rideStatus === 6 &&
   extraSession &&
   extraSession.driverId === driverId &&
@@ -909,21 +862,14 @@ module.exports = (io, socket) => {
       route_points_count: Array.isArray(fullRoutePoints) ? fullRoutePoints.length : 0,
     });
 
-    if (
-      Number.isFinite(finalTotalDistanceKm) &&
-      finalTotalDistanceKm > 0 &&
-      Number.isFinite(extraDistanceKm) &&
-      extraDistanceKm > 0
-    ) {
-      const acceptExtraPayload = {
-        driver_id: driverId,
-        access_token: accessToken,
-        driver_service_id: driverServiceId,
-        ride_id: rideId,
-        extra_distance_km: extraDistanceKm,
-        updated_total_distance_km: finalTotalDistanceKm,
-        route_lat_long_list: JSON.stringify(fullRoutePoints),
-      };
+if (Array.isArray(fullRoutePoints) && fullRoutePoints.length >= 2) {
+const acceptExtraPayload = {
+  driver_id: driverId,
+  access_token: accessToken,
+  driver_service_id: driverServiceId,
+  ride_id: rideId,
+  route_lat_long_list: JSON.stringify(fullRoutePoints),
+};
 
       const extraRes = await axios.post(
         `${LARAVEL_BASE_URL}/api/driver/accept-not-reached-destination`,
@@ -1030,28 +976,6 @@ module.exports = (io, socket) => {
     return;
   }
 }
-  if (rideStatus === 7) {
-    if (!extraSession) {
-      console.log("[extra-distance][finalize-before-status-7][skip]", {
-        ride_id: rideId,
-        driver_id: driverId,
-        reason: "missing-session",
-      });
-    } else if (extraSession.driverId !== driverId) {
-      console.log("[extra-distance][finalize-before-status-7][skip]", {
-        ride_id: rideId,
-        driver_id: driverId,
-        session_driver_id: extraSession.driverId,
-        reason: "session-driver-mismatch",
-      });
-    } else if (extraSession.settled === true) {
-      console.log("[extra-distance][finalize-before-status-7][skip]", {
-        ride_id: rideId,
-        driver_id: driverId,
-        reason: "already-settled",
-      });
-    }
-  }
 
   // ✅ Auto-fetch total_amount for status=7 if missing
   if (rideStatus === 7 && payload?.total_amount == null) {
@@ -1113,7 +1037,6 @@ module.exports = (io, socket) => {
     "destination_lat",
     "destination_long",
     "estimated_time",
-    "total_distance",
     "route_lat_long_list",
     "total_amount",
     "toll_charge",
@@ -1164,12 +1087,6 @@ module.exports = (io, socket) => {
     }
   }
 
-  if (rideStatus === 6 && apiPayload.total_distance == null) {
-    const routeDistanceKm = computeRouteDistanceKm(rideId);
-    if (Number.isFinite(routeDistanceKm) && routeDistanceKm > 0) {
-      apiPayload.total_distance = routeDistanceKm;
-    }
-  }
 
   try {
     console.log("[ride-status][driver:updateRideStatus] api payload", apiPayload);
@@ -1278,165 +1195,134 @@ module.exports = (io, socket) => {
   }
 });
 
-  const handlePassedDestinationDecision = async (
-    payload = {},
-    sourceEvent = "driver:passedDestinationDecision"
-  ) => {
-    try {
-      console.log("[ride-status][driver:passedDestinationDecision] incoming", {
-        source_event: sourceEvent,
-        socket_id: socket.id,
-        socket_driver_id: socket.driverId ?? null,
-        payload_driver_id: payload?.driver_id ?? null,
-        ride_id: payload?.ride_id ?? null,
-        accepted:
-          payload?.accepted ??
-          payload?.yes ??
-          payload?.answer ??
-          payload?.decision ??
-          payload?.is_accept ??
-          payload?.accept ??
-          payload?.isAccepted ??
-          null,
-        extra_distance_km: payload?.extra_distance_km ?? null,
-        updated_total_distance_km:
-          payload?.updated_total_distance_km ??
-          payload?.total_distance_km ??
-          payload?.total_distance ??
-          null,
+  socket.on("driver:passedDestinationDecision", async (payload = {}) => {
+    console.log("[ride-status][driver:passedDestinationDecision] incoming", {
+      socket_id: socket.id,
+      socket_driver_id: socket.driverId ?? null,
+      payload_driver_id: payload?.driver_id ?? null,
+      ride_id: payload?.ride_id ?? null,
+      accepted: payload?.accepted ?? payload?.yes ?? payload?.answer ?? null,
+      extra_distance_km: payload?.extra_distance_km ?? null,
+      updated_total_distance_km:
+        payload?.updated_total_distance_km ??
+        payload?.total_distance_km ??
+        payload?.total_distance ??
+        null,
+    });
+
+    const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
+    if (!driverId) {
+      socket.emit("ride:passedDestinationDecisionAck", {
+        status: 0,
+        accepted: 0,
+        message: "driver_id required",
+        at: Date.now(),
       });
+      return;
+    }
 
-      const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
-      if (!driverId) {
-        socket.emit("ride:passedDestinationDecisionAck", {
-          status: 0,
-          accepted: 0,
-          message: "driver_id required",
-          at: Date.now(),
-        });
-        return;
-      }
-
-      if (!bindDriverOnce(driverId)) {
-        socket.emit("ride:passedDestinationDecisionAck", {
-          status: 0,
-          accepted: 0,
-          ride_id: toNumber(payload?.ride_id) ?? null,
-          message: "driver_id mismatch",
-          at: Date.now(),
-        });
-        return;
-      }
-
-      const rideId =
-        toNumber(payload?.ride_id) ?? getActiveRideByDriver(driverId) ?? null;
-      if (!rideId) {
-        socket.emit("ride:passedDestinationDecisionAck", {
-          status: 0,
-          accepted: 0,
-          message: "ride_id required",
-          at: Date.now(),
-        });
-        return;
-      }
-
-      const accepted = resolveAcceptedDecision(payload);
-      if (!accepted) {
-        extraDistanceSessions.delete(rideId);
-
-        const ack = {
-          status: 1,
-          accepted: 0,
-          ride_id: rideId,
-          message: "Driver did not accept extra distance",
-          at: Date.now(),
-        };
-        socket.emit("ride:passedDestinationDecisionAck", ack);
-        io.to(driverRoom(driverId)).emit("ride:passedDestinationDecisionAck", ack);
-        return;
-      }
-
-      const currentLat =
-        toNumber(payload?.current_lat ?? payload?.lat) ??
-        toNumber(driverLocationService.getDriver(driverId)?.lat);
-
-      const currentLong =
-        toNumber(payload?.current_long ?? payload?.long) ??
-        toNumber(driverLocationService.getDriver(driverId)?.long);
-
-      let routePoints = getRideRoutePoints(rideId);
-      if (
-        !routePoints.length &&
-        Number.isFinite(currentLat) &&
-        Number.isFinite(currentLong)
-      ) {
-        appendRidePoint(rideId, {
-          lat: currentLat,
-          lng: currentLong,
-          at: Date.now(),
-        });
-        routePoints = getRideRoutePoints(rideId);
-      }
-
-      const baselineRoutePointCount = Array.isArray(routePoints)
-        ? routePoints.length
-        : 0;
-      const baselineTotalDistanceKm = computeDistanceKmFromPoints(routePoints);
-
-      extraDistanceSessions.set(rideId, {
-        driverId,
-        acceptedAt: Date.now(),
-        baselineRoutePointCount,
-        baselineTotalDistanceKm,
-        acceptedLat: Number.isFinite(currentLat) ? currentLat : null,
-        acceptedLong: Number.isFinite(currentLong) ? currentLong : null,
-        settled: false,
+    if (!bindDriverOnce(driverId)) {
+      socket.emit("ride:passedDestinationDecisionAck", {
+        status: 0,
+        accepted: 0,
+        ride_id: toNumber(payload?.ride_id) ?? null,
+        message: "driver_id mismatch",
+        at: Date.now(),
       });
+      return;
+    }
+
+    const rideId =
+      toNumber(payload?.ride_id) ?? getActiveRideByDriver(driverId) ?? null;
+    if (!rideId) {
+      socket.emit("ride:passedDestinationDecisionAck", {
+        status: 0,
+        accepted: 0,
+        message: "ride_id required",
+        at: Date.now(),
+      });
+      return;
+    }
+
+    const accepted = isAcceptedDecision(
+      payload?.accepted ?? payload?.yes ?? payload?.answer
+    );
+    if (!accepted) {
+      extraDistanceSessions.delete(rideId);
 
       const ack = {
         status: 1,
-        accepted: 1,
+        accepted: 0,
         ride_id: rideId,
-        message: "Extra distance tracking started",
-        baseline_route_point_count: baselineRoutePointCount,
-        baseline_total_distance_km: baselineTotalDistanceKm,
+        message: "Driver did not accept extra distance",
         at: Date.now(),
       };
-
       socket.emit("ride:passedDestinationDecisionAck", ack);
       io.to(driverRoom(driverId)).emit("ride:passedDestinationDecisionAck", ack);
-
-      io.to(`ride:${rideId}`).emit("ride:passedDestinationAccepted", {
-        ride_id: rideId,
-        driver_id: driverId,
-        tracking_started: 1,
-        baseline_route_point_count: baselineRoutePointCount,
-        baseline_total_distance_km: baselineTotalDistanceKm,
-        at: Date.now(),
-      });
-
-      io.to(driverRoom(driverId)).emit("ride:passedDestinationAccepted", {
-        ride_id: rideId,
-        driver_id: driverId,
-        tracking_started: 1,
-        baseline_route_point_count: baselineRoutePointCount,
-        baseline_total_distance_km: baselineTotalDistanceKm,
-        at: Date.now(),
-      });
-    } catch (e) {
-      console.error("[ride-status][driver:passedDestinationDecision] failed", {
-        source_event: sourceEvent,
-        socket_id: socket.id,
-        ride_id: payload?.ride_id ?? null,
-        driver_id: payload?.driver_id ?? socket.driverId ?? null,
-        message: e?.message ?? null,
-        data: e?.response?.data ?? null,
-      });
+      return;
     }
-  };
 
-  socket.on("driver:passedDestinationDecision", (payload = {}) => {
-    void handlePassedDestinationDecision(payload, "driver:passedDestinationDecision");
+    const currentLat =
+      toNumber(payload?.current_lat ?? payload?.lat) ??
+      toNumber(driverLocationService.getDriver(driverId)?.lat);
+
+    const currentLong =
+      toNumber(payload?.current_long ?? payload?.long) ??
+      toNumber(driverLocationService.getDriver(driverId)?.long);
+
+    let routePoints = getRideRoutePoints(rideId);
+    if (!routePoints.length && Number.isFinite(currentLat) && Number.isFinite(currentLong)) {
+      appendRidePoint(rideId, {
+        lat: currentLat,
+        lng: currentLong,
+        at: Date.now(),
+      });
+      routePoints = getRideRoutePoints(rideId);
+    }
+
+    const baselineRoutePointCount = Array.isArray(routePoints) ? routePoints.length : 0;
+    const baselineTotalDistanceKm = computeDistanceKmFromPoints(routePoints);
+
+    extraDistanceSessions.set(rideId, {
+      driverId,
+      acceptedAt: Date.now(),
+      baselineRoutePointCount,
+      baselineTotalDistanceKm,
+      acceptedLat: Number.isFinite(currentLat) ? currentLat : null,
+      acceptedLong: Number.isFinite(currentLong) ? currentLong : null,
+      settled: false,
+    });
+
+    const ack = {
+      status: 1,
+      accepted: 1,
+      ride_id: rideId,
+      message: "Extra distance tracking started",
+      baseline_route_point_count: baselineRoutePointCount,
+      baseline_total_distance_km: baselineTotalDistanceKm,
+      at: Date.now(),
+    };
+
+    socket.emit("ride:passedDestinationDecisionAck", ack);
+    io.to(driverRoom(driverId)).emit("ride:passedDestinationDecisionAck", ack);
+
+    io.to(`ride:${rideId}`).emit("ride:passedDestinationAccepted", {
+      ride_id: rideId,
+      driver_id: driverId,
+      tracking_started: 1,
+      baseline_route_point_count: baselineRoutePointCount,
+      baseline_total_distance_km: baselineTotalDistanceKm,
+      at: Date.now(),
+    });
+
+    io.to(driverRoom(driverId)).emit("ride:passedDestinationAccepted", {
+      ride_id: rideId,
+      driver_id: driverId,
+      tracking_started: 1,
+      baseline_route_point_count: baselineRoutePointCount,
+      baseline_total_distance_km: baselineTotalDistanceKm,
+      at: Date.now(),
+    });
   });
 
   socket.on("disconnect", () => {
@@ -1453,18 +1339,6 @@ module.exports = (io, socket) => {
     if (socket.driverId) {
       const now = Date.now();
       const driverId = socket.driverId;
-      const roomName = driverRoom(driverId);
-      const remainingRoomMembers = io.sockets.adapter.rooms.get(roomName);
-      const hasOtherActiveSockets =
-        !!remainingRoomMembers && remainingRoomMembers.size > 0;
-
-      if (hasOtherActiveSockets) {
-        console.log(
-          `[disconnect] driver ${driverId} socket ${socket.id} closed; keeping driver online because another socket is active`
-        );
-        return;
-      }
-
       const activeRideId =
         getActiveRideByDriver(driverId) ?? toNumber(socket.activeRideId);
 

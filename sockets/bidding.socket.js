@@ -2626,6 +2626,8 @@ async function dispatchToNearbyDrivers(io, data) {
   const isPriceUpdated = !!data?.isPriceUpdated;
   const updatedPrice = toNumber(data?.updatedPrice ?? null);
   const updatedAt = toNumber(data?.updatedAt ?? null);
+  const additionalRemarks =
+  data?.additional_remarks ?? data?.additionalRemarks ?? null;
 
   const storedUser = userId ? getUserDetails(userId) : null;
   const storedByToken = !storedUser && tokenTmp ? getUserDetailsByToken(tokenTmp) : null;
@@ -2945,6 +2947,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     destination_lat: toNumber(data.destination_lat),
     destination_long: toNumber(data.destination_long),
     destination_address: data.destination_address ?? null,
+      additional_remarks: additionalRemarks,
 
     radius: roadRadius,
     ...dispatchStagePayload,
@@ -3013,6 +3016,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         destination_lat: toNumber(data.destination_lat),
         destination_long: toNumber(data.destination_long),
         destination_address: data.destination_address ?? null,
+              additional_remarks: additionalRemarks,
 
         radius: roadRadius,
         ...dispatchStagePayload,
@@ -3147,6 +3151,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       destination_lat: toNumber(data.destination_lat),
       destination_long: toNumber(data.destination_long),
       destination_address: data.destination_address ?? null,
+        additional_remarks: additionalRemarks,
 
       radius: roadRadius,
       ...dispatchStagePayload,
