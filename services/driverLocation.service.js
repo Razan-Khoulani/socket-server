@@ -124,7 +124,10 @@ exports.getNearbyDriversFromMemory = (lat, long, radius = 5000, opts = null) => 
 
   for (const [driverId, data] of driverLocations.entries()) {
     if (onlyOnline && data.is_online === false) continue;
-    if (filterTypeId && data.service_type_id !== filterTypeId) continue;
+    if (filterTypeId) {
+      const dataServiceType = Number(data.service_type_id);
+      if (!Number.isFinite(dataServiceType) || dataServiceType !== Number(filterTypeId)) continue;
+    }
     if (Number(data.not_valid_wallet_balance ?? 0) === 1) continue;
 
     if (maxAgeMs !== null) {

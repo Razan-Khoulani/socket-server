@@ -540,7 +540,12 @@ module.exports = (io, socket) => {
           d.driver_gender ?? d.gender ?? baseMeta.driver_gender ?? null
         );
         const child_seat = toNumber(
-          d.child_seat ?? d.child_seat_accessibility ?? baseMeta.child_seat ?? null
+          d.child_seat ??
+            d.child_seat_accessibility ??
+            d.smoking_value ??
+            d.smoking ??
+            baseMeta.child_seat ??
+            null
         );
         const handicap = toNumber(
           d.handicap ?? d.handicap_accessibility ?? baseMeta.handicap ?? null

@@ -1077,6 +1077,13 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
     const vehicleManufacturer = normalizedDetails.vehicle_manufacturer;
     const rating = normalizedDetails.rating;
     const driverImage = normalizedDetails.driver_image;
+    const childSeatFromApi = toBinaryFlag(
+      d?.child_seat_accessibility ?? d?.child_seat ?? d?.smoking ?? d?.smoking_value ?? null
+    );
+    const handicapFromApi = toBinaryFlag(
+      d?.handicap_accessibility ?? d?.handicap ?? null
+    );
+    const driverGenderFromApi = toNumber(d?.driver_gender ?? d?.gender ?? null);
     const providerId = toNumber(d.provider_id ?? d.driver_id ?? driverId);
     const resolvedDriverServiceId = toNumber(d.driver_service_id ?? driverServiceId);
     const driverDetailId = toNumber(d.driver_detail_id ?? d.driver_details_id ?? null);
@@ -1096,6 +1103,15 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
       ...(vehicleManufacturer ? { vehicle_manufacturer: vehicleManufacturer } : {}),
       ...(rating != null ? { rating } : {}),
       ...(driverImage ? { driver_image: driverImage } : {}),
+      ...(childSeatFromApi === 0 || childSeatFromApi === 1
+        ? { child_seat: childSeatFromApi }
+        : {}),
+      ...(handicapFromApi === 0 || handicapFromApi === 1
+        ? { handicap: handicapFromApi }
+        : {}),
+      ...(driverGenderFromApi === 1 || driverGenderFromApi === 2
+        ? { driver_gender: driverGenderFromApi }
+        : {}),
     };
 
     if (Object.keys(metaUpdate).length > 0) {
@@ -1116,6 +1132,9 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
       vehicle_manufacturer: vehicleManufacturer,
       rating,
       driver_image: driverImage,
+      child_seat: childSeatFromApi,
+      handicap: handicapFromApi,
+      driver_gender: driverGenderFromApi,
     };
   } catch (e) {
     return null;
@@ -3035,6 +3054,16 @@ const eligibleForDispatch = roadFiltered.filter((driver) => {
   return !hasRideDriverBeenNotified(rideId, driverId);
 });
 
+const nearbySmokingReady = nearbyAir.filter(
+  (driver) => toBinaryFlag(driver?.child_seat) === 1
+).length;
+const availableSmokingReady = availableAir.filter(
+  (driver) => toBinaryFlag(driver?.child_seat) === 1
+).length;
+const roadSmokingReady = roadFiltered.filter(
+  (driver) => toBinaryFlag(driver?.child_seat) === 1
+).length;
+
 const candidateDriversRaw =
   MAX_DISPATCH_CANDIDATES > 0
     ? eligibleForDispatch.slice(0, MAX_DISPATCH_CANDIDATES)
@@ -3092,6 +3121,9 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   available_air: availableAir.length,
   road_filtered: roadFiltered.length,
   dispatch_eligible: eligibleForDispatch.length,
+  nearby_smoking_ready: nearbySmokingReady,
+  available_smoking_ready: availableSmokingReady,
+  road_smoking_ready: roadSmokingReady,
   retained_existing_candidates: retainedExistingIds.length,
   new_candidates: newCandidateIds.length,
   final_candidates: nextCandidateIds.length,
