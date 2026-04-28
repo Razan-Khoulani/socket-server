@@ -263,6 +263,66 @@ const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
     vehicle_make: vehicleCompany,
   };
 };
+const getRoomSocketCount = (io, roomName) => {
+  if (!io || !roomName) return 0;
+  const roomSet = io?.sockets?.adapter?.rooms?.get(roomName);
+  return roomSet ? roomSet.size : 0;
+};
+const buildNewBidEmitDebugSnapshot = (payload = {}) => {
+  const p = payload && typeof payload === "object" ? payload : {};
+  const details =
+    p?.driver_details && typeof p.driver_details === "object"
+      ? p.driver_details
+      : {};
+
+  return {
+    ride_id: toNumber(p?.ride_id),
+    user_id: toNumber(p?.user_id ?? p?.user_details?.user_id ?? null),
+    driver_id:
+      toNumber(
+        p?.driver_id ??
+          p?.driver_detail_id ??
+          p?.driver_details_id ??
+          details?.driver_id ??
+          details?.provider_id ??
+          details?.driver_detail_id
+      ) ?? null,
+    driver_name: toTrimmedText(p?.driver_name ?? details?.driver_name ?? null),
+    vehicle_type: toTrimmedText(
+      p?.vehicle_type ??
+        p?.vehicle_type_name ??
+        details?.vehicle_type ??
+        details?.vehicle_type_name ??
+        null
+    ),
+    vehicle_company: toTrimmedText(
+      p?.vehicle_company ?? details?.vehicle_company ?? details?.company ?? null
+    ),
+    model_name: toTrimmedText(
+      p?.model_name ?? details?.model_name ?? details?.model ?? null
+    ),
+    model_year: p?.model_year ?? details?.model_year ?? null,
+    vehicle_color: toTrimmedText(
+      p?.vehicle_color ?? details?.vehicle_color ?? details?.color ?? null
+    ),
+    vehicle_number: toTrimmedText(
+      p?.vehicle_number ??
+        p?.plat_no ??
+        details?.vehicle_number ??
+        details?.plat_no ??
+        null
+    ),
+    additional_remarks: toTrimmedText(
+      p?.additional_remarks ??
+        p?.additional_remark ??
+        p?.ride_details?.additional_remarks ??
+        p?.ride_details?.additional_remark ??
+        p?.meta?.additional_remarks ??
+        p?.meta?.additional_remark ??
+        null
+    ),
+  };
+};
 const buildDriverIdentityPayload = (identity = {}, legacyDriverId = null) => {
   const payload = {};
   const safeLegacyDriverId = toNumber(legacyDriverId);
@@ -2397,10 +2457,26 @@ function emitToRideAudience(io, rideId, eventName, payload, explicitUserId = nul
   if (!safeRideId) return;
 
   const audienceUserId = resolveRideAudienceUserId(safeRideId, explicitUserId);
-  let emitter = io.to(rideRoom(safeRideId));
+  const rideRoomName = rideRoom(safeRideId);
+  const userRoomName = audienceUserId ? userRoom(audienceUserId) : null;
+
+  let emitter = io.to(rideRoomName);
 
   if (audienceUserId) {
-    emitter = emitter.to(userRoom(audienceUserId));
+    emitter = emitter.to(userRoomName);
+  }
+
+  if (eventName === "ride:newBid") {
+    const snapshot = buildNewBidEmitDebugSnapshot(payload);
+    console.log("[emit][ride:newBid]", {
+      ...snapshot,
+      audience_user_id: audienceUserId ?? null,
+      ride_room: rideRoomName,
+      ride_room_sockets: getRoomSocketCount(io, rideRoomName),
+      user_room: userRoomName,
+      user_room_sockets: userRoomName ? getRoomSocketCount(io, userRoomName) : 0,
+      at: Date.now(),
+    });
   }
 
   emitter.emit(eventName, payload);
@@ -4352,6 +4428,37 @@ socket.emit("ride:candidatesSummary", {
     }
   });
 
+  socket.on("ride:newBid:ack", (payload = {}) => {
+    const safePayload = payload && typeof payload === "object" ? payload : {};
+    const rideId = toNumber(safePayload?.ride_id ?? socket.currentRideId ?? null);
+    const userId = toNumber(
+      safePayload?.user_id ?? socket.userId ?? safePayload?.user_details?.user_id ?? null
+    );
+
+    console.log("[ack][ride:newBid]", {
+      ride_id: rideId,
+      user_id: userId,
+      socket_id: socket.id,
+      driver_id: toNumber(
+        safePayload?.driver_id ??
+          safePayload?.driver_detail_id ??
+          safePayload?.driver_details_id ??
+          safePayload?.driver_details?.driver_id ??
+          safePayload?.driver_details?.provider_id ??
+          null
+      ),
+      offered_price: toNumber(safePayload?.offered_price ?? null),
+      client_ts:
+        toNumber(
+          safePayload?.client_ts ?? safePayload?.received_at ?? safePayload?.at ?? null
+        ) ?? null,
+      additional_remarks: toTrimmedText(
+        safePayload?.additional_remarks ?? safePayload?.additional_remark ?? null
+      ),
+      at: Date.now(),
+    });
+  });
+
   socket.on("ride:dispatchToNearbyDrivers", async (data = {}) => {
     debugLog("ride:dispatchToNearbyDrivers", data, socket.id);
 
@@ -4973,6 +5080,112 @@ const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
     };
 
     const driverMeta = driverLocationService.getMeta(driverId) || {};
+    const payloadDriverDetailsRaw =
+      payload?.driver_details && typeof payload.driver_details === "object"
+        ? payload.driver_details
+        : {};
+    const payloadDriverProfileFields = {
+      vehicle_company: toTrimmedText(
+        pickFirstValue(
+          payload?.vehicle_company,
+          payloadDriverDetailsRaw?.vehicle_company,
+          payloadDriverDetailsRaw?.company
+        )
+      ),
+      plat_no: toTrimmedText(
+        pickFirstValue(
+          payload?.plat_no,
+          payload?.vehicle_number,
+          payloadDriverDetailsRaw?.plat_no,
+          payloadDriverDetailsRaw?.vehicle_number,
+          payloadDriverDetailsRaw?.plate_no
+        )
+      ),
+      model_year: pickFirstValue(
+        payload?.model_year,
+        payloadDriverDetailsRaw?.model_year,
+        payloadDriverDetailsRaw?.vehicle_year,
+        payloadDriverDetailsRaw?.manufacture_year
+      ),
+      model_name: toTrimmedText(
+        pickFirstValue(
+          payload?.model_name,
+          payloadDriverDetailsRaw?.model_name,
+          payloadDriverDetailsRaw?.model,
+          payloadDriverDetailsRaw?.vehicle_model
+        )
+      ),
+      vehicle_color: toTrimmedText(
+        pickFirstValue(
+          payload?.vehicle_color,
+          payloadDriverDetailsRaw?.vehicle_color,
+          payloadDriverDetailsRaw?.color
+        )
+      ),
+      driver_name: toTrimmedText(
+        pickFirstValue(
+          payload?.driver_name,
+          payloadDriverDetailsRaw?.driver_name,
+          payloadDriverDetailsRaw?.name
+        )
+      ),
+      rating: pickFirstValue(
+        payload?.rating,
+        payload?.driver_rating,
+        payloadDriverDetailsRaw?.rating,
+        payloadDriverDetailsRaw?.driver_rating
+      ),
+      driver_image: toTrimmedText(
+        pickFirstValue(
+          payload?.driver_image,
+          payload?.driver_image_url,
+          payloadDriverDetailsRaw?.driver_image,
+          payloadDriverDetailsRaw?.driver_image_url,
+          payloadDriverDetailsRaw?.profile_image,
+          payloadDriverDetailsRaw?.avatar
+        )
+      ),
+    };
+    const memoryDriverMetaFields = {
+      vehicle_company: toTrimmedText(driverMeta?.vehicle_company ?? driverMeta?.company ?? null),
+      plat_no: toTrimmedText(
+        pickFirstValue(
+          driverMeta?.plat_no,
+          driverMeta?.vehicle_number,
+          driverMeta?.plate_no,
+          driverMeta?.vehicle_no
+        )
+      ),
+      model_year: pickFirstValue(
+        driverMeta?.model_year,
+        driverMeta?.vehicle_year,
+        driverMeta?.manufacture_year
+      ),
+      model_name: toTrimmedText(
+        pickFirstValue(
+          driverMeta?.model_name,
+          driverMeta?.model,
+          driverMeta?.vehicle_model
+        )
+      ),
+      vehicle_color: toTrimmedText(driverMeta?.vehicle_color ?? driverMeta?.color ?? null),
+      driver_name: toTrimmedText(driverMeta?.driver_name ?? driverMeta?.name ?? null),
+      rating: pickFirstValue(driverMeta?.rating, driverMeta?.driver_rating),
+      driver_image: toTrimmedText(
+        pickFirstValue(
+          driverMeta?.driver_image,
+          driverMeta?.driver_image_url,
+          driverMeta?.profile_image,
+          driverMeta?.avatar
+        )
+      ),
+    };
+    console.log("[driver:submitBid][details-raw]", {
+      ride_id: rideId,
+      driver_id: driverId,
+      payload_fields: payloadDriverProfileFields,
+      memory_meta_fields: memoryDriverMetaFields,
+    });
     const driverServiceId =
       toNumber(payload?.driver_service_id) ??
       toNumber(payload?.driver_service) ??
@@ -5021,6 +5234,24 @@ const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
       driver_service_id: driverIdentity.driver_service_id ?? driverServiceId ?? null,
       driver_detail_id: driverIdentity.driver_detail_id ?? null,
     };
+    console.log("[driver:submitBid][details-normalized]", {
+      ride_id: rideId,
+      driver_id: driverId,
+      driver_identity: driverIdentity,
+      driver_details: {
+        vehicle_company: driverDetails?.vehicle_company ?? null,
+        plat_no:
+          driverDetails?.plat_no ??
+          driverDetails?.vehicle_number ??
+          null,
+        model_year: driverDetails?.model_year ?? null,
+        model_name: driverDetails?.model_name ?? null,
+        vehicle_color: driverDetails?.vehicle_color ?? null,
+        driver_name: driverDetails?.driver_name ?? null,
+        rating: driverDetails?.rating ?? null,
+        driver_image: driverDetails?.driver_image ?? null,
+      },
+    });
     const customerFacingDriverId =
       toNumber(driverIdentity.driver_detail_id) ?? toNumber(driverIdentity.provider_id) ?? driverId;
 
@@ -5208,6 +5439,24 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       // ✅ timer fields (SECONDS)
       ...(timer ? timer : {}),
     };
+    io.to(driverRoom(driverId)).emit("ride:newBid", ridePayload);
+    console.log("[emit][driver][ride:newBid]", {
+      ride_id: rideId,
+      driver_id: driverId,
+      room: driverRoom(driverId),
+      vehicle_company: ridePayload?.vehicle_company ?? null,
+      plat_no: ridePayload?.plat_no ?? null,
+      model_year: ridePayload?.model_year ?? null,
+      model_name: ridePayload?.model_name ?? null,
+      vehicle_color: ridePayload?.vehicle_color ?? null,
+      driver_name: ridePayload?.driver_name ?? null,
+      driver_rating: ridePayload?.driver_rating ?? null,
+      driver_image: ridePayload?.driver_image ?? null,
+      additional_remarks:
+        ridePayload?.additional_remarks ?? ridePayload?.additional_remark ?? null,
+      at: Date.now(),
+    });
+
     emitToRideAudience(
       io,
       rideId,
