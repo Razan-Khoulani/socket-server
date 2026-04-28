@@ -1104,6 +1104,11 @@ app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
     dispatch_timeout_s: dispatchPayload?.dispatch_timeout_s ?? null,
     dispatch_radius_stages_m: dispatchPayload?.dispatch_radius_stages_m ?? null,
     force_new_search_window: dispatchPayload?.force_new_search_window ?? null,
+    additional_remarks:
+      dispatchPayload?.additional_remarks ??
+      dispatchPayload?.additional_remark ??
+      dispatchPayload?.additional_request ??
+      null,
   });
 
   try {
