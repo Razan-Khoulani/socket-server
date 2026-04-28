@@ -89,6 +89,20 @@ const setCachedProfile = (profile = {}) => {
     driver_image: profile.driver_image ?? profile.image ?? profile.driver_profile ?? null,
     phone: String(profile.phone ?? profile.contact_number ?? "").trim(),
     country_code: String(profile.country_code ?? "").trim(),
+    driver_gender: toNumber(profile.driver_gender ?? profile.gender),
+    child_seat: toNumber(
+      profile.child_seat ??
+        profile.child_seat_accessibility ??
+        profile.smoking
+    ),
+    smoking: toNumber(
+      profile.smoking ??
+        profile.child_seat ??
+        profile.child_seat_accessibility
+    ),
+    handicap: toNumber(
+      profile.handicap ?? profile.handicap_accessibility
+    ),
     current_lat: toNumber(profile.current_lat ?? profile.lat),
     current_long: toNumber(profile.current_long ?? profile.lng ?? profile.long),
     remaining_balance: toNumber(profile.remaining_balance),

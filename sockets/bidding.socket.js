@@ -52,6 +52,21 @@ const toNumber = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
+const toBinaryFlag = (v) => {
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v === "boolean") return v ? 1 : 0;
+  if (typeof v === "number") return v === 1 ? 1 : v === 0 ? 0 : null;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(s)) return 1;
+    if (["0", "false", "no", "off"].includes(s)) return 0;
+    const n = Number(s);
+    if (Number.isFinite(n)) return n === 1 ? 1 : n === 0 ? 0 : null;
+    return null;
+  }
+  const n = Number(v);
+  return Number.isFinite(n) ? (n === 1 ? 1 : n === 0 ? 0 : null) : null;
+};
 const toTrimmedText = (v) => {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
@@ -2882,14 +2897,15 @@ async function dispatchToNearbyDrivers(io, data) {
   const requiredGender = toNumber(
     data?.required_driver_gender ?? data?.required_gender ?? data?.driver_gender ?? null
   );
-  const needChildSeat = toNumber(
+  const needChildSeat = toBinaryFlag(
     data?.need_child_seat ??
       data?.child_seat ??
       data?.require_child_seat ??
       data?.smoking ??
+      data?.need_smoking ??
       null
   );
-  const needHandicap = toNumber(
+  const needHandicap = toBinaryFlag(
     data?.need_handicap ?? data?.handicap ?? data?.require_handicap ?? null
   );
 
@@ -3081,7 +3097,12 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   final_candidates: nextCandidateIds.length,
   required_gender: requiredGender ?? null,
   need_child_seat: needChildSeat ?? null,
+  need_child_seat_filter_applied: needChildSeat === 1,
+  raw_smoking: data?.smoking ?? null,
+  raw_child_seat: data?.child_seat ?? null,
+  raw_need_child_seat: data?.need_child_seat ?? null,
   need_handicap: needHandicap ?? null,
+  need_handicap_filter_applied: needHandicap === 1,
   has_user_details: !!userDetails,
   token_present: !!tokenTmp,
   additional_remarks: additionalRemarks ?? null,
