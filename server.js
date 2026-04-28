@@ -2164,6 +2164,36 @@ app.post("/events/internal/ride-dispatch-retry", async (req, res) => {
   });
 });
 
+app.post("/events/internal/driver-has-pending-rides", (req, res) => {
+  const driverId = Number(req.body?.driver_id);
+  if (!Number.isFinite(driverId) || driverId <= 0) {
+    return res.status(400).json({
+      status: 0,
+      message: "driver_id required",
+      has_data: false,
+      total: 0,
+    });
+  }
+
+  if (typeof biddingSocket.getDriverInboxStats !== "function") {
+    return res.status(500).json({
+      status: 0,
+      message: "Inbox stats not available",
+      has_data: false,
+      total: 0,
+    });
+  }
+
+  const stats = biddingSocket.getDriverInboxStats(driverId);
+  return res.json({
+    status: 1,
+    driver_id: driverId,
+    has_data: !!stats?.has_data,
+    total: Number(stats?.total || 0),
+    ride_ids: Array.isArray(stats?.ride_ids) ? stats.ride_ids : [],
+  });
+});
+
 // ────────────────────────────────────────────────
 // Run server
 // ────────────────────────────────────────────────

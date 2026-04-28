@@ -719,6 +719,8 @@ const LARAVEL_ACCEPT_BID_PATH = "/api/customer/transport/accept-bid";
 const LARAVEL_DRIVER_BID_PATH = "/api/driver/bid-offer";
 const LARAVEL_DRIVER_REJECT_REQUEST_PATH = "/api/driver/reject-request";
 const LARAVEL_DRIVER_REJECT_NOTIFICATION_PATH = "/api/driver/driver-reject-notification";
+const LARAVEL_DRIVER_UPDATE_LIST_NOTIFICATION_PATH =
+  "/api/internal/driver-update-list-notification";
 const LARAVEL_ACCEPT_BID_TIMEOUT_MS = Number.isFinite(
   Number(process.env.LARAVEL_ACCEPT_BID_TIMEOUT_MS)
 )
@@ -809,6 +811,48 @@ async function syncDriverRejectNotification({
       "[driver:declineRide] Laravel reject-notification sync failed:",
       error?.response?.data || error?.message || error
     );
+    return false;
+  }
+}
+
+async function syncDriverUpdateListNotification({
+  driverId,
+  rideId,
+  serviceCategoryId,
+}) {
+  if (!driverId || !rideId) {
+    console.log("[driver:updateList][push] skipped: missing fields", {
+      driver_id: driverId ?? null,
+      ride_id: rideId ?? null,
+      service_category_id: serviceCategoryId ?? null,
+    });
+    return false;
+  }
+
+  try {
+    await axios.post(
+      `${LARAVEL_BASE_URL}${LARAVEL_DRIVER_UPDATE_LIST_NOTIFICATION_PATH}`,
+      {
+        driver_id: driverId,
+        ride_id: rideId,
+        service_category_id: serviceCategoryId ?? null,
+      },
+      { timeout: 7000 }
+    );
+
+    console.log("[driver:updateList][push] Laravel sync succeeded", {
+      driver_id: driverId,
+      ride_id: rideId,
+      service_category_id: serviceCategoryId ?? null,
+    });
+    return true;
+  } catch (error) {
+    console.error("[driver:updateList][push] Laravel sync failed", {
+      driver_id: driverId,
+      ride_id: rideId,
+      service_category_id: serviceCategoryId ?? null,
+      error: error?.response?.data || error?.message || error,
+    });
     return false;
   }
 }
@@ -2302,6 +2346,43 @@ function inboxList(driverId, limit = 30) {
     .slice(0, limit);
 }
 
+function getDriverInboxStats(driverId) {
+  const safeDriverId = toNumber(driverId);
+  if (!safeDriverId) {
+    return { driver_id: null, has_data: false, total: 0, ride_ids: [] };
+  }
+
+  const box = driverRideInbox.get(safeDriverId);
+  if (!box || box.size === 0) {
+    return { driver_id: safeDriverId, has_data: false, total: 0, ride_ids: [] };
+  }
+
+  const now = Date.now();
+  let total = 0;
+  const rideIds = [];
+
+  for (const [rideId, ride] of box.entries()) {
+    if (!ride || typeof ride !== "object") continue;
+    if (isRideOfferExpired(ride)) continue;
+
+    const ts = toNumber(ride?._ts);
+    if (ts && now - ts > INBOX_ENTRY_TTL_MS) continue;
+
+    total += 1;
+    const safeRideId = toNumber(rideId);
+    if (safeRideId) {
+      rideIds.push(safeRideId);
+    }
+  }
+
+  return {
+    driver_id: safeDriverId,
+    has_data: total > 0,
+    total,
+    ride_ids: rideIds,
+  };
+}
+
 function getFullRideSnapshot(rideId, driverId = null) {
   const fromMap = getRideDetails(rideId);
   if (fromMap) return fromMap;
@@ -3428,6 +3509,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       : null);
 
   candidatesToNotify.forEach((d) => {
+    const wasNotifiedBefore = hasRideDriverBeenNotified(rideId, d.driver_id);
     const room = driverRoom(d.driver_id);
     const bidRequestPayload = sanitizeRidePayloadForClient({
       ride_id: rideId,
@@ -3554,6 +3636,15 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       last_dispatch_radius_m: roadRadius,
     });
     emitDriverPatch(io, d.driver_id, [{ op: "upsert", ride: ridePayloadForDriver }]);
+    emitDriverInbox(io, d.driver_id, "driver:updateList");
+
+    if (!wasNotifiedBefore) {
+      void syncDriverUpdateListNotification({
+        driverId: d.driver_id,
+        rideId,
+        serviceCategoryId: toNumber(ridePayloadForDriver?.service_category_id),
+      });
+    }
 
     console.log(`   -> Sent bidRequest + patch(upsert) to driver ${d.driver_id} (room:${room})`);
   });
@@ -6456,3 +6547,4 @@ module.exports.upsertRideRouteMetrics = upsertRideRouteMetrics;
 module.exports.emitCandidatesSummaryForDriverStateChange = emitCandidatesSummaryForDriverStateChange;
 module.exports.canDriverReceiveNewRideRequests = canDriverReceiveNewRideRequests;
 module.exports.activateQueuedRideForDriver = activateQueuedRideForDriver;
+module.exports.getDriverInboxStats = getDriverInboxStats;
