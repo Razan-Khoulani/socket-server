@@ -2626,8 +2626,19 @@ async function dispatchToNearbyDrivers(io, data) {
   const isPriceUpdated = !!data?.isPriceUpdated;
   const updatedPrice = toNumber(data?.updatedPrice ?? null);
   const updatedAt = toNumber(data?.updatedAt ?? null);
-  const additionalRemarks =
-  data?.additional_remarks ?? data?.additionalRemarks ?? null;
+  const additionalRemarks = pickFirstValue(
+    data?.additional_remarks,
+    data?.additional_remark,
+    data?.additionalRemarks,
+    data?.additionalRemark,
+    data?.additional_request,
+    data?.ride_details?.additional_remarks,
+    data?.ride_details?.additional_remark,
+    data?.ride_details?.additional_request,
+    data?.meta?.additional_remarks,
+    data?.meta?.additional_remark,
+    data?.meta?.additional_request
+  );
 
   const storedUser = userId ? getUserDetails(userId) : null;
   const storedByToken = !storedUser && tokenTmp ? getUserDetailsByToken(tokenTmp) : null;
@@ -2856,6 +2867,11 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   need_handicap: needHandicap ?? null,
   has_user_details: !!userDetails,
   token_present: !!tokenTmp,
+  additional_remarks: additionalRemarks ?? null,
+  has_additional_remarks:
+    typeof additionalRemarks === "string"
+      ? additionalRemarks.trim().length > 0
+      : !!additionalRemarks,
 });
 
 // نمرر القائمة النهائية المدموجة
@@ -2948,6 +2964,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     destination_long: toNumber(data.destination_long),
     destination_address: data.destination_address ?? null,
       additional_remarks: additionalRemarks,
+      additional_remark: additionalRemarks,
 
     radius: roadRadius,
     ...dispatchStagePayload,
@@ -3017,6 +3034,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         destination_long: toNumber(data.destination_long),
         destination_address: data.destination_address ?? null,
               additional_remarks: additionalRemarks,
+              additional_remark: additionalRemarks,
 
         radius: roadRadius,
         ...dispatchStagePayload,
@@ -3152,6 +3170,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       destination_long: toNumber(data.destination_long),
       destination_address: data.destination_address ?? null,
         additional_remarks: additionalRemarks,
+        additional_remark: additionalRemarks,
 
       radius: roadRadius,
       ...dispatchStagePayload,
@@ -3207,6 +3226,10 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       duration:
         bidRequestPayload?.ride_details?.duration ?? bidRequestPayload?.duration ?? null,
       route_api_distance_km: bidRequestPayload?.route_api_distance_km ?? null,
+      additional_remarks:
+        bidRequestPayload?.additional_remarks ??
+        bidRequestPayload?.additional_remark ??
+        null,
     });
 
     io.to(room).emit("ride:bidRequest", bidRequestPayload);
