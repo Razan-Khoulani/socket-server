@@ -819,12 +819,14 @@ async function syncDriverUpdateListNotification({
   driverId,
   rideId,
   serviceCategoryId,
+  triggerEvent,
 }) {
   if (!driverId || !rideId) {
-    console.log("[driver:updateList][push] skipped: missing fields", {
+    console.log("[driver:rides:list][push] skipped: missing fields", {
       driver_id: driverId ?? null,
       ride_id: rideId ?? null,
       service_category_id: serviceCategoryId ?? null,
+      trigger_event: triggerEvent ?? null,
     });
     return false;
   }
@@ -836,21 +838,25 @@ async function syncDriverUpdateListNotification({
         driver_id: driverId,
         ride_id: rideId,
         service_category_id: serviceCategoryId ?? null,
+        trigger_event: triggerEvent ?? "ride:bidRequest",
+        paired_event: "driver:rides:list",
       },
       { timeout: 7000 }
     );
 
-    console.log("[driver:updateList][push] Laravel sync succeeded", {
+    console.log("[driver:rides:list][push] Laravel sync succeeded", {
       driver_id: driverId,
       ride_id: rideId,
       service_category_id: serviceCategoryId ?? null,
+      trigger_event: triggerEvent ?? null,
     });
     return true;
   } catch (error) {
-    console.error("[driver:updateList][push] Laravel sync failed", {
+    console.error("[driver:rides:list][push] Laravel sync failed", {
       driver_id: driverId,
       ride_id: rideId,
       service_category_id: serviceCategoryId ?? null,
+      trigger_event: triggerEvent ?? null,
       error: error?.response?.data || error?.message || error,
     });
     return false;
@@ -885,6 +891,9 @@ function emitDriverPatch(io, driverId, ops = []) {
   });
   io.to(driverRoom(driverId)).emit("driver:rides:patch", {
     driver_id: driverId,
+    event_type: "driver_bid_list_patch",
+    ui_action: "show_bid_list",
+    auto_open_running: false,
     ops: safeOps,
     seq: nextDriverSeq(driverId),
     at: Date.now(),
@@ -2448,6 +2457,9 @@ function emitDriverInbox(io, driverId, eventName = "driver:rides:list") {
   });
   io.to(driverRoom(driverId)).emit(eventName, {
     driver_id: driverId,
+    event_type: "driver_bid_list",
+    ui_action: "show_bid_list",
+    auto_open_running: false,
     rides: list,
     total: list.length,
     at: Date.now(),
@@ -3294,6 +3306,10 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
 
   const ridePayloadBase = {
     ride_id: rideId,
+    event_type: "driver_bid_list_item",
+    ui_action: "show_bid_list",
+    auto_open_running: false,
+    is_running_ride: false,
 
     // ✅ FLAT user fields (important for retry + merges)
     user_id: userId ?? userDetails?.user_id ?? null,
@@ -3513,6 +3529,10 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     const room = driverRoom(d.driver_id);
     const bidRequestPayload = sanitizeRidePayloadForClient({
       ride_id: rideId,
+      event_type: "driver_new_bid_request",
+      ui_action: "show_bid_request",
+      auto_open_running: false,
+      is_running_ride: false,
 
       pickup_lat: lat,
       pickup_long: long,
@@ -3636,13 +3656,14 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       last_dispatch_radius_m: roadRadius,
     });
     emitDriverPatch(io, d.driver_id, [{ op: "upsert", ride: ridePayloadForDriver }]);
-    emitDriverInbox(io, d.driver_id, "driver:updateList");
+    emitDriverInbox(io, d.driver_id, "driver:rides:list");
 
     if (!wasNotifiedBefore) {
       void syncDriverUpdateListNotification({
         driverId: d.driver_id,
         rideId,
         serviceCategoryId: toNumber(ridePayloadForDriver?.service_category_id),
+        triggerEvent: "ride:bidRequest",
       });
     }
 
@@ -4477,8 +4498,9 @@ function emitDriverRideRecovery(io, driverId) {
 }
 
 module.exports = (io, socket) => {
-  socket.on("driver:getRidesList", ({ driver_id }) => {
-    debugLog("driver:getRidesList", { driver_id }, socket.id);
+  socket.on("driver:getRidesList", (payload = {}) => {
+    const { driver_id, recover_active_ride } = payload;
+    debugLog("driver:getRidesList", { driver_id, recover_active_ride }, socket.id);
     const driverId = toNumber(driver_id) ?? toNumber(socket.driverId);
     if (!driverId) return;
 
@@ -4490,7 +4512,13 @@ module.exports = (io, socket) => {
     });
 
     emitDriverInbox(io, driverId, "driver:rides:list");
-      emitDriverRideRecovery(io, driverId); // ✅ أضف هذا السطر
+
+    // Recovery must be explicit to avoid forcing driver UI into running screen.
+    const shouldRecoverActiveRide =
+      recover_active_ride === true || toNumber(recover_active_ride) === 1;
+    if (shouldRecoverActiveRide) {
+      emitDriverRideRecovery(io, driverId);
+    }
 
   });
 
