@@ -52,6 +52,11 @@ const toNumber = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
+const toTrimmedText = (v) => {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s.length ? s : null;
+};
 const normalizeToken = (value) => {
   if (value === null || value === undefined) return null;
   const token = String(value).trim();
@@ -140,6 +145,122 @@ const extractDriverIdentity = (...sources) => {
     provider_id: providerId,
     driver_service_id: driverServiceId,
     driver_detail_id: driverDetailId,
+  };
+};
+
+const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
+  const src = details && typeof details === "object" ? details : {};
+  const meta = fallbackMeta && typeof fallbackMeta === "object" ? fallbackMeta : {};
+
+  const driverName = toTrimmedText(
+    pickFirstValue(src.driver_name, src.driverName, src.name, meta.driver_name, meta.name)
+  );
+  const vehicleType = toTrimmedText(
+    pickFirstValue(
+      src.vehicle_type,
+      src.vehicle_type_name,
+      src.vehicleType,
+      meta.vehicle_type,
+      meta.vehicle_type_name
+    )
+  );
+  const vehicleNumber = toTrimmedText(
+    pickFirstValue(
+      src.vehicle_number,
+      src.plat_no,
+      src.plate_no,
+      src.vehicle_no,
+      src.vehicle_plate,
+      meta.vehicle_number,
+      meta.plat_no,
+      meta.plate_no,
+      meta.vehicle_no,
+      meta.vehicle_plate
+    )
+  );
+  const vehicleCompany = toTrimmedText(
+    pickFirstValue(
+      src.vehicle_company,
+      src.company,
+      src.brand,
+      src.make,
+      src.manufacturer_name,
+      meta.vehicle_company,
+      meta.company,
+      meta.brand,
+      meta.make,
+      meta.manufacturer_name
+    )
+  );
+  const modelName = toTrimmedText(
+    pickFirstValue(src.model_name, src.model, src.vehicle_model, meta.model_name, meta.model, meta.vehicle_model)
+  );
+  const vehicleColor = toTrimmedText(
+    pickFirstValue(src.vehicle_color, src.color, meta.vehicle_color, meta.color)
+  );
+  const vehicleManufacturer = toTrimmedText(
+    pickFirstValue(
+      src.vehicle_manufacturer,
+      src.manufacturer,
+      src.manufacturer_name,
+      src.make,
+      src.brand,
+      meta.vehicle_manufacturer,
+      meta.manufacturer,
+      meta.manufacturer_name,
+      meta.make,
+      meta.brand
+    )
+  );
+
+  const modelYearRaw = pickFirstValue(
+    src.model_year,
+    src.manufacture_year,
+    src.vehicle_year,
+    src.year,
+    meta.model_year,
+    meta.manufacture_year,
+    meta.vehicle_year,
+    meta.year
+  );
+  const modelYearNumeric = toNumber(modelYearRaw);
+  const modelYear = modelYearNumeric ?? toTrimmedText(modelYearRaw);
+
+  const ratingRaw = pickFirstValue(src.rating, src.driver_rating, meta.rating, meta.driver_rating);
+  const rating = toNumber(ratingRaw) ?? ratingRaw ?? null;
+  const driverImage = toTrimmedText(
+    pickFirstValue(
+      src.driver_image,
+      src.driver_image_url,
+      src.profile_image,
+      src.avatar,
+      src.image,
+      meta.driver_image,
+      meta.driver_image_url,
+      meta.profile_image,
+      meta.avatar,
+      meta.image
+    )
+  );
+
+  return {
+    driver_name: driverName,
+    vehicle_type: vehicleType,
+    vehicle_number: vehicleNumber,
+    vehicle_company: vehicleCompany,
+    model_name: modelName,
+    model_year: modelYear,
+    vehicle_color: vehicleColor,
+    vehicle_manufacturer: vehicleManufacturer,
+    rating,
+    driver_image: driverImage,
+
+    // aliases for frontend flexibility
+    vehicle_type_name: vehicleType,
+    plat_no: vehicleNumber,
+    plate_no: vehicleNumber,
+    manufacturer_name: vehicleManufacturer,
+    vehicle_make: vehicleCompany,
   };
 };
 const buildDriverIdentityPayload = (identity = {}, legacyDriverId = null) => {
@@ -870,12 +991,17 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
       } catch (_) {}
     }
 
-    const driverName = d.driver_name ?? null;
-    const vehicleType = d.vehicle_type_name ?? null;
-    const vehicleNumber = d.plat_no ?? null;
-    const rating = d.rating ?? null;
-    const driverImage =
-      d.driver_image ?? d.profile_image ?? d.driver_image_url ?? d.avatar ?? d.image ?? null;
+    const normalizedDetails = normalizeDriverDetailsPayload(d, d);
+    const driverName = normalizedDetails.driver_name;
+    const vehicleType = normalizedDetails.vehicle_type;
+    const vehicleNumber = normalizedDetails.vehicle_number;
+    const vehicleCompany = normalizedDetails.vehicle_company;
+    const modelName = normalizedDetails.model_name;
+    const modelYear = normalizedDetails.model_year;
+    const vehicleColor = normalizedDetails.vehicle_color;
+    const vehicleManufacturer = normalizedDetails.vehicle_manufacturer;
+    const rating = normalizedDetails.rating;
+    const driverImage = normalizedDetails.driver_image;
     const providerId = toNumber(d.provider_id ?? d.driver_id ?? driverId);
     const resolvedDriverServiceId = toNumber(d.driver_service_id ?? driverServiceId);
     const driverDetailId = toNumber(d.driver_detail_id ?? d.driver_details_id ?? null);
@@ -888,6 +1014,11 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
       ...(driverName ? { driver_name: driverName } : {}),
       ...(vehicleType ? { vehicle_type_name: vehicleType } : {}),
       ...(vehicleNumber ? { plat_no: vehicleNumber } : {}),
+      ...(vehicleCompany ? { vehicle_company: vehicleCompany } : {}),
+      ...(modelName ? { model_name: modelName } : {}),
+      ...(modelYear !== null && modelYear !== undefined ? { model_year: modelYear } : {}),
+      ...(vehicleColor ? { vehicle_color: vehicleColor } : {}),
+      ...(vehicleManufacturer ? { vehicle_manufacturer: vehicleManufacturer } : {}),
       ...(rating != null ? { rating } : {}),
       ...(driverImage ? { driver_image: driverImage } : {}),
     };
@@ -903,6 +1034,11 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
       driver_name: driverName,
       vehicle_type: vehicleType,
       vehicle_number: vehicleNumber,
+      vehicle_company: vehicleCompany,
+      model_name: modelName,
+      model_year: modelYear,
+      vehicle_color: vehicleColor,
+      vehicle_manufacturer: vehicleManufacturer,
       rating,
       driver_image: driverImage,
     };
@@ -914,11 +1050,16 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
 const isDriverDetailsEmpty = (d) => {
   if (!d) return true;
   return (
-    d.driver_name == null &&
-    d.vehicle_type == null &&
-    d.vehicle_number == null &&
+    toTrimmedText(d.driver_name) == null &&
+    toTrimmedText(d.vehicle_type) == null &&
+    toTrimmedText(d.vehicle_number) == null &&
+    toTrimmedText(d.vehicle_company) == null &&
+    toTrimmedText(d.model_name) == null &&
+    toTrimmedText(d.vehicle_color) == null &&
+    toTrimmedText(d.vehicle_manufacturer) == null &&
+    d.model_year == null &&
     d.rating == null &&
-    d.driver_image == null
+    toTrimmedText(d.driver_image) == null
   );
 };
 
@@ -4845,14 +4986,17 @@ const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
     const accessToken =
       payload?.access_token ?? socket.driverAccessToken ?? driverMeta?.access_token ?? null;
 
-    let driverDetails =
-      payload.driver_details ?? {
-        driver_name: driverMeta?.driver_name ?? null,
-        vehicle_type: driverMeta?.vehicle_type_name ?? null,
-        vehicle_number: driverMeta?.plat_no ?? null,
-        rating: driverMeta?.rating ?? null,
-        driver_image: driverMeta?.driver_image ?? null,
-      };
+    const payloadDriverDetailsSeed = {
+      ...(payload && typeof payload === "object" ? payload : {}),
+      ...(payload?.driver_details && typeof payload.driver_details === "object"
+        ? payload.driver_details
+        : {}),
+    };
+    let driverDetails = normalizeDriverDetailsPayload(payloadDriverDetailsSeed, {
+      ...driverMeta,
+      vehicle_type: driverMeta?.vehicle_type_name ?? null,
+      vehicle_number: driverMeta?.plat_no ?? null,
+    });
 
     const shouldFetchDriverMeta =
       (driverIdentity.driver_detail_id === null || isDriverDetailsEmpty(driverDetails)) &&
@@ -4868,13 +5012,7 @@ const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
             driverIdentity.driver_service_id ?? fetched.driver_service_id ?? driverServiceId,
           driver_detail_id: driverIdentity.driver_detail_id ?? fetched.driver_detail_id ?? null,
         };
-        driverDetails = {
-          driver_name: driverDetails?.driver_name ?? fetched.driver_name ?? null,
-          vehicle_type: driverDetails?.vehicle_type ?? fetched.vehicle_type ?? null,
-          vehicle_number: driverDetails?.vehicle_number ?? fetched.vehicle_number ?? null,
-          rating: driverDetails?.rating ?? fetched.rating ?? null,
-          driver_image: driverDetails?.driver_image ?? fetched.driver_image ?? null,
-        };
+        driverDetails = normalizeDriverDetailsPayload(driverDetails, fetched);
       }
     }
 
@@ -5042,6 +5180,19 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
         ...(driverDetails && typeof driverDetails === "object" ? driverDetails : {}),
         ...buildDriverIdentityPayload(driverIdentity, customerFacingDriverId),
       },
+      driver_name: driverDetails?.driver_name ?? null,
+      driver_image: driverDetails?.driver_image ?? null,
+      driver_rating: driverDetails?.rating ?? null,
+      vehicle_type: driverDetails?.vehicle_type ?? null,
+      vehicle_type_name: driverDetails?.vehicle_type_name ?? driverDetails?.vehicle_type ?? null,
+      vehicle_company: driverDetails?.vehicle_company ?? null,
+      vehicle_manufacturer:
+        driverDetails?.vehicle_manufacturer ?? driverDetails?.manufacturer_name ?? null,
+      model_name: driverDetails?.model_name ?? null,
+      model_year: driverDetails?.model_year ?? null,
+      vehicle_color: driverDetails?.vehicle_color ?? null,
+      vehicle_number: driverDetails?.vehicle_number ?? null,
+      plat_no: driverDetails?.plat_no ?? driverDetails?.vehicle_number ?? null,
       address_list: payload.address_list ?? [],
       user_timeout:
         toNumber(payload?.user_timeout) ??
