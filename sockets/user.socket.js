@@ -105,9 +105,10 @@ const normalizeNearbyRadiusMeters = (
   return Math.max(200, Math.round(parsed));
 };
 
-const resolveNearbyRadiusFromPayload = (payload = {}) => {
+const resolveNearbyRadiusFromPayload = async (payload = {}) => {
   if (!payload || typeof payload !== "object") return null;
 
+  // محاولة لاستخراج الراديوس من الـ payload
   const explicitMeters = getFirstNumber(
     payload?.dispatch_current_radius_m,
     payload?.initial_dispatch_radius,
@@ -135,7 +136,8 @@ const resolveNearbyRadiusFromPayload = (payload = {}) => {
     return normalizeNearbyRadiusMeters(Math.round(explicitKm * 1000));
   }
 
-  return null;
+  // إذا لم يكن الراديوس موجودًا في الـ payload، نقوم باستدعاء API للحصول عليه
+  return await fetchServiceSearchRadiusFromApi(payload?.service_category_id);
 };
 
 const normalizeServiceCategoryId = (value) => {
@@ -1108,48 +1110,51 @@ module.exports = (io, socket) => {
     }
   };
 
-  const syncNearbyRadius = async (payload = {}) => {
-    const payloadServiceCategoryId = extractServiceCategoryIdFromPayload(payload);
-    if (payloadServiceCategoryId !== null) {
-      setNearbyServiceCategoryId(payloadServiceCategoryId, "payload");
-    }
-    const snapshotServiceCategoryId = getNearbyServiceCategoryFromRideSnapshot();
-    if (snapshotServiceCategoryId !== null) {
-      setNearbyServiceCategoryId(snapshotServiceCategoryId, "ride-snapshot");
-    }
-    const serviceCategoryId =
-      normalizeServiceCategoryId(socket.nearbyServiceCategoryId) ??
-      snapshotServiceCategoryId;
+const syncNearbyRadius = async (payload = {}) => {
+  const payloadServiceCategoryId = extractServiceCategoryIdFromPayload(payload);
+  if (payloadServiceCategoryId !== null) {
+    setNearbyServiceCategoryId(payloadServiceCategoryId, "payload");
+  }
 
-    let nextRadius = resolveNearbyRadiusFromPayload(payload);
-    let source = nextRadius !== null ? "payload" : null;
+  const snapshotServiceCategoryId = getNearbyServiceCategoryFromRideSnapshot();
+  if (snapshotServiceCategoryId !== null) {
+    setNearbyServiceCategoryId(snapshotServiceCategoryId, "ride-snapshot");
+  }
 
-    if (nextRadius === null) {
-      nextRadius = getNearbyRadiusFromRideSnapshot();
-      if (nextRadius !== null) source = "ride-snapshot";
-    }
+  const serviceCategoryId =
+    normalizeServiceCategoryId(socket.nearbyServiceCategoryId) ??
+    snapshotServiceCategoryId;
 
-    if (nextRadius === null && serviceCategoryId) {
-      nextRadius = await fetchServiceSearchRadiusFromApi(serviceCategoryId);
-      if (nextRadius !== null) source = "service-setting-api";
-    }
+  // طلب الراديوس من الـ payload أو من API داخلي
+  let nextRadius = await resolveNearbyRadiusFromPayload(payload);
+  let source = nextRadius !== null ? "payload" : null;
 
-    const normalizedRadius = normalizeNearbyRadiusMeters(
-      nextRadius,
-      socket.nearbyRadius ?? DEFAULT_NEARBY_RADIUS_METERS
-    );
+  if (nextRadius === null) {
+    nextRadius = getNearbyRadiusFromRideSnapshot();
+    if (nextRadius !== null) source = "ride-snapshot";
+  }
 
-    if (socket.nearbyRadius !== normalizedRadius) {
-      socket.nearbyRadius = normalizedRadius;
-      console.log("[nearby-radius] updated", {
-        service_category_id: serviceCategoryId ?? null,
-        radius_m: normalizedRadius,
-        source: source ?? "fallback",
-      });
-    }
+  if (nextRadius === null && serviceCategoryId) {
+    nextRadius = await fetchServiceSearchRadiusFromApi(serviceCategoryId);
+    if (nextRadius !== null) source = "service-setting-api";
+  }
 
-    return normalizedRadius;
-  };
+  const normalizedRadius = normalizeNearbyRadiusMeters(
+    nextRadius,
+    socket.nearbyRadius ?? DEFAULT_NEARBY_RADIUS_METERS
+  );
+
+  if (socket.nearbyRadius !== normalizedRadius) {
+    socket.nearbyRadius = normalizedRadius;
+    console.log("[nearby-radius] updated", {
+      service_category_id: serviceCategoryId ?? null,
+      radius_m: normalizedRadius,
+      source: source ?? "fallback",
+    });
+  }
+
+  return normalizedRadius;
+};
 
   const applyNearbyFiltersFromPayload = (payload = {}, options = {}) => {
     const { resetMissing = false } = options || {};
@@ -1200,12 +1205,18 @@ module.exports = (io, socket) => {
     const hasHandicap =
       payload?.need_handicap !== undefined ||
       payload?.handicap !== undefined ||
-      payload?.require_handicap !== undefined;
+      payload?.require_handicap !== undefined ||
+      payload?.special_needs !== undefined ||
+      payload?.need_special_needs !== undefined ||
+      payload?.handicap_accessibility !== undefined;
     const nextHandicap = hasHandicap
       ? toBinaryFlag(
           payload?.need_handicap ??
             payload?.handicap ??
-            payload?.require_handicap
+            payload?.require_handicap ??
+            payload?.need_special_needs ??
+            payload?.special_needs ??
+            payload?.handicap_accessibility
         )
       : resetMissing
       ? null
@@ -2215,8 +2226,8 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   const sc = extractServiceCategoryIdFromPayload(payload);
   if (sc !== null) setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes");
 
-  // التعديل هنا لإضافة الراديوس إلى البايلود
-  await syncNearbyRadius(payload); // يتم تمرير البايلود هنا ليأخذ الراديوس من السيرفر أو أي قيمة يتم تحديدها من قبل السيرفر
+  // نمرر الـ payload هنا إلى `syncNearbyRadius` للحصول على الراديوس من API
+  await syncNearbyRadius(payload);
 
   if (routeKm !== null) {
     setNearbyRouteDistanceKm(routeKm);

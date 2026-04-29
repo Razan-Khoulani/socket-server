@@ -660,7 +660,7 @@ const DRIVER_TO_PICKUP_SPEED_KMPH = Number.isFinite(
 // ✅ UPDATED: timeout صار 90 ثانية (ALL TIMER VALUES RETURNED IN SECONDS)
 const RIDE_TIMEOUT_S = Number.isFinite(Number(process.env.RIDE_TIMEOUT_S))
   ? Number(process.env.RIDE_TIMEOUT_S)
-  : 90; // ✅ fixed 90 seconds
+  : 120; // ✅ fixed 90 seconds
 const CUSTOMER_SEARCH_TIMEOUT_S = 90;
 
 const CANCELLED_RIDE_TTL_MS = 10 * 60 * 1000;
@@ -3018,7 +3018,13 @@ async function dispatchToNearbyDrivers(io, data) {
       null
   );
   const needHandicap = toBinaryFlag(
-    data?.need_handicap ?? data?.handicap ?? data?.require_handicap ?? null
+    data?.need_handicap ??
+      data?.handicap ??
+      data?.require_handicap ??
+      data?.need_special_needs ??
+      data?.special_needs ??
+      data?.handicap_accessibility ??
+      null
   );
 
   if (lat === null || long === null) {
@@ -3156,6 +3162,15 @@ const availableSmokingReady = availableAir.filter(
 const roadSmokingReady = roadFiltered.filter(
   (driver) => toBinaryFlag(driver?.child_seat) === 1
 ).length;
+const nearbyHandicapReady = nearbyAir.filter(
+  (driver) => toBinaryFlag(driver?.handicap) === 1
+).length;
+const availableHandicapReady = availableAir.filter(
+  (driver) => toBinaryFlag(driver?.handicap) === 1
+).length;
+const roadHandicapReady = roadFiltered.filter(
+  (driver) => toBinaryFlag(driver?.handicap) === 1
+).length;
 
 const candidateDriversRaw =
   MAX_DISPATCH_CANDIDATES > 0
@@ -3217,6 +3232,9 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   nearby_smoking_ready: nearbySmokingReady,
   available_smoking_ready: availableSmokingReady,
   road_smoking_ready: roadSmokingReady,
+  nearby_handicap_ready: nearbyHandicapReady,
+  available_handicap_ready: availableHandicapReady,
+  road_handicap_ready: roadHandicapReady,
   retained_existing_candidates: retainedExistingIds.length,
   new_candidates: newCandidateIds.length,
   final_candidates: nextCandidateIds.length,
@@ -3228,6 +3246,11 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   raw_need_child_seat: data?.need_child_seat ?? null,
   need_handicap: needHandicap ?? null,
   need_handicap_filter_applied: needHandicap === 1,
+  raw_handicap: data?.handicap ?? null,
+  raw_need_handicap: data?.need_handicap ?? null,
+  raw_require_handicap: data?.require_handicap ?? null,
+  raw_special_needs: data?.special_needs ?? null,
+  raw_need_special_needs: data?.need_special_needs ?? null,
   has_user_details: !!userDetails,
   token_present: !!tokenTmp,
   additional_remarks: additionalRemarks ?? null,
