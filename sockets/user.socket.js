@@ -2173,57 +2173,64 @@ item.max_price = priceBounds.max_price;
 
   //////////////////////////////////////////////////////////
 
-  const handleGetNearbyVehicleTypes = async (payload = {}) => {
-    const { lat, long } = payload;
-    debugLog("user:getNearbyVehicleTypes", { lat, long }, socket.id);
-    console.log("[user:getNearbyVehicleTypes] payload:", payload);
-    const nearbyTypesToken = normalizeToken(
-      payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
-    );
-    const resolvedUserId =
-      resolvePayloadUserId(payload) ?? toNumber(payload?.user_id) ?? toNumber(socket.userId);
-    switchSocketUserSession(resolvedUserId, nearbyTypesToken, "user:getNearbyVehicleTypes");
-    const la = toNumber(lat);
-    const lo = toNumber(long);
-    if (la === null || lo === null) return;
-    applyNearbyFiltersFromPayload(payload, { resetMissing: true });
-    syncRideContextFromPayload(payload, "user:getNearbyVehicleTypes");
+const handleGetNearbyVehicleTypes = async (payload = {}) => {
+  const { lat, long } = payload;
+  debugLog("user:getNearbyVehicleTypes", { lat, long }, socket.id);
+  console.log("[user:getNearbyVehicleTypes] payload:", payload);
 
-    const details = extractUserDetails(payload);
-    const routeKm = extractRouteDistanceKm(payload);
-    const routeDurationMin = extractRouteDurationMin(payload);
-    const etaMin = toNumber(payload?.eta_min ?? null) ?? routeDurationMin;
-    if (details) {
-      if (routeKm !== null) details.route = routeKm;
-      if (etaMin !== null) details.eta_min = etaMin;
-      if (socket.userToken) {
-        details.user_token = socket.userToken;
-        details.token = socket.userToken;
-        details.access_token = socket.userToken;
-      }
-      setUserDetails(details.user_id, details);
+  const nearbyTypesToken = normalizeToken(
+    payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
+  );
+
+  const resolvedUserId =
+    resolvePayloadUserId(payload) ?? toNumber(payload?.user_id) ?? toNumber(socket.userId);
+  switchSocketUserSession(resolvedUserId, nearbyTypesToken, "user:getNearbyVehicleTypes");
+
+  const la = toNumber(lat);
+  const lo = toNumber(long);
+  if (la === null || lo === null) return;
+
+  applyNearbyFiltersFromPayload(payload, { resetMissing: true });
+  syncRideContextFromPayload(payload, "user:getNearbyVehicleTypes");
+
+  const details = extractUserDetails(payload);
+  const routeKm = extractRouteDistanceKm(payload);
+  const routeDurationMin = extractRouteDurationMin(payload);
+  const etaMin = toNumber(payload?.eta_min ?? null) ?? routeDurationMin;
+
+  if (details) {
+    if (routeKm !== null) details.route = routeKm;
+    if (etaMin !== null) details.eta_min = etaMin;
+    if (socket.userToken) {
+      details.user_token = socket.userToken;
+      details.token = socket.userToken;
+      details.access_token = socket.userToken;
     }
-    persistRideRouteMetrics(payload, routeKm, routeDurationMin, etaMin);
-    emitRouteEtaToDriver(routeKm, etaMin, payload);
+    setUserDetails(details.user_id, details);
+  }
 
-    const sc = extractServiceCategoryIdFromPayload(payload);
-    if (sc !== null) setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes");
+  persistRideRouteMetrics(payload, routeKm, routeDurationMin, etaMin);
+  emitRouteEtaToDriver(routeKm, etaMin, payload);
 
-    await syncNearbyRadius(payload);
+  const sc = extractServiceCategoryIdFromPayload(payload);
+  if (sc !== null) setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes");
 
-    if (routeKm !== null) {
-      setNearbyRouteDistanceKm(routeKm);
-    }
-    if (routeDurationMin !== null) {
-      setNearbyRouteDurationMin(routeDurationMin);
-    }
+  // التعديل هنا لإضافة الراديوس إلى البايلود
+  await syncNearbyRadius(payload); // يتم تمرير البايلود هنا ليأخذ الراديوس من السيرفر أو أي قيمة يتم تحديدها من قبل السيرفر
 
-    socket.lastVehicleTypesSig = null;
-    socket.nearbyCenter = { lat: la, long: lo };
-    await emitNearbyVehicleTypes();
+  if (routeKm !== null) {
+    setNearbyRouteDistanceKm(routeKm);
+  }
+  if (routeDurationMin !== null) {
+    setNearbyRouteDurationMin(routeDurationMin);
+  }
 
-    console.log(`?? Nearby vehicle types requested (socket:${socket.id})`);
-  };
+  socket.lastVehicleTypesSig = null;
+  socket.nearbyCenter = { lat: la, long: lo };
+  await emitNearbyVehicleTypes();
+
+  console.log(`?? Nearby vehicle types requested (socket:${socket.id})`);
+};
 
   socket.on("user:getNearbyVehicleTypes", handleGetNearbyVehicleTypes);
   socket.on("user:getnearByVichleType", handleGetNearbyVehicleTypes);
