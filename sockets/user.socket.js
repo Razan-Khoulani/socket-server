@@ -1410,6 +1410,15 @@ const syncNearbyRadius = async (payload = {}) => {
     });
   }
 
+  console.log("[nearby-radius][vehicle-types]", {
+    service_category_id: serviceCategoryId ?? null,
+    source: source ?? "fallback",
+    radius_m: normalizedRadius,
+    dispatch_stages_m: normalizedDispatchStages,
+    dispatch_timeout_s: normalizedDispatchTimeoutSeconds,
+    stage_total: normalizedDispatchStages.length,
+  });
+
   return normalizedRadius;
 };
   const applyNearbyFiltersFromPayload = (payload = {}, options = {}) => {
@@ -1966,6 +1975,17 @@ const syncNearbyRadius = async (payload = {}) => {
       long,
       roadRadius
     );
+
+    console.log("[nearbyVehicleTypes] candidates", {
+      socket_id: socket.id,
+      stage_number: radiusPlan.stageNumber,
+      stage_total: radiusPlan.stageTotal,
+      road_radius_m: roadRadius,
+      air_candidates: nearbyAll.length,
+      available_candidates: nearbyAvailable.length,
+      road_filtered_candidates: nearbyDrivers.length,
+      next_radius_m: radiusPlan.nextRadiusMeters,
+    });
 
     const typesMap = new Map();
 
@@ -2550,6 +2570,19 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     socket.lastVehicleTypesSig = null;
   }
   socket.nearbyCenter = { lat: la, long: lo };
+
+  const resolvedServiceCategoryId =
+    normalizeServiceCategoryId(socket.nearbyServiceCategoryId) ??
+    getNearbyServiceCategoryFromRideSnapshot();
+  console.log("[user:getNearbyVehicleTypes] expansion config", {
+    socket_id: socket.id,
+    service_category_id: resolvedServiceCategoryId ?? null,
+    center_changed: centerChanged,
+    dispatch_stages_m: socket.nearbyDispatchStagesMeters,
+    dispatch_timeout_s: socket.nearbyDispatchTimeoutS,
+    base_radius_m: socket.nearbyRadius,
+  });
+
   await emitNearbyVehicleTypes();
 
   stopNearbyVehicleTypesLoop();
