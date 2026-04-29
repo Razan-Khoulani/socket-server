@@ -105,7 +105,7 @@ const normalizeNearbyRadiusMeters = (
   return Math.max(200, Math.round(parsed));
 };
 
-const resolveNearbyRadiusFromPayload = async (payload = {}) => {
+const resolveNearbyRadiusFromPayload = (payload = {}) => {
   if (!payload || typeof payload !== "object") return null;
 
   // محاولة لاستخراج الراديوس من الـ payload
@@ -137,7 +137,7 @@ const resolveNearbyRadiusFromPayload = async (payload = {}) => {
   }
 
   // إذا لم يكن الراديوس موجودًا في الـ payload، نقوم باستدعاء API للحصول عليه
-  return await fetchServiceSearchRadiusFromApi(payload?.service_category_id);
+  return null;
 };
 
 const normalizeServiceCategoryId = (value) => {
@@ -1126,17 +1126,22 @@ const syncNearbyRadius = async (payload = {}) => {
     snapshotServiceCategoryId;
 
   // طلب الراديوس من الـ payload أو من API داخلي
-  let nextRadius = await resolveNearbyRadiusFromPayload(payload);
-  let source = nextRadius !== null ? "payload" : null;
+  let nextRadius = null;
+  let source = null;
+
+  if (serviceCategoryId) {
+    nextRadius = await fetchServiceSearchRadiusFromApi(serviceCategoryId);
+    if (nextRadius !== null) source = "service-setting-api";
+  }
+
+  if (nextRadius === null) {
+    nextRadius = resolveNearbyRadiusFromPayload(payload);
+    if (nextRadius !== null) source = "payload";
+  }
 
   if (nextRadius === null) {
     nextRadius = getNearbyRadiusFromRideSnapshot();
     if (nextRadius !== null) source = "ride-snapshot";
-  }
-
-  if (nextRadius === null && serviceCategoryId) {
-    nextRadius = await fetchServiceSearchRadiusFromApi(serviceCategoryId);
-    if (nextRadius !== null) source = "service-setting-api";
   }
 
   const normalizedRadius = normalizeNearbyRadiusMeters(
