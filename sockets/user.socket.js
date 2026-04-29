@@ -259,6 +259,75 @@ const extractServiceCategoryIdFromPayload = (payload = {}) => {
   return null;
 };
 
+const pickDominantServiceCategoryId = (drivers = []) => {
+  const counts = new Map();
+  for (const item of Array.isArray(drivers) ? drivers : []) {
+    const sc = normalizeServiceCategoryId(item?.service_category_id);
+    if (sc === null) continue;
+    counts.set(sc, (counts.get(sc) ?? 0) + 1);
+  }
+
+  let bestId = null;
+  let bestCount = -1;
+  for (const [id, count] of counts.entries()) {
+    if (count > bestCount) {
+      bestId = id;
+      bestCount = count;
+    }
+  }
+  return bestId;
+};
+
+const inferServiceCategoryIdFromNearbyMemory = (
+  lat,
+  long,
+  serviceTypeId = null
+) => {
+  const la = toNumber(lat);
+  const lo = toNumber(long);
+  if (la === null || lo === null) return null;
+
+  const st = toNumber(serviceTypeId);
+  const nearbyWithType =
+    typeof driverLocationService.getNearbyDriversFromMemory === "function"
+      ? driverLocationService.getNearbyDriversFromMemory(
+          la,
+          lo,
+          DEFAULT_AIR_CANDIDATE_RADIUS_METERS,
+          {
+            only_online: true,
+            max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
+            service_type_id: st ?? null,
+          }
+        )
+      : [];
+
+  let inferred = pickDominantServiceCategoryId(nearbyWithType);
+  if (inferred !== null) {
+    return inferred;
+  }
+
+  const nearbyAnyType =
+    typeof driverLocationService.getNearbyDriversFromMemory === "function"
+      ? driverLocationService.getNearbyDriversFromMemory(
+          la,
+          lo,
+          DEFAULT_AIR_CANDIDATE_RADIUS_METERS,
+          {
+            only_online: true,
+            max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
+          }
+        )
+      : [];
+
+  inferred = pickDominantServiceCategoryId(nearbyAnyType);
+  if (inferred !== null) {
+    return inferred;
+  }
+
+  return null;
+};
+
 const getCachedServiceSearchRadius = (serviceCategoryId) => {
   const safeServiceCategoryId = toNumber(serviceCategoryId);
   if (!safeServiceCategoryId) return null;
@@ -2530,6 +2599,17 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   applyNearbyFiltersFromPayload(payload, { resetMissing: true });
   syncRideContextFromPayload(payload, "user:getNearbyVehicleTypes");
 
+  const payloadServiceTypeId = toNumber(
+    payload?.service_type_id ??
+      payload?.serviceTypeId ??
+      payload?.selected_service_type_id ??
+      payload?.selectedServiceTypeId ??
+      null
+  );
+  if (payloadServiceTypeId !== null) {
+    socket.nearbyServiceTypeId = payloadServiceTypeId;
+  }
+
   const details = extractUserDetails(payload);
   const routeKm = extractRouteDistanceKm(payload);
   const routeDurationMin = extractRouteDurationMin(payload);
@@ -2551,6 +2631,26 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
 
   const sc = extractServiceCategoryIdFromPayload(payload);
   if (sc !== null) setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes");
+  if (sc === null && normalizeServiceCategoryId(socket.nearbyServiceCategoryId) === null) {
+    const inferredSc = inferServiceCategoryIdFromNearbyMemory(
+      la,
+      lo,
+      socket.nearbyServiceTypeId
+    );
+    if (inferredSc !== null) {
+      setNearbyServiceCategoryId(inferredSc, "user:getNearbyVehicleTypes:nearby-memory");
+      console.log("[user:getNearbyVehicleTypes] inferred service_category_id", {
+        socket_id: socket.id,
+        service_category_id: inferredSc,
+        service_type_id: socket.nearbyServiceTypeId ?? null,
+      });
+    } else {
+      console.log("[user:getNearbyVehicleTypes] could not infer service_category_id", {
+        socket_id: socket.id,
+        service_type_id: socket.nearbyServiceTypeId ?? null,
+      });
+    }
+  }
 
   // نمرر الـ payload هنا إلى `syncNearbyRadius` للحصول على الراديوس من API
   await syncNearbyRadius(payload);
