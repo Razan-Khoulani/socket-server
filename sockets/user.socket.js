@@ -2169,12 +2169,7 @@ item.max_price = priceBounds.max_price;
     const rawTypes = await buildNearbyVehicleTypes(lat, long);
     const nearbyTypes = decorateNearbyVehicleTypes(rawTypes, socket.nearbyServiceTypeId);
 
-    const sig = JSON.stringify({
-      stage_index: radiusPlan.stageIndex,
-      stage_total: radiusPlan.stageTotal,
-      road_radius_m: radiusPlan.roadRadius,
-      types_sig: buildVehicleTypesSignature(nearbyTypes),
-    });
+    const sig = buildVehicleTypesSignature(nearbyTypes);
     const vehicleTypesChanged = sig !== socket.lastVehicleTypesSig;
 
     console.log("[nearbyVehicleTypes] tick", {
