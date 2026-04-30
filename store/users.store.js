@@ -12,7 +12,7 @@ const normalizeToken = (token) => {
 const setUserDetails = (userId, details) => {
   if (!userId) return;
   const safeUserId = Number(userId);
-  if (!Number.isFinite(safeUserId)) return;
+  if (!Number.isFinite(safeUserId) || safeUserId <= 0) return;
 
   const previous = userDetails.get(safeUserId) || {};
   const previousToken = normalizeToken(
@@ -61,7 +61,7 @@ const setUserDetails = (userId, details) => {
 const getUserDetails = (userId) => {
   if (!userId) return null;
   const safeUserId = Number(userId);
-  if (!Number.isFinite(safeUserId)) return null;
+  if (!Number.isFinite(safeUserId) || safeUserId <= 0) return null;
   return userDetails.get(safeUserId) || null;
 };
 
@@ -74,7 +74,7 @@ const getUserDetailsByToken = (token) => {
 const deleteUserDetails = (userId) => {
   if (!userId) return;
   const safeUserId = Number(userId);
-  if (!Number.isFinite(safeUserId)) return;
+  if (!Number.isFinite(safeUserId) || safeUserId <= 0) return;
 
   const current = userDetails.get(safeUserId) || null;
   const token = normalizeToken(

@@ -6053,19 +6053,24 @@ if (removed) {
     //   return;
     // }
 
-const payloadUserId = toNumber(payload?.user_id);
+const toValidUserId = (value) => {
+  const n = toNumber(value);
+  return n && n > 0 ? n : null;
+};
+
+const payloadUserId = toValidUserId(payload?.user_id);
 const payloadToken = normalizeToken(
   payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
 );
 const userFromPayloadToken = payloadToken ? getUserDetailsByToken(payloadToken) : null;
-const payloadTokenUserId = toNumber(userFromPayloadToken?.user_id ?? null);
+const payloadTokenUserId = toValidUserId(userFromPayloadToken?.user_id ?? null);
 
 const rideOwnerUserId =
-  toNumber(getUserIdForRide(rideId)) ??
-  toNumber(rideSnapshot?.user_id ?? rideSnapshot?.user_details?.user_id ?? null) ??
-  toNumber(rideDetails?.user_id ?? rideDetails?.user_details?.user_id ?? null) ??
-  toNumber(socket.userId) ??
-  toNumber(userFromPayloadToken?.user_id) ??
+  toValidUserId(getUserIdForRide(rideId)) ??
+  toValidUserId(rideSnapshot?.user_id ?? rideSnapshot?.user_details?.user_id ?? null) ??
+  toValidUserId(rideDetails?.user_id ?? rideDetails?.user_details?.user_id ?? null) ??
+  toValidUserId(socket.userId) ??
+  toValidUserId(userFromPayloadToken?.user_id) ??
   payloadUserId;
 
 if (payloadUserId && rideOwnerUserId && payloadUserId !== rideOwnerUserId) {
@@ -6093,7 +6098,7 @@ const storedOwnerToken = normalizeToken(
   null
 );
 
-const socketUserId = toNumber(socket.userId) ?? null;
+const socketUserId = toValidUserId(socket.userId) ?? null;
 const socketUser = socketUserId ? getUserDetails(socketUserId) : null;
 const socketUserToken = normalizeToken(
   socket?.userToken ??
