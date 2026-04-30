@@ -6,7 +6,7 @@ const profileCache = new Map();
 const LARAVEL_BASE_URL = String(
   process.env.LARAVEL_BASE_URL ||
     process.env.LARAVEL_URL ||
-    "https://osbackend.gocab.net"
+    "https://api.catch-syria.com"
 ).replace(/\/+$/, "");
 
 const LARAVEL_DRIVER_ADMIN_PROFILE_PATH = String(

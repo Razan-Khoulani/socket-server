@@ -528,11 +528,9 @@ const USER_ACCEPT_OFFER_STATUS = Object.freeze({
   ACCEPT_FAILED: 6,
 });
 
-function emitUserAcceptOfferResult(io, userId, payload = {}) {
+function emitUserAcceptOfferResult(io, userId, payload = {}, fallbackSocket = null) {
   const safeUserId = toNumber(userId);
-  if (!safeUserId) return false;
-
-  io.to(userRoom(safeUserId)).emit("ride:acceptOfferResult", {
+  const resultPayload = {
     success: payload.success === true,
     status:
       toNumber(payload.status) ??
@@ -545,9 +543,34 @@ function emitUserAcceptOfferResult(io, userId, payload = {}) {
     reason: payload.reason ?? null,
     details: payload.details ?? null,
     at: Date.now(),
-  });
+  };
 
-  return true;
+  let delivered = false;
+  const roomName = safeUserId ? userRoom(safeUserId) : null;
+  const roomSocketIds = roomName ? io?.sockets?.adapter?.rooms?.get(roomName) : null;
+  const roomHasSockets = !!(roomSocketIds && roomSocketIds.size > 0);
+
+  if (safeUserId && roomHasSockets) {
+    io.to(roomName).emit("ride:acceptOfferResult", resultPayload);
+    // Backward-compatible alias for clients listening with lowercase "o".
+    io.to(roomName).emit("ride:acceptofferResult", resultPayload);
+    delivered = true;
+  }
+
+  const shouldEmitToFallbackSocket =
+    fallbackSocket &&
+    typeof fallbackSocket.emit === "function" &&
+    (!roomHasSockets ||
+      !roomSocketIds ||
+      !roomSocketIds.has(fallbackSocket.id));
+
+  if (shouldEmitToFallbackSocket) {
+    fallbackSocket.emit("ride:acceptOfferResult", resultPayload);
+    fallbackSocket.emit("ride:acceptofferResult", resultPayload);
+    delivered = true;
+  }
+
+  return delivered;
 }
 const emitRideUnavailable = (io, driverId, rideId) => {
   const safeDriverId = toNumber(driverId);
@@ -5773,9 +5796,9 @@ if (removed) {
             user_country_code: snapshot.user_country_code ?? snapshotDetails?.user_country_code ?? null,
             user_phone_full: snapshot.user_phone_full ?? snapshotDetails?.user_phone_full ?? null,
             token:
-              snapshot?.token ??
               snapshotDetails?.user_token ??
               snapshotDetails?.token ??
+              snapshot?.token ??
               payloadToken ??
               null,
           },
@@ -5808,9 +5831,9 @@ if (removed) {
             user_country_code: mergedUD?.user_country_code ?? baseRide.user_country_code ?? null,
             user_phone_full: mergedUD?.user_phone_full ?? baseRide.user_phone_full ?? null,
             token:
-              baseRide?.token ??
               mergedUD?.user_token ??
               mergedUD?.token ??
+              baseRide?.token ??
               payloadToken ??
               null,
             user_bid_price: newPrice,
@@ -5942,7 +5965,7 @@ if (removed) {
         details: null,
       };
 
-      emitUserAcceptOfferResult(io, lockedUserId, lockedPayload);
+      emitUserAcceptOfferResult(io, lockedUserId, lockedPayload, socket);
 
       socket.emit("ride:acceptOfferFailed", {
         ...lockedPayload,
@@ -6054,12 +6077,12 @@ if (payloadUserId && rideOwnerUserId && payloadUserId !== rideOwnerUserId) {
 }
 
 const rideSnapshotToken =
-  rideSnapshot?.token ??
   rideSnapshot?.user_details?.user_token ??
   rideSnapshot?.user_details?.token ??
-  rideDetails?.token ??
+  rideSnapshot?.token ??
   rideDetails?.user_details?.user_token ??
   rideDetails?.user_details?.token ??
+  rideDetails?.token ??
   null;
 
 const storedOwnerUser = rideOwnerUserId ? getUserDetails(rideOwnerUserId) : null;
@@ -6091,7 +6114,7 @@ const hasTokenOwnerMismatch =
 
 let userId = payloadUserId ?? payloadTokenUserId ?? socketUserId ?? rideOwnerUserId;
 let tokenTmp = normalizeToken(
-  payloadToken ?? preferredOwnerToken ?? socketUserToken ?? null
+  preferredOwnerToken ?? payloadToken ?? socketUserToken ?? null
 );
 
 if (rideOwnerUserId && (hasPayloadOwnerMismatch || hasTokenOwnerMismatch)) {
@@ -6155,7 +6178,7 @@ if (
     },
   };
 
-  emitUserAcceptOfferResult(io, userId, acceptNotEligiblePayload);
+  emitUserAcceptOfferResult(io, userId, acceptNotEligiblePayload, socket);
 
   socket.emit("ride:acceptOfferFailed", {
     ...acceptNotEligiblePayload,
@@ -6321,10 +6344,19 @@ const accessToken = tokenTmp;
         !acceptApiOk &&
         (primaryMessageCode === 4 ||
           /session\s*expired|login\s*session\s*expired/i.test(primaryMessage));
+      const isTokenAuthFailure =
+        !acceptApiOk &&
+        /invalid\s*token|expired\s*token|unauthori(?:z|s)ed|access[_\s-]*token/i.test(
+          primaryMessage
+        );
 
-      if (isSessionExpired && payloadTokenFallback && payloadTokenFallback !== accessToken) {
+      if (
+        (isSessionExpired || isTokenAuthFailure) &&
+        payloadTokenFallback &&
+        payloadTokenFallback !== accessToken
+      ) {
         console.warn(
-          "[user:acceptOffer] primary token expired, retrying once with payload token",
+          "[user:acceptOffer] primary token rejected, retrying once with payload token",
           {
             ride_id: rideId,
             user_id: userId,
@@ -6373,7 +6405,7 @@ const accessToken = tokenTmp;
         details: acceptApiError?.details ?? null,
       };
 
-      emitUserAcceptOfferResult(io, userId, acceptFailurePayload);
+      emitUserAcceptOfferResult(io, userId, acceptFailurePayload, socket);
 
       socket.emit("ride:acceptOfferFailed", {
         ...acceptFailurePayload,
@@ -6391,7 +6423,7 @@ const accessToken = tokenTmp;
       message: "تم قبول العرض وبدء الرحلة بنجاح",
       reason: null,
       details: acceptApiResponse,
-    });
+    }, socket);
     
     // ✅ trust frontend values on accept (no recalculation)
     const frontendRouteOverride = getFrontendRouteOverrideFromPayload(payload);

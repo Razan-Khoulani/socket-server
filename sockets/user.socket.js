@@ -51,7 +51,7 @@ const nearbyFareVersionCache = new Map();
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
-  "https://osbackend.gocab.net";
+  "https://api.catch-syria.com";
 
 const LARAVEL_SERVICE_SEARCH_RADIUS_PATH =
   process.env.LARAVEL_SERVICE_SEARCH_RADIUS_PATH ||

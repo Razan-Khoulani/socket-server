@@ -50,12 +50,13 @@ const debugSocketLog = (...args) => {
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
-  "https://aiactive.co.uk/backend/backend-laravel/public";
+  "https://api.catch-syria.com";
 const LARAVEL_DRIVER_INVOICE_PATH = "/api/driver/transport-ride-invoice";
 const LARAVEL_TIMEOUT_MS = 7000;
 const SOCKET_BIND_HOST =
   process.env.SOCKET_BIND_HOST || "0.0.0.0";
-const SOCKET_BIND_PORT = Number(process.env.SOCKET_BIND_PORT) || 4000;
+const SOCKET_BIND_PORT =
+  Number(process.env.PORT || process.env.SOCKET_BIND_PORT) || 4000;
 const INVOICE_STATUSES = new Set([7, 8, 9]);
 const TRIP_SUMMARY_START_STATUSES = new Set([5]);
 const TRIP_SUMMARY_COMPLETE_STATUSES = new Set([7, 8, 11]);
