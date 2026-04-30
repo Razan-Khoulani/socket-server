@@ -6322,13 +6322,39 @@ const accessToken = tokenTmp;
     };
 
     if (!userId || !accessToken) {
+      const missingUserId = !userId;
+      const missingAccessToken = !accessToken;
       acceptApiError = {
         message: "Missing user_id or access_token",
         reason: "missing_auth_data",
+        details: {
+          missing_user_id: missingUserId,
+          missing_access_token: missingAccessToken,
+          resolved_user_id: userId ?? null,
+          has_payload_user_id: !!payloadUserId,
+          has_payload_token: !!payloadToken,
+          has_socket_user_id: !!socketUserId,
+          has_socket_user_token: !!socketUserToken,
+          has_ride_owner_user_id: !!rideOwnerUserId,
+          has_stored_owner_token: !!storedOwnerToken,
+          has_live_owner_room_token: !!liveOwnerRoomToken,
+          has_snapshot_token: !!rideSnapshotToken,
+        },
       };
-      console.log(
-        `[user:acceptOffer] blocked: missing user_id/access_token (ride ${rideId})`
-      );
+      console.warn("[user:acceptOffer] blocked: missing user_id/access_token", {
+        ride_id: rideId,
+        missing_user_id: missingUserId,
+        missing_access_token: missingAccessToken,
+        resolved_user_id: userId ?? null,
+        has_payload_user_id: !!payloadUserId,
+        has_payload_token: !!payloadToken,
+        has_socket_user_id: !!socketUserId,
+        has_socket_user_token: !!socketUserToken,
+        has_ride_owner_user_id: !!rideOwnerUserId,
+        has_stored_owner_token: !!storedOwnerToken,
+        has_live_owner_room_token: !!liveOwnerRoomToken,
+        has_snapshot_token: !!rideSnapshotToken,
+      });
     } else {
       const primaryResult = await callAcceptApi(accessToken, "primary");
       acceptApiOk = primaryResult.ok;
