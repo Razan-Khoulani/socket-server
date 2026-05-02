@@ -2563,6 +2563,10 @@ function emitDriverInbox(io, driverId, eventName = "driver:rides:list") {
       ride_id: ride?.ride_id ?? null,
       duration: getRideRouteApiDurationRaw(ride) ?? getRideDurationRaw(ride),
       route_api_distance_km: getRideRouteApiDistanceKmRaw(ride) ?? getRideDistanceKm(ride),
+      min_price: toNumber(ride?.min_price ?? ride?.ride_details?.min_price ?? null),
+      max_price: toNumber(ride?.max_price ?? ride?.ride_details?.max_price ?? null),
+      min_fare: toNumber(ride?.min_fare ?? ride?.ride_details?.min_fare ?? null),
+      max_fare: toNumber(ride?.max_fare ?? ride?.ride_details?.max_fare ?? null),
     })),
   });
   io.to(driverRoom(driverId)).emit(eventName, {
@@ -3475,6 +3479,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     base_fare: priceBounds.base_fare,
     min_price: priceBounds.min_price,
     max_price: priceBounds.max_price,
+    min_fare: priceBounds.min_price,
+    max_fare: priceBounds.max_price,
 
     service_type_id: toNumber(data.service_type_id) ?? null,
     service_category_id: toNumber(data.service_category_id) ?? null,
@@ -3499,6 +3505,10 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       base_fare: priceBounds.base_fare,
       min_price: priceBounds.min_price,
       max_price: priceBounds.max_price,
+      min_fare: priceBounds.min_price,
+      max_fare: priceBounds.max_price,
+      min_fare: priceBounds.min_price,
+      max_fare: priceBounds.max_price,
       service_type_id: toNumber(data.service_type_id) ?? null,
       service_category_id: toNumber(data.service_category_id) ?? null,
       duration: finalRouteApiDurationMin,
@@ -3563,6 +3573,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         base_fare: priceBounds.base_fare,
         min_price: priceBounds.min_price,
         max_price: priceBounds.max_price,
+        min_fare: priceBounds.min_price,
+        max_fare: priceBounds.max_price,
         service_type_id: serviceTypeId,
         service_category_id: toNumber(data.service_category_id) ?? null,
         created_at: data.created_at ?? null,
@@ -3586,6 +3598,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
           base_fare: priceBounds.base_fare,
           min_price: priceBounds.min_price,
           max_price: priceBounds.max_price,
+          min_fare: priceBounds.min_price,
+          max_fare: priceBounds.max_price,
           service_type_id: serviceTypeId,
           service_category_id: toNumber(data.service_category_id) ?? null,
           duration: finalRouteApiDurationMin,
@@ -3767,6 +3781,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         base_fare: priceBounds.base_fare,
         min_price: priceBounds.min_price,
         max_price: priceBounds.max_price,
+        min_fare: priceBounds.min_price,
+        max_fare: priceBounds.max_price,
         service_type_id: toNumber(data.service_type_id) ?? null,
         service_category_id: toNumber(data.service_category_id) ?? null,
         duration: finalRouteApiDurationMin,
@@ -3787,6 +3803,14 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       duration:
         bidRequestPayload?.ride_details?.duration ?? bidRequestPayload?.duration ?? null,
       route_api_distance_km: bidRequestPayload?.route_api_distance_km ?? null,
+      min_price:
+        bidRequestPayload?.min_price ?? bidRequestPayload?.ride_details?.min_price ?? null,
+      max_price:
+        bidRequestPayload?.max_price ?? bidRequestPayload?.ride_details?.max_price ?? null,
+      min_fare:
+        bidRequestPayload?.min_fare ?? bidRequestPayload?.ride_details?.min_fare ?? null,
+      max_fare:
+        bidRequestPayload?.max_fare ?? bidRequestPayload?.ride_details?.max_fare ?? null,
       additional_remarks:
         bidRequestPayload?.additional_remarks ??
         bidRequestPayload?.additional_remark ??
