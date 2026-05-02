@@ -3143,6 +3143,13 @@ async function dispatchToNearbyDrivers(io, data) {
   const base = toNumber(data?.user_bid_price);
   const min = toNumber(data?.min_fare_amount);
   const priceBounds = getRidePriceBounds(data);
+  const legacyMinFareAmount =
+    min !== null && min > 0
+      ? min
+      : toNumber(priceBounds?.min_price) ?? 0;
+  const legacyMaxFareAmount =
+    toNumber(priceBounds?.max_price) ??
+    (base !== null && base > 0 ? round2(base * 2) : 0);
 
   // ✅ build/merge user details from payload + store + token (retry-safe)
   const built = buildUserDetails(data);
@@ -3562,7 +3569,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     radius: roadRadius,
     ...dispatchStagePayload,
     user_bid_price: base,
-    min_fare_amount: min,
+    min_fare_amount: legacyMinFareAmount,
+    max_fare_amount: legacyMaxFareAmount,
     base_fare: priceBounds.base_fare,
     min_price: priceBounds.min_price,
     max_price: priceBounds.max_price,
@@ -3588,7 +3596,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       additional_remarks: additionalRemarks,
       additional_remark: additionalRemarks,
       user_bid_price: base,
-      min_fare_amount: min,
+      min_fare_amount: legacyMinFareAmount,
+      max_fare_amount: legacyMaxFareAmount,
       base_fare: priceBounds.base_fare,
       min_price: priceBounds.min_price,
       max_price: priceBounds.max_price,
@@ -3656,7 +3665,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         radius: roadRadius,
         ...dispatchStagePayload,
         user_bid_price: base,
-        min_fare_amount: min,
+        min_fare_amount: legacyMinFareAmount,
+        max_fare_amount: legacyMaxFareAmount,
         base_fare: priceBounds.base_fare,
         min_price: priceBounds.min_price,
         max_price: priceBounds.max_price,
@@ -3681,7 +3691,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
           additional_remarks: additionalRemarks,
           additional_remark: additionalRemarks,
           user_bid_price: base,
-          min_fare_amount: min,
+          min_fare_amount: legacyMinFareAmount,
+          max_fare_amount: legacyMaxFareAmount,
           base_fare: priceBounds.base_fare,
           min_price: priceBounds.min_price,
           max_price: priceBounds.max_price,
@@ -3819,7 +3830,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       radius: roadRadius,
       ...dispatchStagePayload,
       user_bid_price: base,
-      min_fare_amount: min,
+      min_fare_amount: legacyMinFareAmount,
+      max_fare_amount: legacyMaxFareAmount,
       base_fare: priceBounds.base_fare,
       min_price: priceBounds.min_price,
       max_price: priceBounds.max_price,
@@ -3864,7 +3876,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         additional_remarks: additionalRemarks,
         additional_remark: additionalRemarks,
         user_bid_price: base,
-        min_fare_amount: min,
+        min_fare_amount: legacyMinFareAmount,
+        max_fare_amount: legacyMaxFareAmount,
         base_fare: priceBounds.base_fare,
         min_price: priceBounds.min_price,
         max_price: priceBounds.max_price,
