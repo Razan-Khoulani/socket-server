@@ -657,6 +657,22 @@ const normalizeRideMetrics = (payload = {}) => {
       : {};
   const meta =
     payload.meta && typeof payload.meta === "object" ? { ...payload.meta } : {};
+  const minPrice = pickFirstValue(
+    toNumber(payload?.min_price),
+    toNumber(payload?.min_fare),
+    toNumber(rideDetails?.min_price),
+    toNumber(rideDetails?.min_fare),
+    toNumber(meta?.min_price),
+    toNumber(meta?.min_fare)
+  );
+  const maxPrice = pickFirstValue(
+    toNumber(payload?.max_price),
+    toNumber(payload?.max_fare),
+    toNumber(rideDetails?.max_price),
+    toNumber(rideDetails?.max_fare),
+    toNumber(meta?.max_price),
+    toNumber(meta?.max_fare)
+  );
 
   if (duration !== null) {
     rideDetails.duration = duration;
@@ -666,6 +682,18 @@ const normalizeRideMetrics = (payload = {}) => {
     rideDetails.route_api_distance_km = distanceKm;
     meta.route_api_distance_km = distanceKm;
   }
+  if (minPrice !== null) {
+    rideDetails.min_price = minPrice;
+    rideDetails.min_fare = minPrice;
+    meta.min_price = minPrice;
+    meta.min_fare = minPrice;
+  }
+  if (maxPrice !== null) {
+    rideDetails.max_price = maxPrice;
+    rideDetails.max_fare = maxPrice;
+    meta.max_price = maxPrice;
+    meta.max_fare = maxPrice;
+  }
 
   return {
     ...payload,
@@ -673,6 +701,8 @@ const normalizeRideMetrics = (payload = {}) => {
     ...(distanceKm !== null
       ? { distance: distanceKm, route_api_distance_km: distanceKm }
       : {}),
+    ...(minPrice !== null ? { min_price: minPrice, min_fare: minPrice } : {}),
+    ...(maxPrice !== null ? { max_price: maxPrice, max_fare: maxPrice } : {}),
     ride_details: rideDetails,
     meta,
   };
