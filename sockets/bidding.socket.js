@@ -657,13 +657,25 @@ const normalizeRideMetrics = (payload = {}) => {
       : {};
   const meta =
     payload.meta && typeof payload.meta === "object" ? { ...payload.meta } : {};
+  const computedBounds = getRidePriceBounds({
+    ...payload,
+    ride_details: rideDetails,
+    meta,
+  });
+  const baseFare = pickFirstValue(
+    toNumber(payload?.base_fare),
+    toNumber(rideDetails?.base_fare),
+    toNumber(meta?.base_fare),
+    toNumber(computedBounds?.base_fare)
+  );
   const minPrice = pickFirstValue(
     toNumber(payload?.min_price),
     toNumber(payload?.min_fare),
     toNumber(rideDetails?.min_price),
     toNumber(rideDetails?.min_fare),
     toNumber(meta?.min_price),
-    toNumber(meta?.min_fare)
+    toNumber(meta?.min_fare),
+    toNumber(computedBounds?.min_price)
   );
   const maxPrice = pickFirstValue(
     toNumber(payload?.max_price),
@@ -671,7 +683,8 @@ const normalizeRideMetrics = (payload = {}) => {
     toNumber(rideDetails?.max_price),
     toNumber(rideDetails?.max_fare),
     toNumber(meta?.max_price),
-    toNumber(meta?.max_fare)
+    toNumber(meta?.max_fare),
+    toNumber(computedBounds?.max_price)
   );
 
   if (duration !== null) {
@@ -681,6 +694,10 @@ const normalizeRideMetrics = (payload = {}) => {
   if (distanceKm !== null) {
     rideDetails.route_api_distance_km = distanceKm;
     meta.route_api_distance_km = distanceKm;
+  }
+  if (baseFare !== null) {
+    rideDetails.base_fare = baseFare;
+    meta.base_fare = baseFare;
   }
   if (minPrice !== null) {
     rideDetails.min_price = minPrice;
@@ -701,6 +718,7 @@ const normalizeRideMetrics = (payload = {}) => {
     ...(distanceKm !== null
       ? { distance: distanceKm, route_api_distance_km: distanceKm }
       : {}),
+    ...(baseFare !== null ? { base_fare: baseFare } : {}),
     ...(minPrice !== null ? { min_price: minPrice, min_fare: minPrice } : {}),
     ...(maxPrice !== null ? { max_price: maxPrice, max_fare: maxPrice } : {}),
     ride_details: rideDetails,
@@ -892,6 +910,10 @@ async function syncDriverUpdateListNotification({
   rideId,
   serviceCategoryId,
   triggerEvent,
+  minPrice,
+  maxPrice,
+  minFare,
+  maxFare,
 }) {
   if (!driverId || !rideId) {
     console.log("[driver:rides:list][push] skipped: missing fields", {
@@ -910,6 +932,10 @@ async function syncDriverUpdateListNotification({
         driver_id: driverId,
         ride_id: rideId,
         service_category_id: serviceCategoryId ?? null,
+        min_price: toNumber(minPrice),
+        max_price: toNumber(maxPrice),
+        min_fare: toNumber(minFare),
+        max_fare: toNumber(maxFare),
         trigger_event: triggerEvent ?? "ride:bidRequest",
         paired_event: "driver:rides:list",
       },
@@ -920,6 +946,8 @@ async function syncDriverUpdateListNotification({
       driver_id: driverId,
       ride_id: rideId,
       service_category_id: serviceCategoryId ?? null,
+      min_price: toNumber(minPrice),
+      max_price: toNumber(maxPrice),
       trigger_event: triggerEvent ?? null,
     });
     return true;
@@ -928,6 +956,8 @@ async function syncDriverUpdateListNotification({
       driver_id: driverId,
       ride_id: rideId,
       service_category_id: serviceCategoryId ?? null,
+      min_price: toNumber(minPrice),
+      max_price: toNumber(maxPrice),
       trigger_event: triggerEvent ?? null,
       error: error?.response?.data || error?.message || error,
     });
@@ -3906,6 +3936,18 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         driverId: d.driver_id,
         rideId,
         serviceCategoryId: toNumber(ridePayloadForDriver?.service_category_id),
+        minPrice:
+          toNumber(ridePayloadForDriver?.min_price) ??
+          toNumber(ridePayloadForDriver?.ride_details?.min_price),
+        maxPrice:
+          toNumber(ridePayloadForDriver?.max_price) ??
+          toNumber(ridePayloadForDriver?.ride_details?.max_price),
+        minFare:
+          toNumber(ridePayloadForDriver?.min_fare) ??
+          toNumber(ridePayloadForDriver?.ride_details?.min_fare),
+        maxFare:
+          toNumber(ridePayloadForDriver?.max_fare) ??
+          toNumber(ridePayloadForDriver?.ride_details?.max_fare),
         triggerEvent: "ride:bidRequest",
       });
     }
