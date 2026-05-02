@@ -1538,10 +1538,40 @@ const attachCustomerFields = (payload = {}, userDetails = null) => {
   };
 };
 
+const sanitizeCustomerForClient = (customer = null) => {
+  if (!customer || typeof customer !== "object") return null;
+
+  return {
+    user_id: toNumber(customer?.user_id ?? null),
+    user_name: customer?.user_name ?? null,
+    user_gender: toNumber(customer?.user_gender ?? null),
+    user_country_code: customer?.user_country_code ?? null,
+    user_phone: customer?.user_phone ?? null,
+    user_phone_full: customer?.user_phone_full ?? null,
+    user_image: normalizeCustomerImageUrl(customer?.user_image ?? null),
+  };
+};
+
+const stripTokenFields = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const {
+    token,
+    access_token,
+    user_token,
+    driver_token,
+    driver_access_token,
+    ...rest
+  } = value;
+  return rest;
+};
+
 const sanitizeRidePayloadForClient = (payload = {}) => {
   if (!payload || typeof payload !== "object") return payload;
   const {
     user_details,
+    token,
+    access_token,
+    user_token,
     customer,
     customer_details,
     customer_id,
@@ -1553,7 +1583,43 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
     customer_image,
     ...rest
   } = payload;
-  return rest;
+
+  const builtCustomer = buildCustomerPayload(payload, user_details ?? customer_details ?? customer ?? null);
+  const safeCustomer = sanitizeCustomerForClient(builtCustomer);
+
+  const sanitized = {
+    ...stripTokenFields(rest),
+  };
+
+  if (rest?.meta && typeof rest.meta === "object" && !Array.isArray(rest.meta)) {
+    sanitized.meta = stripTokenFields(rest.meta);
+  }
+
+  if (safeCustomer) {
+    sanitized.user_details = safeCustomer;
+    sanitized.customer = safeCustomer;
+    sanitized.customer_details = safeCustomer;
+    sanitized.customer_id = safeCustomer.user_id ?? null;
+    sanitized.customer_name = safeCustomer.user_name ?? null;
+    sanitized.customer_gender = safeCustomer.user_gender ?? null;
+    sanitized.customer_country_code = safeCustomer.user_country_code ?? null;
+    sanitized.customer_phone = safeCustomer.user_phone ?? null;
+    sanitized.customer_phone_full = safeCustomer.user_phone_full ?? null;
+    sanitized.customer_image = safeCustomer.user_image ?? null;
+  } else {
+    sanitized.user_details = null;
+    sanitized.customer = null;
+    sanitized.customer_details = null;
+    sanitized.customer_id = null;
+    sanitized.customer_name = null;
+    sanitized.customer_gender = null;
+    sanitized.customer_country_code = null;
+    sanitized.customer_phone = null;
+    sanitized.customer_phone_full = null;
+    sanitized.customer_image = null;
+  }
+
+  return sanitized;
 };
 
 // ✅ rides cancelled (block dispatch)
@@ -3419,8 +3485,26 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     duration: finalRouteApiDurationMin,
     route_api_distance_km: finalRouteApiDistanceKm,
     ride_details: {
+      ride_id: rideId,
+      pickup_lat: lat,
+      pickup_long: long,
+      pickup_address: data.pickup_address ?? null,
+      destination_lat: toNumber(data.destination_lat),
+      destination_long: toNumber(data.destination_long),
+      destination_address: data.destination_address ?? null,
+      additional_remarks: additionalRemarks,
+      additional_remark: additionalRemarks,
+      user_bid_price: base,
+      min_fare_amount: min,
+      base_fare: priceBounds.base_fare,
+      min_price: priceBounds.min_price,
+      max_price: priceBounds.max_price,
+      service_type_id: toNumber(data.service_type_id) ?? null,
+      service_category_id: toNumber(data.service_category_id) ?? null,
       duration: finalRouteApiDurationMin,
       route_api_distance_km: finalRouteApiDistanceKm,
+      ...(routeKm !== null ? { route: routeKm } : {}),
+      ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
     },
 
     meta: {
@@ -3488,8 +3572,26 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         duration: finalRouteApiDurationMin,
         route_api_distance_km: finalRouteApiDistanceKm,
         ride_details: {
+          ride_id: rideId,
+          pickup_lat: lat,
+          pickup_long: long,
+          pickup_address: data.pickup_address ?? null,
+          destination_lat: toNumber(data.destination_lat),
+          destination_long: toNumber(data.destination_long),
+          destination_address: data.destination_address ?? null,
+          additional_remarks: additionalRemarks,
+          additional_remark: additionalRemarks,
+          user_bid_price: base,
+          min_fare_amount: min,
+          base_fare: priceBounds.base_fare,
+          min_price: priceBounds.min_price,
+          max_price: priceBounds.max_price,
+          service_type_id: serviceTypeId,
+          service_category_id: toNumber(data.service_category_id) ?? null,
           duration: finalRouteApiDurationMin,
           route_api_distance_km: finalRouteApiDistanceKm,
+          ...(routeKm !== null ? { route: routeKm } : {}),
+          ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
         },
 
         meta: {
@@ -3651,8 +3753,26 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       duration: finalRouteApiDurationMin,
       route_api_distance_km: finalRouteApiDistanceKm,
       ride_details: {
+        ride_id: rideId,
+        pickup_lat: lat,
+        pickup_long: long,
+        pickup_address: data.pickup_address ?? null,
+        destination_lat: toNumber(data.destination_lat),
+        destination_long: toNumber(data.destination_long),
+        destination_address: data.destination_address ?? null,
+        additional_remarks: additionalRemarks,
+        additional_remark: additionalRemarks,
+        user_bid_price: base,
+        min_fare_amount: min,
+        base_fare: priceBounds.base_fare,
+        min_price: priceBounds.min_price,
+        max_price: priceBounds.max_price,
+        service_type_id: toNumber(data.service_type_id) ?? null,
+        service_category_id: toNumber(data.service_category_id) ?? null,
         duration: finalRouteApiDurationMin,
         route_api_distance_km: finalRouteApiDistanceKm,
+        ...(routeKm !== null ? { route: routeKm } : {}),
+        ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
       },
 
       ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
