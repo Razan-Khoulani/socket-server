@@ -77,6 +77,8 @@ const normalizeToken = (value) => {
   const token = String(value).trim();
   return token.length ? token : null;
 };
+const isUnsafeNumericToken = (value) =>
+  typeof value === "number" && Number.isFinite(value) && !Number.isSafeInteger(value);
 const getSocketUserToken = (sock) => {
   return normalizeToken(
     sock?.userToken ??
@@ -6062,6 +6064,16 @@ const payloadUserId = toValidUserId(payload?.user_id);
 const payloadToken = normalizeToken(
   payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
 );
+if (
+  isUnsafeNumericToken(payload?.access_token) ||
+  isUnsafeNumericToken(payload?.token) ||
+  isUnsafeNumericToken(payload?.user_token)
+) {
+  console.warn("[user:acceptOffer] payload token sent as unsafe JS number; send token as string", {
+    ride_id: rideId,
+    user_id: payloadUserId ?? null,
+  });
+}
 const userFromPayloadToken = payloadToken ? getUserDetailsByToken(payloadToken) : null;
 const payloadTokenUserId = toValidUserId(userFromPayloadToken?.user_id ?? null);
 
