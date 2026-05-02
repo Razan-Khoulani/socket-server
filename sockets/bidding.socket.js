@@ -753,6 +753,22 @@ const LARAVEL_ACCEPT_BID_TIMEOUT_MS = Number.isFinite(
   : 7000;
 const DISPATCH_EXPANSION_INTERVAL_S = 5;
 
+const getDriverLocationAgeMs = (driver = null, meta = null) => {
+  const ts =
+    toNumber(driver?.timestamp) ??
+    toNumber(meta?.timestamp) ??
+    toNumber(meta?.updatedAt) ??
+    null;
+  if (ts === null) return null;
+  return Date.now() - ts;
+};
+
+const isDriverLocationFresh = (driver = null, meta = null) => {
+  const ageMs = getDriverLocationAgeMs(driver, meta);
+  if (ageMs === null) return false;
+  return ageMs <= MAX_DRIVER_LOCATION_AGE_MS;
+};
+
 // ─────────────────────────────
 // ✅ Timer helpers (SECONDS ONLY + SERVER AUTHORITATIVE)
 // ─────────────────────────────
@@ -1054,6 +1070,8 @@ function buildRideCandidatesSummary(rideId) {
     const meta = driverLocationService.getMeta(driverId) || {};
 
     if (!driver) continue;
+
+    if (!isDriverLocationFresh(driver, meta)) continue;
 
     const isOnline = Number(driver?.is_online ?? meta?.is_online ?? 1) === 1;
     if (!isOnline) continue;
@@ -2891,6 +2909,8 @@ function shouldKeepExistingCandidateForRide(rideId, driverId) {
 
   const driver = driverLocationService.getDriver(safeDriverId);
   const meta = driverLocationService.getMeta(safeDriverId) || {};
+
+  if (!driver || !isDriverLocationFresh(driver, meta)) return false;
 
   const isOnline = Number(driver?.is_online ?? meta?.is_online ?? 1) === 1;
   if (!isOnline) return false;
@@ -5740,22 +5760,47 @@ if (removed) {
     }
 
     const snapshot = getRideSnapshotForRedispatch(rideId);
+    const payloadToken = payload?.token ?? payload?.access_token ?? payload?.user_token ?? null;
+    const fallbackUserId =
+      toNumber(payload?.user_id) ?? toNumber(snapshot?.user_id) ?? toNumber(getUserIdForRide(rideId));
+
     const ridePriceBounds = getRidePriceBounds(snapshot ?? {});
     if (!isPriceWithinBounds(newPrice, ridePriceBounds)) {
-      emitPriceValidationError(io, rideRoom(rideId), {
+      const validationPayload = {
         ride_id: rideId,
         attempted_price: newPrice,
         min_price: ridePriceBounds.min_price,
         max_price: ridePriceBounds.max_price,
         actor: "user",
         message: "User price is outside allowed range",
+        at: Date.now(),
+      };
+      console.log("[bid][user:respondToDriver] rejected by bounds", {
+        ride_id: rideId,
+        user_id: fallbackUserId ?? null,
+        attempted_price: newPrice,
+        min_price: ridePriceBounds.min_price,
+        max_price: ridePriceBounds.max_price,
+        candidates_count: candidateDrivers.length,
       });
+      emitToRideAudience(
+        io,
+        rideId,
+        "ride:priceValidationError",
+        validationPayload,
+        fallbackUserId ?? null
+      );
       return;
     }
 
-    const payloadToken = payload?.token ?? payload?.access_token ?? payload?.user_token ?? null;
-    const fallbackUserId =
-      toNumber(payload?.user_id) ?? toNumber(snapshot?.user_id) ?? toNumber(getUserIdForRide(rideId));
+    console.log("[bid][user:respondToDriver] accepted", {
+      ride_id: rideId,
+      user_id: fallbackUserId ?? null,
+      new_price: newPrice,
+      min_price: ridePriceBounds.min_price,
+      max_price: ridePriceBounds.max_price,
+      candidates_count: candidateDrivers.length,
+    });
 
     const stored = fallbackUserId ? getUserDetails(fallbackUserId) : null;
     const storedByToken =
