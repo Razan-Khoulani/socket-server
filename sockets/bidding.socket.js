@@ -914,6 +914,13 @@ async function syncDriverUpdateListNotification({
   maxPrice,
   minFare,
   maxFare,
+  routeApiDistanceKm,
+  duration,
+  etaMin,
+  additionalRemarks,
+  isPriceUpdated,
+  serverTime,
+  expiresAt,
 }) {
   if (!driverId || !rideId) {
     console.log("[driver:rides:list][push] skipped: missing fields", {
@@ -936,6 +943,16 @@ async function syncDriverUpdateListNotification({
         max_price: toNumber(maxPrice),
         min_fare: toNumber(minFare),
         max_fare: toNumber(maxFare),
+        route_api_distance_km: toNumber(routeApiDistanceKm),
+        duration: toNumber(duration),
+        eta_min: toNumber(etaMin),
+        additional_remarks:
+          additionalRemarks === null || additionalRemarks === undefined
+            ? null
+            : String(additionalRemarks),
+        isPriceUpdated: isPriceUpdated ? 1 : 0,
+        server_time: toNumber(serverTime),
+        expires_at: toNumber(expiresAt),
         trigger_event: triggerEvent ?? "ride:bidRequest",
         paired_event: "driver:rides:list",
       },
@@ -948,6 +965,11 @@ async function syncDriverUpdateListNotification({
       service_category_id: serviceCategoryId ?? null,
       min_price: toNumber(minPrice),
       max_price: toNumber(maxPrice),
+      route_api_distance_km: toNumber(routeApiDistanceKm),
+      duration: toNumber(duration),
+      eta_min: toNumber(etaMin),
+      server_time: toNumber(serverTime),
+      expires_at: toNumber(expiresAt),
       trigger_event: triggerEvent ?? null,
     });
     return true;
@@ -958,6 +980,11 @@ async function syncDriverUpdateListNotification({
       service_category_id: serviceCategoryId ?? null,
       min_price: toNumber(minPrice),
       max_price: toNumber(maxPrice),
+      route_api_distance_km: toNumber(routeApiDistanceKm),
+      duration: toNumber(duration),
+      eta_min: toNumber(etaMin),
+      server_time: toNumber(serverTime),
+      expires_at: toNumber(expiresAt),
       trigger_event: triggerEvent ?? null,
       error: error?.response?.data || error?.message || error,
     });
@@ -3948,6 +3975,31 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         maxFare:
           toNumber(ridePayloadForDriver?.max_fare) ??
           toNumber(ridePayloadForDriver?.ride_details?.max_fare),
+        routeApiDistanceKm:
+          toNumber(ridePayloadForDriver?.route_api_distance_km) ??
+          toNumber(ridePayloadForDriver?.ride_details?.route_api_distance_km),
+        duration:
+          toNumber(ridePayloadForDriver?.duration) ??
+          toNumber(ridePayloadForDriver?.ride_details?.duration),
+        etaMin:
+          toNumber(ridePayloadForDriver?.eta_min) ??
+          toNumber(ridePayloadForDriver?.ride_details?.eta_min),
+        additionalRemarks:
+          ridePayloadForDriver?.additional_remarks ??
+          ridePayloadForDriver?.additional_remark ??
+          ridePayloadForDriver?.ride_details?.additional_remarks ??
+          ridePayloadForDriver?.ride_details?.additional_remark ??
+          null,
+        isPriceUpdated:
+          ridePayloadForDriver?.isPriceUpdated === true ||
+          ridePayloadForDriver?.isPriceUpdated === 1 ||
+          ridePayloadForDriver?.isPriceUpdated === "1",
+        serverTime:
+          toNumber(ridePayloadForDriver?.server_time) ??
+          toNumber(ridePayloadForDriver?.ride_details?.server_time),
+        expiresAt:
+          toNumber(ridePayloadForDriver?.expires_at) ??
+          toNumber(ridePayloadForDriver?.ride_details?.expires_at),
         triggerEvent: "ride:bidRequest",
       });
     }
