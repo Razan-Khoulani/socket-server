@@ -482,8 +482,9 @@ const getRidePriceBounds = (payload = {}) => {
     const built = buildPriceBounds(explicitBase, distanceKm);
     return {
       base_fare: built.base_fare,
-      min_price: built.min_price ?? explicitMin,
-      max_price: built.max_price ?? explicitMax,
+      // Prefer explicit bounds when available so validation matches UI snapshot.
+      min_price: explicitMin ?? built.min_price,
+      max_price: explicitMax ?? built.max_price,
     };
   }
 
@@ -495,8 +496,8 @@ const getRidePriceBounds = (payload = {}) => {
 
   return {
     base_fare: built.base_fare,
-    min_price: built.min_price ?? explicitMin,
-    max_price: built.max_price ?? explicitMax,
+    min_price: explicitMin ?? built.min_price,
+    max_price: explicitMax ?? built.max_price,
   };
 };
 
