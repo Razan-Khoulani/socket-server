@@ -1101,6 +1101,7 @@ async function syncDriverUpdateListNotification({
   rideId,
   serviceCategoryId,
   triggerEvent,
+  dispatchPayload,
   minPrice,
   maxPrice,
   minFare,
@@ -1131,6 +1132,10 @@ async function syncDriverUpdateListNotification({
     toNumber(minFare) ?? resolvedMinPrice;
   const resolvedMaxFare =
     toNumber(maxFare) ?? resolvedMaxPrice;
+  const normalizedDispatchPayload =
+    dispatchPayload && typeof dispatchPayload === "object"
+      ? sanitizeRidePayloadForClient(dispatchPayload)
+      : null;
 
   try {
     await axios.post(
@@ -1155,6 +1160,7 @@ async function syncDriverUpdateListNotification({
         expires_at: toNumber(expiresAt),
         trigger_event: triggerEvent ?? "ride:bidRequest",
         paired_event: "driver:rides:list",
+        dispatch_payload: normalizedDispatchPayload,
       },
       { timeout: 7000 }
     );
@@ -1173,6 +1179,10 @@ async function syncDriverUpdateListNotification({
       server_time: toNumber(serverTime),
       expires_at: toNumber(expiresAt),
       trigger_event: triggerEvent ?? null,
+      has_dispatch_payload: !!normalizedDispatchPayload,
+      dispatch_payload_keys: normalizedDispatchPayload
+        ? Object.keys(normalizedDispatchPayload).length
+        : 0,
     });
     return true;
   } catch (error) {
@@ -1190,6 +1200,10 @@ async function syncDriverUpdateListNotification({
       server_time: toNumber(serverTime),
       expires_at: toNumber(expiresAt),
       trigger_event: triggerEvent ?? null,
+      has_dispatch_payload: !!normalizedDispatchPayload,
+      dispatch_payload_keys: normalizedDispatchPayload
+        ? Object.keys(normalizedDispatchPayload).length
+        : 0,
       error: error?.response?.data || error?.message || error,
     });
     return false;
@@ -1347,6 +1361,10 @@ function emitDispatchDeliverySummary(io, driverId, ridePayloadForDriver = null) 
 
 async function emitDispatchNotificationSync(payload = {}) {
   const ridePayloadForDriver = payload?.ridePayloadForDriver;
+  const bidRequestPayload =
+    payload?.bidRequestPayload && typeof payload?.bidRequestPayload === "object"
+      ? payload.bidRequestPayload
+      : null;
   const safeDriverId = toNumber(payload?.driverId);
   const safeRideId = toNumber(payload?.rideId);
   if (!safeDriverId || !safeRideId || !ridePayloadForDriver) return;
@@ -1435,6 +1453,7 @@ async function emitDispatchNotificationSync(payload = {}) {
       toNumber(ridePayloadForDriver?.expires_at) ??
       toNumber(ridePayloadForDriver?.ride_details?.expires_at),
     triggerEvent: "ride:bidRequest",
+    dispatchPayload: bidRequestPayload ?? ridePayloadForDriver ?? null,
   });
 
   if (synced) {
@@ -1490,6 +1509,7 @@ function tryEmitBidRequestToDriver(
     void emitDispatchNotificationSync({
       rideId: safeRideId,
       driverId: safeDriverId,
+      bidRequestPayload,
       ridePayloadForDriver,
       alreadyNotified: wasNotifiedBefore,
       alreadyPushNotified: hasRideDriverPushBeenNotified(safeRideId, safeDriverId),
@@ -1515,6 +1535,7 @@ function tryEmitBidRequestToDriver(
   void emitDispatchNotificationSync({
     rideId: safeRideId,
     driverId: safeDriverId,
+    bidRequestPayload,
     ridePayloadForDriver,
     alreadyNotified: wasNotifiedBefore,
     alreadyPushNotified: hasRideDriverPushBeenNotified(safeRideId, safeDriverId),
