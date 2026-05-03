@@ -386,6 +386,11 @@ module.exports = (io, socket) => {
     const driverId = toNumber(driver_id);
     const la = toNumber(lat);
     const lo = toNumber(long);
+    const normalizedAccessToken =
+      access_token ??
+      payload?.accessToken ??
+      payload?.token ??
+      null;
     if (!driverId || la === null || lo === null) return;
     if (!bindDriverOnce(driverId)) return;
 
@@ -396,7 +401,7 @@ module.exports = (io, socket) => {
 
     socket.driverServiceId = toNumber(driver_service_id) ?? null;
     socket.driverDetailId = toNumber(payload?.driver_detail_id ?? null);
-    socket.driverAccessToken = access_token ?? null;
+    socket.driverAccessToken = normalizedAccessToken ?? null;
     socket.driverServiceCategoryId = payloadServiceCategoryId ?? null;
 
     socket.join(driverRoom(driverId));
@@ -428,7 +433,7 @@ module.exports = (io, socket) => {
     if (Number.isFinite(payloadServiceCategoryId)) {
       baseMeta.service_category_id = payloadServiceCategoryId;
     }
-    if (access_token) baseMeta.access_token = access_token;
+    if (normalizedAccessToken) baseMeta.access_token = normalizedAccessToken;
 
     // ✅ NEW: store frontend-only flags (optional)
     const g = toNumber(driver_gender);
@@ -443,7 +448,7 @@ module.exports = (io, socket) => {
     driverLocationService.updateMeta(driverId, baseMeta);
 
     // ✅ جيب معلومات النوع + كل بيانات السيارة من Laravel وخزّنها بالميموري (كما هو)
-    if (!access_token) {
+    if (!normalizedAccessToken) {
       console.warn("[driver-online] Missing access_token; skipping Laravel update-current-status");
     } else {
       try {
@@ -452,7 +457,7 @@ module.exports = (io, socket) => {
           {
             driver_id: driverId,
             update_status: 1,
-            access_token,
+            access_token: normalizedAccessToken,
             driver_service_id,
             current_lat: la,
             current_long: lo,
