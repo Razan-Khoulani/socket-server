@@ -285,6 +285,43 @@ const getRoomSocketCount = (io, roomName) => {
   const roomSet = io?.sockets?.adapter?.rooms?.get(roomName);
   return roomSet ? roomSet.size : 0;
 };
+const DISPATCH_EMIT_RETRY_MAX_ATTEMPTS = Number.isFinite(
+  Number(process.env.DISPATCH_EMIT_RETRY_MAX_ATTEMPTS)
+)
+  ? Math.max(0, Number(process.env.DISPATCH_EMIT_RETRY_MAX_ATTEMPTS))
+  : 3;
+const DISPATCH_EMIT_RETRY_BASE_DELAY_MS = Number.isFinite(
+  Number(process.env.DISPATCH_EMIT_RETRY_BASE_DELAY_MS)
+)
+  ? Math.max(200, Number(process.env.DISPATCH_EMIT_RETRY_BASE_DELAY_MS))
+  : 1200;
+const pendingBidEmitRetryTimers = new Map(); // `${rideId}:${driverId}` -> timeout
+const pendingBidEmitRetryKey = (rideId, driverId) => `${rideId}:${driverId}`;
+
+const clearPendingBidEmitRetry = (rideId, driverId) => {
+  const safeRideId = toNumber(rideId);
+  const safeDriverId = toNumber(driverId);
+  if (!safeRideId || !safeDriverId) return;
+
+  const key = pendingBidEmitRetryKey(safeRideId, safeDriverId);
+  const timer = pendingBidEmitRetryTimers.get(key);
+  if (timer) {
+    clearTimeout(timer);
+  }
+  pendingBidEmitRetryTimers.delete(key);
+};
+
+const clearPendingBidEmitRetriesForRide = (rideId) => {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return;
+
+  const prefix = `${safeRideId}:`;
+  for (const [key, timer] of pendingBidEmitRetryTimers.entries()) {
+    if (!key.startsWith(prefix)) continue;
+    clearTimeout(timer);
+    pendingBidEmitRetryTimers.delete(key);
+  }
+};
 const buildNewBidEmitDebugSnapshot = (payload = {}) => {
   const p = payload && typeof payload === "object" ? payload : {};
   const details =
@@ -1102,13 +1139,248 @@ function markRideDriverState(rideId, driverId, status, extra = {}) {
   }
 
   states.set(safeDriverId, next);
+  if (isTerminalDriverRideState(status)) {
+    clearPendingBidEmitRetry(safeRideId, safeDriverId);
+  }
   return next;
 }
 
 function clearRideDriverStates(rideId) {
   const safeRideId = toNumber(rideId);
   if (!safeRideId) return;
+  clearPendingBidEmitRetriesForRide(safeRideId);
   rideDriverStates.delete(safeRideId);
+}
+
+function emitDispatchDeliverySummary(io, driverId, ridePayloadForDriver = null) {
+  const safeDriverId = toNumber(driverId);
+  if (!safeDriverId || !ridePayloadForDriver) return;
+  emitDriverPatch(io, safeDriverId, [{ op: "upsert", ride: ridePayloadForDriver }]);
+  emitDriverInbox(io, safeDriverId, "driver:rides:list");
+}
+
+function emitDispatchNotificationSync(payload = {}) {
+  const ridePayloadForDriver = payload?.ridePayloadForDriver;
+  const safeDriverId = toNumber(payload?.driverId);
+  const safeRideId = toNumber(payload?.rideId);
+  if (!safeDriverId || !safeRideId || !ridePayloadForDriver) return;
+
+  const alreadyNotified =
+    payload?.alreadyNotified === true ||
+    hasRideDriverBeenNotified(safeRideId, safeDriverId);
+  if (alreadyNotified) return;
+
+  void syncDriverUpdateListNotification({
+    driverId: safeDriverId,
+    rideId: safeRideId,
+    serviceCategoryId: toNumber(ridePayloadForDriver?.service_category_id),
+    minPrice:
+      toNumber(ridePayloadForDriver?.min_price) ??
+      toNumber(ridePayloadForDriver?.ride_details?.min_price),
+    maxPrice:
+      toNumber(ridePayloadForDriver?.max_price) ??
+      toNumber(ridePayloadForDriver?.ride_details?.max_price),
+    minFare:
+      toNumber(ridePayloadForDriver?.min_fare) ??
+      toNumber(ridePayloadForDriver?.ride_details?.min_fare),
+    maxFare:
+      toNumber(ridePayloadForDriver?.max_fare) ??
+      toNumber(ridePayloadForDriver?.ride_details?.max_fare),
+    routeApiDistanceKm:
+      toNumber(ridePayloadForDriver?.route_api_distance_km) ??
+      toNumber(ridePayloadForDriver?.ride_details?.route_api_distance_km),
+    duration:
+      toNumber(ridePayloadForDriver?.duration) ??
+      toNumber(ridePayloadForDriver?.ride_details?.duration),
+    etaMin:
+      toNumber(ridePayloadForDriver?.eta_min) ??
+      toNumber(ridePayloadForDriver?.ride_details?.eta_min),
+    additionalRemarks:
+      ridePayloadForDriver?.additional_remarks ??
+      ridePayloadForDriver?.additional_remark ??
+      ridePayloadForDriver?.ride_details?.additional_remarks ??
+      ridePayloadForDriver?.ride_details?.additional_remark ??
+      null,
+    isPriceUpdated:
+      ridePayloadForDriver?.isPriceUpdated === true ||
+      ridePayloadForDriver?.isPriceUpdated === 1 ||
+      ridePayloadForDriver?.isPriceUpdated === "1",
+    serverTime:
+      toNumber(ridePayloadForDriver?.server_time) ??
+      toNumber(ridePayloadForDriver?.ride_details?.server_time),
+    expiresAt:
+      toNumber(ridePayloadForDriver?.expires_at) ??
+      toNumber(ridePayloadForDriver?.ride_details?.expires_at),
+    triggerEvent: "ride:bidRequest",
+  });
+}
+
+function tryEmitBidRequestToDriver(
+  io,
+  {
+    rideId,
+    driverId,
+    bidRequestPayload,
+    ridePayloadForDriver,
+    dispatchStageIndex = null,
+    dispatchRadiusMeters = null,
+    source = "dispatch",
+    attempt = 1,
+  } = {}
+) {
+  const safeRideId = toNumber(rideId);
+  const safeDriverId = toNumber(driverId);
+  if (!safeRideId || !safeDriverId || !bidRequestPayload) {
+    return { delivered: false, room_sockets: 0, reason: "invalid-input" };
+  }
+
+  const room = driverRoom(safeDriverId);
+  const roomSocketCount = getRoomSocketCount(io, room);
+  const wasNotifiedBefore = hasRideDriverBeenNotified(safeRideId, safeDriverId);
+  const now = Date.now();
+  const stateMeta = {
+    ...(dispatchStageIndex != null
+      ? { last_dispatch_stage_index: dispatchStageIndex }
+      : {}),
+    ...(dispatchRadiusMeters != null
+      ? { last_dispatch_radius_m: dispatchRadiusMeters }
+      : {}),
+    last_emit_attempt: attempt,
+    last_emit_source: source,
+    last_emit_room_sockets: roomSocketCount,
+    last_emit_attempt_at: now,
+  };
+
+  if (roomSocketCount <= 0) {
+    markRideDriverState(safeRideId, safeDriverId, "pending_emit", {
+      ...stateMeta,
+      last_emit_reason: "room_empty",
+    });
+    console.log("[dispatch][emit-miss][room-empty]", {
+      ride_id: safeRideId,
+      driver_id: safeDriverId,
+      room,
+      room_sockets: roomSocketCount,
+      source,
+      attempt,
+    });
+    return { delivered: false, room_sockets: roomSocketCount, reason: "room_empty" };
+  }
+
+  io.to(room).emit("ride:bidRequest", bidRequestPayload);
+  markRideDriverState(safeRideId, safeDriverId, "notified", {
+    ...stateMeta,
+    last_emit_reason: "emitted_ok",
+  });
+  clearPendingBidEmitRetry(safeRideId, safeDriverId);
+  emitDispatchNotificationSync({
+    rideId: safeRideId,
+    driverId: safeDriverId,
+    ridePayloadForDriver,
+    alreadyNotified: wasNotifiedBefore,
+  });
+
+  console.log("[dispatch][emit-ok]", {
+    ride_id: safeRideId,
+    driver_id: safeDriverId,
+    room,
+    room_sockets: roomSocketCount,
+    source,
+    attempt,
+  });
+  return { delivered: true, room_sockets: roomSocketCount, reason: "emitted_ok" };
+}
+
+function scheduleBidRequestRetry(
+  io,
+  {
+    rideId,
+    driverId,
+    bidRequestPayload,
+    ridePayloadForDriver,
+    dispatchStageIndex = null,
+    dispatchRadiusMeters = null,
+    source = "dispatch",
+    attempt = 1,
+  } = {}
+) {
+  const safeRideId = toNumber(rideId);
+  const safeDriverId = toNumber(driverId);
+  if (!safeRideId || !safeDriverId || !bidRequestPayload) return false;
+
+  if (attempt > DISPATCH_EMIT_RETRY_MAX_ATTEMPTS) {
+    markRideDriverState(safeRideId, safeDriverId, "pending_emit", {
+      ...(dispatchStageIndex != null
+        ? { last_dispatch_stage_index: dispatchStageIndex }
+        : {}),
+      ...(dispatchRadiusMeters != null
+        ? { last_dispatch_radius_m: dispatchRadiusMeters }
+        : {}),
+      last_emit_source: `${source}:retry-exhausted`,
+      last_emit_attempt: attempt - 1,
+      last_emit_reason: "retry_exhausted",
+      last_emit_attempt_at: Date.now(),
+    });
+    console.log("[dispatch][retry-exhausted]", {
+      ride_id: safeRideId,
+      driver_id: safeDriverId,
+      max_attempts: DISPATCH_EMIT_RETRY_MAX_ATTEMPTS,
+      source,
+    });
+    return false;
+  }
+
+  const key = pendingBidEmitRetryKey(safeRideId, safeDriverId);
+  if (pendingBidEmitRetryTimers.has(key)) {
+    return false;
+  }
+
+  const delayMs = DISPATCH_EMIT_RETRY_BASE_DELAY_MS * attempt;
+  const timer = setTimeout(() => {
+    pendingBidEmitRetryTimers.delete(key);
+
+    const stillQueuedInInbox = !!driverRideInbox.get(safeDriverId)?.has(safeRideId);
+    if (!stillQueuedInInbox) {
+      return;
+    }
+
+    const emitResult = tryEmitBidRequestToDriver(io, {
+      rideId: safeRideId,
+      driverId: safeDriverId,
+      bidRequestPayload,
+      ridePayloadForDriver,
+      dispatchStageIndex,
+      dispatchRadiusMeters,
+      source: `${source}:retry`,
+      attempt,
+    });
+
+    if (emitResult.delivered) {
+      emitDispatchDeliverySummary(io, safeDriverId, ridePayloadForDriver);
+      return;
+    }
+
+    scheduleBidRequestRetry(io, {
+      rideId: safeRideId,
+      driverId: safeDriverId,
+      bidRequestPayload,
+      ridePayloadForDriver,
+      dispatchStageIndex,
+      dispatchRadiusMeters,
+      source,
+      attempt: attempt + 1,
+    });
+  }, delayMs);
+
+  pendingBidEmitRetryTimers.set(key, timer);
+  console.log("[dispatch][retry-scheduled]", {
+    ride_id: safeRideId,
+    driver_id: safeDriverId,
+    attempt,
+    delay_ms: delayMs,
+    source,
+  });
+  return true;
 }
 
 function isTerminalDriverRideState(status) {
@@ -2667,6 +2939,94 @@ function emitDriverInbox(io, driverId, eventName = "driver:rides:list") {
   });
 }
 
+function emitPendingBidRequestsForDriver(io, driverId, source = "driver:getRidesList") {
+  const safeDriverId = toNumber(driverId);
+  if (!safeDriverId) return { attempted: 0, delivered: 0, pending: 0 };
+
+  pruneDriverInbox(io, safeDriverId);
+  const box = driverRideInbox.get(safeDriverId);
+  if (!box || box.size === 0) return { attempted: 0, delivered: 0, pending: 0 };
+
+  let attempted = 0;
+  let delivered = 0;
+  let pending = 0;
+
+  for (const [rideId, ride] of box.entries()) {
+    const safeRideId = toNumber(rideId);
+    if (!safeRideId || !ride || typeof ride !== "object") continue;
+    if (isRideOfferExpired(ride)) continue;
+
+    const state = getRideDriverState(safeRideId, safeDriverId);
+    const rideStatusSnapshot = getRideStatusSnapshot(safeRideId);
+    const rideStatus =
+      toNumber(rideStatusSnapshot?.ride_status) ??
+      toNumber(ride?.ride_status) ??
+      toNumber(ride?.status) ??
+      null;
+
+    if (
+      isTerminalDriverRideState(state?.status) ||
+      cancelledRides.has(safeRideId) ||
+      isTerminalRideStatus(rideStatus)
+    ) {
+      continue;
+    }
+
+    if (state?.status === "notified" && state?.notified_at) {
+      continue;
+    }
+
+    const bidRequestPayload = sanitizeRidePayloadForClient({
+      ...ride,
+      event_type: "driver_new_bid_request",
+      ui_action: "show_bid_request",
+      auto_open_running: false,
+      is_running_ride: false,
+    });
+
+    const emitResult = tryEmitBidRequestToDriver(io, {
+      rideId: safeRideId,
+      driverId: safeDriverId,
+      bidRequestPayload,
+      ridePayloadForDriver: ride,
+      dispatchStageIndex: state?.last_dispatch_stage_index ?? null,
+      dispatchRadiusMeters: state?.last_dispatch_radius_m ?? null,
+      source,
+      attempt: 1,
+    });
+
+    attempted += 1;
+    if (emitResult.delivered) {
+      delivered += 1;
+      continue;
+    }
+
+    pending += 1;
+    scheduleBidRequestRetry(io, {
+      rideId: safeRideId,
+      driverId: safeDriverId,
+      bidRequestPayload,
+      ridePayloadForDriver: ride,
+      dispatchStageIndex: state?.last_dispatch_stage_index ?? null,
+      dispatchRadiusMeters: state?.last_dispatch_radius_m ?? null,
+      source,
+      attempt: 1,
+    });
+  }
+
+  if (attempted > 0 || pending > 0) {
+    console.log("[dispatch][recovery-report]", {
+      driver_id: safeDriverId,
+      source,
+      attempted,
+      delivered,
+      pending,
+    });
+  }
+
+  return { attempted, delivered, pending };
+}
+
 function updateRideUserDetailsInInbox(io, rideId, userDetails) {
   if (!rideId || !userDetails) return;
 
@@ -3807,9 +4167,10 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       ? `${bidReqUserCountryCode}${bidReqUserPhone}`
       : null);
 
+  const deliveredDriverIds = [];
+  const pendingDriverIds = [];
+
   candidatesToNotify.forEach((d) => {
-    const wasNotifiedBefore = hasRideDriverBeenNotified(rideId, d.driver_id);
-    const room = driverRoom(d.driver_id);
     const bidRequestPayload = sanitizeRidePayloadForClient({
       ride_id: rideId,
       event_type: "driver_new_bid_request",
@@ -3917,8 +4278,6 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         null,
     });
 
-    io.to(room).emit("ride:bidRequest", bidRequestPayload);
-
     const ridePayloadForDriver = attachCustomerFields(
       {
         ...ridePayload,
@@ -3964,60 +4323,41 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     );
 
     inboxUpsert(d.driver_id, rideId, ridePayloadForDriver);
-    markRideDriverState(rideId, d.driver_id, "notified", {
-      last_dispatch_stage_index: radiusPlan.currentStageIndex,
-      last_dispatch_radius_m: roadRadius,
-    });
-    emitDriverPatch(io, d.driver_id, [{ op: "upsert", ride: ridePayloadForDriver }]);
-    emitDriverInbox(io, d.driver_id, "driver:rides:list");
+    emitDispatchDeliverySummary(io, d.driver_id, ridePayloadForDriver);
 
-    if (!wasNotifiedBefore) {
-      void syncDriverUpdateListNotification({
-        driverId: d.driver_id,
-        rideId,
-        serviceCategoryId: toNumber(ridePayloadForDriver?.service_category_id),
-        minPrice:
-          toNumber(ridePayloadForDriver?.min_price) ??
-          toNumber(ridePayloadForDriver?.ride_details?.min_price),
-        maxPrice:
-          toNumber(ridePayloadForDriver?.max_price) ??
-          toNumber(ridePayloadForDriver?.ride_details?.max_price),
-        minFare:
-          toNumber(ridePayloadForDriver?.min_fare) ??
-          toNumber(ridePayloadForDriver?.ride_details?.min_fare),
-        maxFare:
-          toNumber(ridePayloadForDriver?.max_fare) ??
-          toNumber(ridePayloadForDriver?.ride_details?.max_fare),
-        routeApiDistanceKm:
-          toNumber(ridePayloadForDriver?.route_api_distance_km) ??
-          toNumber(ridePayloadForDriver?.ride_details?.route_api_distance_km),
-        duration:
-          toNumber(ridePayloadForDriver?.duration) ??
-          toNumber(ridePayloadForDriver?.ride_details?.duration),
-        etaMin:
-          toNumber(ridePayloadForDriver?.eta_min) ??
-          toNumber(ridePayloadForDriver?.ride_details?.eta_min),
-        additionalRemarks:
-          ridePayloadForDriver?.additional_remarks ??
-          ridePayloadForDriver?.additional_remark ??
-          ridePayloadForDriver?.ride_details?.additional_remarks ??
-          ridePayloadForDriver?.ride_details?.additional_remark ??
-          null,
-        isPriceUpdated:
-          ridePayloadForDriver?.isPriceUpdated === true ||
-          ridePayloadForDriver?.isPriceUpdated === 1 ||
-          ridePayloadForDriver?.isPriceUpdated === "1",
-        serverTime:
-          toNumber(ridePayloadForDriver?.server_time) ??
-          toNumber(ridePayloadForDriver?.ride_details?.server_time),
-        expiresAt:
-          toNumber(ridePayloadForDriver?.expires_at) ??
-          toNumber(ridePayloadForDriver?.ride_details?.expires_at),
-        triggerEvent: "ride:bidRequest",
-      });
+    const emitResult = tryEmitBidRequestToDriver(io, {
+      rideId,
+      driverId: d.driver_id,
+      bidRequestPayload,
+      ridePayloadForDriver,
+      dispatchStageIndex: radiusPlan.currentStageIndex,
+      dispatchRadiusMeters: roadRadius,
+      source: "dispatch-initial",
+      attempt: 1,
+    });
+
+    if (emitResult.delivered) {
+      deliveredDriverIds.push(toNumber(d.driver_id));
+      console.log(
+        `[dispatch][delivery] ride ${rideId} -> driver ${d.driver_id} delivered (room_sockets:${emitResult.room_sockets})`
+      );
+      return;
     }
 
-    console.log(`   -> Sent bidRequest + patch(upsert) to driver ${d.driver_id} (room:${room})`);
+    pendingDriverIds.push(toNumber(d.driver_id));
+    scheduleBidRequestRetry(io, {
+      rideId,
+      driverId: d.driver_id,
+      bidRequestPayload,
+      ridePayloadForDriver,
+      dispatchStageIndex: radiusPlan.currentStageIndex,
+      dispatchRadiusMeters: roadRadius,
+      source: "dispatch-initial",
+      attempt: 1,
+    });
+    console.log(
+      `[dispatch][delivery] ride ${rideId} -> driver ${d.driver_id} pending (${emitResult.reason})`
+    );
   });
 
 if (incrementalExpansion) {
@@ -4035,6 +4375,13 @@ if (incrementalExpansion) {
   } else {
     console.log(`ℹ️ Dispatch for ride ${rideId} completed with no newly notified drivers`);
   }
+  console.log("[dispatch][delivery-report]", {
+    ride_id: rideId,
+    delivered_driver_ids: deliveredDriverIds.filter((id) => !!id),
+    pending_driver_ids: pendingDriverIds.filter((id) => !!id),
+    delivered_count: deliveredDriverIds.filter((id) => !!id).length,
+    pending_count: pendingDriverIds.filter((id) => !!id).length,
+  });
   emitRideCandidatesSummary(io, rideId);
 
   return true;
@@ -4862,6 +5209,17 @@ module.exports = (io, socket) => {
     });
 
     emitDriverInbox(io, driverId, "driver:rides:list");
+    const recoveryReport = emitPendingBidRequestsForDriver(
+      io,
+      driverId,
+      "driver:getRidesList"
+    );
+    console.log("[dispatch][driver:getRidesList][recovery]", {
+      driver_id: driverId,
+      attempted: recoveryReport.attempted,
+      delivered: recoveryReport.delivered,
+      pending: recoveryReport.pending,
+    });
 
     // Recovery must be explicit to avoid forcing driver UI into running screen.
     const shouldRecoverActiveRide =
