@@ -1284,6 +1284,25 @@ function hasRideDriverBeenNotified(rideId, driverId) {
   return !!(state && state.notified_at);
 }
 
+function hasRideDriverPushBeenNotified(rideId, driverId) {
+  const state = getRideDriverState(rideId, driverId);
+  return !!(state && state.push_notified_at);
+}
+
+function markRideDriverPushNotified(rideId, driverId, extra = {}) {
+  const safeRideId = toNumber(rideId);
+  const safeDriverId = toNumber(driverId);
+  if (!safeRideId || !safeDriverId) return null;
+
+  const currentState = getRideDriverState(safeRideId, safeDriverId);
+  const currentStatus = currentState?.status || "pending_emit";
+
+  return markRideDriverState(safeRideId, safeDriverId, currentStatus, {
+    ...extra,
+    push_notified_at: Date.now(),
+  });
+}
+
 function markRideDriverState(rideId, driverId, status, extra = {}) {
   const safeRideId = toNumber(rideId);
   const safeDriverId = toNumber(driverId);
@@ -1326,7 +1345,7 @@ function emitDispatchDeliverySummary(io, driverId, ridePayloadForDriver = null) 
   emitDriverInbox(io, safeDriverId, "driver:rides:list");
 }
 
-function emitDispatchNotificationSync(payload = {}) {
+async function emitDispatchNotificationSync(payload = {}) {
   const ridePayloadForDriver = payload?.ridePayloadForDriver;
   const safeDriverId = toNumber(payload?.driverId);
   const safeRideId = toNumber(payload?.rideId);
@@ -1341,9 +1360,12 @@ function emitDispatchNotificationSync(payload = {}) {
   const alreadyNotified =
     payload?.alreadyNotified === true ||
     hasRideDriverBeenNotified(safeRideId, safeDriverId);
-  if (alreadyNotified && !isPriceUpdatedFlag) return;
+  const alreadyPushNotified =
+    payload?.alreadyPushNotified === true ||
+    hasRideDriverPushBeenNotified(safeRideId, safeDriverId);
+  if ((alreadyNotified || alreadyPushNotified) && !isPriceUpdatedFlag) return;
 
-  void syncDriverUpdateListNotification({
+  const synced = await syncDriverUpdateListNotification({
     driverId: safeDriverId,
     rideId: safeRideId,
     serviceCategoryId: toNumber(ridePayloadForDriver?.service_category_id),
@@ -1398,6 +1420,14 @@ function emitDispatchNotificationSync(payload = {}) {
       toNumber(ridePayloadForDriver?.ride_details?.expires_at),
     triggerEvent: "ride:bidRequest",
   });
+
+  if (synced) {
+    markRideDriverPushNotified(safeRideId, safeDriverId, {
+      last_push_source: payload?.pushSource ?? "dispatch",
+      last_push_synced_at: Date.now(),
+      last_push_price_updated: isPriceUpdatedFlag ? 1 : 0,
+    });
+  }
 }
 
 function tryEmitBidRequestToDriver(
@@ -1441,6 +1471,14 @@ function tryEmitBidRequestToDriver(
       ...stateMeta,
       last_emit_reason: "room_empty",
     });
+    void emitDispatchNotificationSync({
+      rideId: safeRideId,
+      driverId: safeDriverId,
+      ridePayloadForDriver,
+      alreadyNotified: wasNotifiedBefore,
+      alreadyPushNotified: hasRideDriverPushBeenNotified(safeRideId, safeDriverId),
+      pushSource: "dispatch:room_empty",
+    });
     console.log("[dispatch][emit-miss][room-empty]", {
       ride_id: safeRideId,
       driver_id: safeDriverId,
@@ -1458,11 +1496,13 @@ function tryEmitBidRequestToDriver(
     last_emit_reason: "emitted_ok",
   });
   clearPendingBidEmitRetry(safeRideId, safeDriverId);
-  emitDispatchNotificationSync({
+  void emitDispatchNotificationSync({
     rideId: safeRideId,
     driverId: safeDriverId,
     ridePayloadForDriver,
     alreadyNotified: wasNotifiedBefore,
+    alreadyPushNotified: hasRideDriverPushBeenNotified(safeRideId, safeDriverId),
+    pushSource: "dispatch:emitted_ok",
   });
 
   console.log("[dispatch][emit-ok]", {
