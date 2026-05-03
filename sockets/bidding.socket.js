@@ -776,6 +776,8 @@ const normalizeDuration = (v) => toNumber(v);
 const getRideDurationRaw = (payload = null) => {
   if (!payload || typeof payload !== "object") return null;
   return pickFirstValue(
+    payload?.driver_to_pickup_distance_m,
+    payload?.meta?.driver_to_pickup_distance_m,
     payload?.ride_details?.duration,
     payload?.duration,
     payload?.meta?.duration,
@@ -897,8 +899,14 @@ const normalizeRideMetrics = (payload = {}) => {
 
   return {
     ...payload,
-    ...(duration !== null ? { duration, route_api_duration_min: duration } : {}),
-    ...(distanceKm !== null
+...(duration !== null
+  ? {
+      duration,
+      eta_min: duration,
+      route_api_duration_min: duration,
+      driver_to_pickup_duration_min: duration,
+    }
+  : {}),    ...(distanceKm !== null
       ? { distance: distanceKm, route_api_distance_km: distanceKm }
       : {}),
     ...(baseFare !== null ? { base_fare: baseFare } : {}),
@@ -4961,13 +4969,14 @@ const getAcceptedEtaMin = (payload = {}, rideSnapshot = null) => {
 
 const getFrontendRouteOverrideFromPayload = (payload = {}) => {
   const durationMin = pickFirstValue(
-      payload?.driver_to_pickup_distance_m, // 👈 أضفها أول شي
+    payload?.driver_to_pickup_distance_m,
     payload?.duration,
     payload?.driver_to_pickup_duration_min,
     payload?.driverToPickupDurationMin,
     payload?.ride_details?.duration,
     payload?.meta?.duration
   );
+
   const distanceKm = pickFirstValue(
     payload?.distance,
     payload?.route_api_distance_km,
@@ -4975,6 +4984,7 @@ const getFrontendRouteOverrideFromPayload = (payload = {}) => {
     payload?.ride_details?.route_api_distance_km,
     payload?.meta?.route_api_distance_km
   );
+
   const distanceM = pickFirstValue(
     payload?.driver_to_pickup_distance_m,
     payload?.meta?.driver_to_pickup_distance_m
