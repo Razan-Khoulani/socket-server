@@ -280,6 +280,150 @@ const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
     vehicle_make: vehicleCompany,
   };
 };
+const resolveDriverIdFromPayload = (payload = {}, explicitDriverId = null) => {
+  const p = payload && typeof payload === "object" ? payload : {};
+  const details =
+    p?.driver_details && typeof p.driver_details === "object" ? p.driver_details : {};
+  const rideDetails =
+    p?.ride_details && typeof p.ride_details === "object" ? p.ride_details : {};
+  const rideDriverDetails =
+    rideDetails?.driver_details && typeof rideDetails.driver_details === "object"
+      ? rideDetails.driver_details
+      : {};
+  const meta = p?.meta && typeof p.meta === "object" ? p.meta : {};
+
+  const identity = extractDriverIdentity(p, details, rideDetails, rideDriverDetails, meta);
+  let resolvedDriverId =
+    toNumber(explicitDriverId) ??
+    toNumber(p?.driver_id) ??
+    toNumber(details?.driver_id) ??
+    toNumber(rideDetails?.driver_id) ??
+    toNumber(rideDriverDetails?.driver_id) ??
+    identity?.provider_id ??
+    null;
+
+  const rideId = toNumber(p?.ride_id ?? rideDetails?.ride_id ?? null);
+  if (!resolvedDriverId && rideId) {
+    resolvedDriverId = toNumber(getActiveDriverByRide(rideId));
+  }
+
+  return resolvedDriverId ?? null;
+};
+const resolveDriverImageFromPayload = (payload = {}, explicitDriverId = null) => {
+  const p = payload && typeof payload === "object" ? payload : {};
+  const details =
+    p?.driver_details && typeof p.driver_details === "object" ? p.driver_details : {};
+  const rideDetails =
+    p?.ride_details && typeof p.ride_details === "object" ? p.ride_details : {};
+  const rideDriverDetails =
+    rideDetails?.driver_details && typeof rideDetails.driver_details === "object"
+      ? rideDetails.driver_details
+      : {};
+  const meta = p?.meta && typeof p.meta === "object" ? p.meta : {};
+
+  const driverId = resolveDriverIdFromPayload(p, explicitDriverId);
+  const memoryMeta = driverId ? driverLocationService.getMeta(driverId) || {} : {};
+
+  const rideId = toNumber(p?.ride_id ?? rideDetails?.ride_id ?? null);
+  const snapshot = rideId ? getFullRideSnapshot(rideId, driverId) : null;
+  const snapshotDetails =
+    snapshot?.driver_details && typeof snapshot.driver_details === "object"
+      ? snapshot.driver_details
+      : {};
+  const snapshotMeta =
+    snapshot?.meta && typeof snapshot.meta === "object" ? snapshot.meta : {};
+
+  return toTrimmedText(
+    pickFirstValue(
+      p?.driver_image,
+      p?.driver_image_url,
+      details?.driver_image,
+      details?.driver_image_url,
+      details?.profile_image,
+      details?.avatar,
+      details?.image,
+      rideDetails?.driver_image,
+      rideDetails?.driver_image_url,
+      rideDriverDetails?.driver_image,
+      rideDriverDetails?.driver_image_url,
+      rideDriverDetails?.profile_image,
+      rideDriverDetails?.avatar,
+      rideDriverDetails?.image,
+      meta?.driver_image,
+      meta?.driver_image_url,
+      meta?.profile_image,
+      meta?.avatar,
+      meta?.image,
+      snapshot?.driver_image,
+      snapshot?.driver_image_url,
+      snapshotDetails?.driver_image,
+      snapshotDetails?.driver_image_url,
+      snapshotDetails?.profile_image,
+      snapshotDetails?.avatar,
+      snapshotDetails?.image,
+      snapshotMeta?.driver_image,
+      snapshotMeta?.driver_image_url,
+      snapshotMeta?.profile_image,
+      snapshotMeta?.avatar,
+      snapshotMeta?.image,
+      memoryMeta?.driver_image,
+      memoryMeta?.driver_image_url,
+      memoryMeta?.profile_image,
+      memoryMeta?.avatar,
+      memoryMeta?.image
+    )
+  );
+};
+const withDriverImage = (payload = {}, explicitDriverId = null) => {
+  if (!payload || typeof payload !== "object") return payload;
+
+  const resolvedImage = resolveDriverImageFromPayload(payload, explicitDriverId);
+  if (!resolvedImage) return payload;
+
+  let patched = payload;
+  let changed = false;
+
+  if (!toTrimmedText(patched?.driver_image)) {
+    patched = { ...patched, driver_image: resolvedImage };
+    changed = true;
+  }
+  if (!toTrimmedText(patched?.driver_image_url)) {
+    patched = { ...patched, driver_image_url: resolvedImage };
+    changed = true;
+  }
+
+  if (patched?.driver_details && typeof patched.driver_details === "object") {
+    const existingDetails = patched.driver_details;
+    const nextDetails = {
+      ...existingDetails,
+      ...(toTrimmedText(existingDetails?.driver_image)
+        ? {}
+        : { driver_image: resolvedImage }),
+      ...(toTrimmedText(existingDetails?.driver_image_url)
+        ? {}
+        : { driver_image_url: resolvedImage }),
+    };
+    patched = { ...patched, driver_details: nextDetails };
+    changed = true;
+  }
+
+  if (patched?.ride_details && typeof patched.ride_details === "object") {
+    const existingRideDetails = patched.ride_details;
+    const nextRideDetails = {
+      ...existingRideDetails,
+      ...(toTrimmedText(existingRideDetails?.driver_image)
+        ? {}
+        : { driver_image: resolvedImage }),
+      ...(toTrimmedText(existingRideDetails?.driver_image_url)
+        ? {}
+        : { driver_image_url: resolvedImage }),
+    };
+    patched = { ...patched, ride_details: nextRideDetails };
+    changed = true;
+  }
+
+  return changed ? patched : payload;
+};
 const getRoomSocketCount = (io, roomName) => {
   if (!io || !roomName) return 0;
   const roomSet = io?.sockets?.adapter?.rooms?.get(roomName);
@@ -295,6 +439,8 @@ const DISPATCH_EMIT_RETRY_BASE_DELAY_MS = Number.isFinite(
 )
   ? Math.max(200, Number(process.env.DISPATCH_EMIT_RETRY_BASE_DELAY_MS))
   : 1200;
+const DEBUG_REMOVE_CANDIDATE_STACK =
+  String(process.env.DEBUG_REMOVE_CANDIDATE_STACK || "0") === "1";
 const pendingBidEmitRetryTimers = new Map(); // `${rideId}:${driverId}` -> timeout
 const pendingBidEmitRetryKey = (rideId, driverId) => `${rideId}:${driverId}`;
 
@@ -1392,11 +1538,14 @@ function isTerminalRideStatus(status) {
 }
 
 function removeDriverFromRideCandidates(io, rideId, driverId, options = {}) {
-  console.log("[removeDriverFromRideCandidates]", {
+  const tracePayload = {
     rideId,
     driverId,
-    stack: new Error().stack,
-  });
+  };
+  if (DEBUG_REMOVE_CANDIDATE_STACK) {
+    tracePayload.stack = new Error().stack;
+  }
+  console.log("[removeDriverFromRideCandidates]", tracePayload);
 
   const { emitSummary = true } = options || {};
   const set = rideCandidates.get(rideId);
@@ -1978,7 +2127,7 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
     sanitized.customer_image = null;
   }
 
-  return sanitized;
+  return withDriverImage(sanitized);
 };
 
 // ✅ rides cancelled (block dispatch)
@@ -2402,7 +2551,7 @@ const queuedOk = setDriverQueuedRide(driverId, {
       return;
     }
 
-const queuedPayload = {
+const queuedPayload = withDriverImage({
   ...(rideDetailsPayload && typeof rideDetailsPayload === "object"
     ? rideDetailsPayload
     : {}),
@@ -2413,7 +2562,7 @@ const queuedPayload = {
   offered_price: finalPrice,
   message: "Ride accepted and queued until current ride ends",
   at: Date.now(),
-};
+}, driverId);
 
 if (rideDetailsPayload) {
   queuedPayload.ride_details = rideDetailsPayload;
@@ -2436,14 +2585,14 @@ if (rideDetailsPayload) {
   clearActiveRideByDriver(driverId);
   setActiveRide(driverId, rideId);
 
-  const acceptedPayload = {
+  const acceptedPayload = withDriverImage({
     ride_id: rideId,
     driver_id: driverId,
     ...buildDriverIdentityPayload(resolvedDriverIdentity, driverId),
     offered_price: finalPrice,
     message,
     at: Date.now(),
-  };
+  }, driverId);
   if (rideDetailsPayload) acceptedPayload.ride_details = rideDetailsPayload;
 
   io.to(driverRoom(driverId)).emit("ride:userAccepted", acceptedPayload);
@@ -2452,11 +2601,11 @@ if (rideDetailsPayload) {
     io,
     rideId,
     "ride:trackingStarted",
-    {
+    withDriverImage({
       ride_id: rideId,
       driver_id: driverId,
       at: Date.now(),
-    },
+    }, driverId),
     userId
   );
   closeRideBidding(io, rideId, { clearUser: false, preserveSnapshot: true });
@@ -3143,6 +3292,7 @@ function resolveRideAudienceUserId(rideId, explicitUserId = null) {
 function emitToRideAudience(io, rideId, eventName, payload, explicitUserId = null) {
   const safeRideId = toNumber(rideId);
   if (!safeRideId) return;
+  const safePayload = withDriverImage(payload);
 
   const audienceUserId = resolveRideAudienceUserId(safeRideId, explicitUserId);
   const rideRoomName = rideRoom(safeRideId);
@@ -3155,7 +3305,7 @@ function emitToRideAudience(io, rideId, eventName, payload, explicitUserId = nul
   }
 
   if (eventName === "ride:newBid") {
-    const snapshot = buildNewBidEmitDebugSnapshot(payload);
+    const snapshot = buildNewBidEmitDebugSnapshot(safePayload);
     console.log("[emit][ride:newBid]", {
       ...snapshot,
       audience_user_id: audienceUserId ?? null,
@@ -3167,7 +3317,7 @@ function emitToRideAudience(io, rideId, eventName, payload, explicitUserId = nul
     });
   }
 
-  emitter.emit(eventName, payload);
+  emitter.emit(eventName, safePayload);
 }
 
 async function expandRideDispatchRadius(io, rideId, reason = "timeout") {
@@ -5026,7 +5176,7 @@ function activateQueuedRideForDriver(io, driverId) {
   const offeredPrice = toNumber(queued.offered_price);
   const userId = resolveRideAudienceUserId(rideId);
 
-  const payload = {
+  const payload = withDriverImage({
     ...(rideDetailsPayload && typeof rideDetailsPayload === "object"
       ? rideDetailsPayload
       : {}),
@@ -5035,7 +5185,7 @@ function activateQueuedRideForDriver(io, driverId) {
     offered_price: offeredPrice,
     message: "Queued ride is now active",
     at: Date.now(),
-  };
+  }, driverId);
 
   if (rideDetailsPayload) {
     payload.ride_details = rideDetailsPayload;
@@ -5047,7 +5197,7 @@ function activateQueuedRideForDriver(io, driverId) {
   io.to(driverRoom(driverId)).emit("ride:userAccepted", payload);
   emitToRideAudience(io, rideId, "ride:userAccepted", payload, userId);
 
-  const trackingPayload = {
+  const trackingPayload = withDriverImage({
     ...(rideDetailsPayload && typeof rideDetailsPayload === "object"
       ? rideDetailsPayload
       : {}),
@@ -5056,7 +5206,7 @@ function activateQueuedRideForDriver(io, driverId) {
     offered_price: offeredPrice,
     message: "Queued ride tracking started",
     at: Date.now(),
-  };
+  }, driverId);
 
   if (rideDetailsPayload) {
     trackingPayload.ride_details = rideDetailsPayload;
@@ -5096,7 +5246,7 @@ function emitDriverRideRecovery(io, driverId) {
       getRideSnapshotForRedispatch(queuedRideId) ??
       null;
 
-    const payload = {
+    const payload = withDriverImage({
       ...(snapshot && typeof snapshot === "object" ? snapshot : {}),
       ride_id: queuedRideId,
       driver_id: driverId,
@@ -5104,7 +5254,7 @@ function emitDriverRideRecovery(io, driverId) {
       offered_price: toNumber(queued.offered_price),
       message: queued.message ?? "Ride accepted and queued until current ride ends",
       at: Date.now(),
-    };
+    }, driverId);
 
     if (snapshot) {
       payload.ride_details = snapshot;
@@ -5135,14 +5285,14 @@ function emitDriverRideRecovery(io, driverId) {
 
   const userId = resolveRideAudienceUserId(activeRideId);
 
-  const payload = {
+  const payload = withDriverImage({
     ...(snapshot && typeof snapshot === "object" ? snapshot : {}),
     ride_id: activeRideId,
     driver_id: driverId,
     offered_price: toNumber(snapshot?.queued_offer_price ?? snapshot?.offered_price ?? null),
     message: "Queued ride is now active",
     at: Date.now(),
-  };
+  }, driverId);
 
   if (snapshot) {
     payload.ride_details = snapshot;
@@ -5153,14 +5303,14 @@ function emitDriverRideRecovery(io, driverId) {
   emitToRideAudience(io, activeRideId, "ride:queueActivated", payload, userId);
   emitToRideAudience(io, activeRideId, "ride:userAccepted", payload, userId);
 
-  const trackingPayload = {
+  const trackingPayload = withDriverImage({
     ...(snapshot && typeof snapshot === "object" ? snapshot : {}),
     ride_id: activeRideId,
     driver_id: driverId,
     offered_price: toNumber(snapshot?.queued_offer_price ?? snapshot?.offered_price ?? null),
     message: "Queued ride tracking started",
     at: Date.now(),
-  };
+  }, driverId);
 
   if (snapshot) {
     trackingPayload.ride_details = snapshot;
@@ -6091,8 +6241,11 @@ const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
       vehicle_number: driverMeta?.plat_no ?? null,
     });
 
+    const driverImageMissing = toTrimmedText(driverDetails?.driver_image) == null;
     const shouldFetchDriverMeta =
-      (driverIdentity.driver_detail_id === null || isDriverDetailsEmpty(driverDetails)) &&
+      (driverIdentity.driver_detail_id === null ||
+        isDriverDetailsEmpty(driverDetails) ||
+        driverImageMissing) &&
       driverServiceId &&
       accessToken;
 
