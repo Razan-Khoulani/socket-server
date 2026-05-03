@@ -1110,6 +1110,32 @@ const normalizeLegacyRideNewPayload = (incoming = {}) => {
       payload.destination_address ?? payload.dropoff_address ?? null,
     service_category_id:
       payload.service_category_id ?? payload.service_cat_id ?? null,
+    user_bid_price:
+      payload.user_bid_price ??
+      payload.price ??
+      payload.offered_price ??
+      payload.bid_price ??
+      null,
+    min_fare_amount:
+      payload.min_fare_amount ??
+      payload.min_price ??
+      payload.min_fare ??
+      null,
+    max_fare_amount:
+      payload.max_fare_amount ??
+      payload.max_price ??
+      payload.max_fare ??
+      null,
+    min_price:
+      payload.min_price ??
+      payload.min_fare_amount ??
+      payload.min_fare ??
+      null,
+    max_price:
+      payload.max_price ??
+      payload.max_fare_amount ??
+      payload.max_fare ??
+      null,
     dispatch_timeout_s: payload.dispatch_timeout_s ?? payload.request_timeout ?? null,
     force_new_search_window: 1,
   };

@@ -3689,8 +3689,16 @@ async function dispatchToNearbyDrivers(io, data) {
   const long = toNumber(data?.pickup_long);
 
   const serviceTypeId = toNumber(data?.service_type_id) ?? null;
-  const base = toNumber(data?.user_bid_price);
-  const min = toNumber(data?.min_fare_amount);
+  const base =
+    toNumber(data?.user_bid_price) ??
+    toNumber(data?.price) ??
+    toNumber(data?.offered_price) ??
+    null;
+  const min =
+    toNumber(data?.min_fare_amount) ??
+    toNumber(data?.min_price) ??
+    toNumber(data?.min_fare) ??
+    null;
   const priceBounds = getRidePriceBounds(data);
   const legacyMinFareAmount =
     min !== null && min > 0
