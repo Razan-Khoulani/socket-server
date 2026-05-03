@@ -1358,12 +1358,28 @@ async function emitDispatchNotificationSync(payload = {}) {
     toNumber(ridePayloadForDriver?.updatedPrice) !== null;
 
   const alreadyNotified =
-    payload?.alreadyNotified === true ||
-    hasRideDriverBeenNotified(safeRideId, safeDriverId);
+    payload?.alreadyNotified === true
+      ? true
+      : payload?.alreadyNotified === false
+      ? false
+      : hasRideDriverBeenNotified(safeRideId, safeDriverId);
   const alreadyPushNotified =
-    payload?.alreadyPushNotified === true ||
-    hasRideDriverPushBeenNotified(safeRideId, safeDriverId);
-  if ((alreadyNotified || alreadyPushNotified) && !isPriceUpdatedFlag) return;
+    payload?.alreadyPushNotified === true
+      ? true
+      : payload?.alreadyPushNotified === false
+      ? false
+      : hasRideDriverPushBeenNotified(safeRideId, safeDriverId);
+  if ((alreadyNotified || alreadyPushNotified) && !isPriceUpdatedFlag) {
+    console.log("[driver:rides:list][push] skipped: already-notified", {
+      driver_id: safeDriverId,
+      ride_id: safeRideId,
+      already_notified: alreadyNotified,
+      already_push_notified: alreadyPushNotified,
+      is_price_updated: isPriceUpdatedFlag,
+      push_source: payload?.pushSource ?? null,
+    });
+    return;
+  }
 
   const synced = await syncDriverUpdateListNotification({
     driverId: safeDriverId,
