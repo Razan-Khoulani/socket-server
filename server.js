@@ -1088,6 +1088,62 @@ app.post("/events/internal/driver-location", async (req, res) => {
   res.json({ status: 1 });
 });
 
+const normalizeLegacyRideNewPayload = (incoming = {}) => {
+  const payload = incoming && typeof incoming === "object" ? incoming : {};
+  const legacyDriverIds = Array.isArray(payload.driver_ids)
+    ? payload.driver_ids
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0)
+    : [];
+
+  const normalized = {
+    ...payload,
+    ride_id: payload.ride_id ?? payload.request_id ?? payload.id ?? null,
+    user_id: payload.user_id ?? payload.customer_id ?? payload.passenger_id ?? null,
+    user_name: payload.user_name ?? payload.customer_name ?? null,
+    pickup_long: payload.pickup_long ?? payload.pickup_lng ?? null,
+    destination_lat:
+      payload.destination_lat ?? payload.dropoff_lat ?? payload.drop_lat ?? null,
+    destination_long:
+      payload.destination_long ?? payload.dropoff_lng ?? payload.drop_lng ?? null,
+    destination_address:
+      payload.destination_address ?? payload.dropoff_address ?? null,
+    service_category_id:
+      payload.service_category_id ?? payload.service_cat_id ?? null,
+    dispatch_timeout_s: payload.dispatch_timeout_s ?? payload.request_timeout ?? null,
+    force_new_search_window: 1,
+  };
+
+  if (legacyDriverIds.length > 0) {
+    normalized.driver_ids = legacyDriverIds;
+  }
+
+  return normalized;
+};
+
+app.post("/ride/new", async (req, res) => {
+  const dispatchPayload = normalizeLegacyRideNewPayload(req.body);
+
+  console.log("[ride/new][compat] Incoming legacy request", {
+    ride_id: dispatchPayload?.ride_id ?? null,
+    user_id: dispatchPayload?.user_id ?? null,
+    pickup_lat: dispatchPayload?.pickup_lat ?? null,
+    pickup_long: dispatchPayload?.pickup_long ?? null,
+    service_type_id: dispatchPayload?.service_type_id ?? null,
+    driver_ids_count: Array.isArray(dispatchPayload?.driver_ids)
+      ? dispatchPayload.driver_ids.length
+      : 0,
+  });
+
+  try {
+    const ok = await biddingSocket.restartRideDispatch(io, dispatchPayload);
+    res.json({ status: ok ? 1 : 0, compat: 1 });
+  } catch (e) {
+    console.error("[ride/new][compat] Failed:", e.message);
+    res.status(500).json({ status: 0, message: "Dispatch failed", compat: 1 });
+  }
+});
+
 app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
   const dispatchPayload =
     req.body && typeof req.body === "object"

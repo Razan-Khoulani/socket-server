@@ -1115,6 +1115,15 @@ async function syncDriverUpdateListNotification({
     return false;
   }
 
+  const resolvedMinPrice =
+    toNumber(minPrice) ?? toNumber(minFare) ?? null;
+  const resolvedMaxPrice =
+    toNumber(maxPrice) ?? toNumber(maxFare) ?? null;
+  const resolvedMinFare =
+    toNumber(minFare) ?? resolvedMinPrice;
+  const resolvedMaxFare =
+    toNumber(maxFare) ?? resolvedMaxPrice;
+
   try {
     await axios.post(
       `${LARAVEL_BASE_URL}${LARAVEL_DRIVER_UPDATE_LIST_NOTIFICATION_PATH}`,
@@ -1122,10 +1131,10 @@ async function syncDriverUpdateListNotification({
         driver_id: driverId,
         ride_id: rideId,
         service_category_id: serviceCategoryId ?? null,
-        min_price: toNumber(minPrice),
-        max_price: toNumber(maxPrice),
-        min_fare: toNumber(minFare),
-        max_fare: toNumber(maxFare),
+        min_price: resolvedMinPrice,
+        max_price: resolvedMaxPrice,
+        min_fare: resolvedMinFare,
+        max_fare: resolvedMaxFare,
         route_api_distance_km: toNumber(routeApiDistanceKm),
         duration: toNumber(duration),
         eta_min: toNumber(etaMin),
@@ -1146,8 +1155,10 @@ async function syncDriverUpdateListNotification({
       driver_id: driverId,
       ride_id: rideId,
       service_category_id: serviceCategoryId ?? null,
-      min_price: toNumber(minPrice),
-      max_price: toNumber(maxPrice),
+      min_price: resolvedMinPrice,
+      max_price: resolvedMaxPrice,
+      min_fare: resolvedMinFare,
+      max_fare: resolvedMaxFare,
       route_api_distance_km: toNumber(routeApiDistanceKm),
       duration: toNumber(duration),
       eta_min: toNumber(etaMin),
@@ -1161,8 +1172,10 @@ async function syncDriverUpdateListNotification({
       driver_id: driverId,
       ride_id: rideId,
       service_category_id: serviceCategoryId ?? null,
-      min_price: toNumber(minPrice),
-      max_price: toNumber(maxPrice),
+      min_price: resolvedMinPrice,
+      max_price: resolvedMaxPrice,
+      min_fare: resolvedMinFare,
+      max_fare: resolvedMaxFare,
       route_api_distance_km: toNumber(routeApiDistanceKm),
       duration: toNumber(duration),
       eta_min: toNumber(etaMin),
@@ -1311,10 +1324,16 @@ function emitDispatchNotificationSync(payload = {}) {
   const safeRideId = toNumber(payload?.rideId);
   if (!safeDriverId || !safeRideId || !ridePayloadForDriver) return;
 
+  const isPriceUpdatedFlag =
+    ridePayloadForDriver?.isPriceUpdated === true ||
+    ridePayloadForDriver?.isPriceUpdated === 1 ||
+    ridePayloadForDriver?.isPriceUpdated === "1" ||
+    toNumber(ridePayloadForDriver?.updatedPrice) !== null;
+
   const alreadyNotified =
     payload?.alreadyNotified === true ||
     hasRideDriverBeenNotified(safeRideId, safeDriverId);
-  if (alreadyNotified) return;
+  if (alreadyNotified && !isPriceUpdatedFlag) return;
 
   void syncDriverUpdateListNotification({
     driverId: safeDriverId,
@@ -1322,16 +1341,28 @@ function emitDispatchNotificationSync(payload = {}) {
     serviceCategoryId: toNumber(ridePayloadForDriver?.service_category_id),
     minPrice:
       toNumber(ridePayloadForDriver?.min_price) ??
-      toNumber(ridePayloadForDriver?.ride_details?.min_price),
+      toNumber(ridePayloadForDriver?.ride_details?.min_price) ??
+      toNumber(ridePayloadForDriver?.min_fare) ??
+      toNumber(ridePayloadForDriver?.ride_details?.min_fare) ??
+      toNumber(ridePayloadForDriver?.min_fare_amount),
     maxPrice:
       toNumber(ridePayloadForDriver?.max_price) ??
-      toNumber(ridePayloadForDriver?.ride_details?.max_price),
+      toNumber(ridePayloadForDriver?.ride_details?.max_price) ??
+      toNumber(ridePayloadForDriver?.max_fare) ??
+      toNumber(ridePayloadForDriver?.ride_details?.max_fare) ??
+      toNumber(ridePayloadForDriver?.max_fare_amount),
     minFare:
       toNumber(ridePayloadForDriver?.min_fare) ??
-      toNumber(ridePayloadForDriver?.ride_details?.min_fare),
+      toNumber(ridePayloadForDriver?.ride_details?.min_fare) ??
+      toNumber(ridePayloadForDriver?.min_price) ??
+      toNumber(ridePayloadForDriver?.ride_details?.min_price) ??
+      toNumber(ridePayloadForDriver?.min_fare_amount),
     maxFare:
       toNumber(ridePayloadForDriver?.max_fare) ??
-      toNumber(ridePayloadForDriver?.ride_details?.max_fare),
+      toNumber(ridePayloadForDriver?.ride_details?.max_fare) ??
+      toNumber(ridePayloadForDriver?.max_price) ??
+      toNumber(ridePayloadForDriver?.ride_details?.max_price) ??
+      toNumber(ridePayloadForDriver?.max_fare_amount),
     routeApiDistanceKm:
       toNumber(ridePayloadForDriver?.route_api_distance_km) ??
       toNumber(ridePayloadForDriver?.ride_details?.route_api_distance_km),
@@ -3853,12 +3884,28 @@ async function dispatchToNearbyDrivers(io, data) {
     return canDriverReceiveNewRideRequests(dId);
   });
 
- const roadFiltered = await filterDriversByRoadRadius(
-  availableAir,
-  lat,
-  long,
-  roadRadius
-);
+  const targetDriverIdSet = Array.isArray(data?.driver_ids)
+    ? new Set(
+        data.driver_ids
+          .map((value) => toNumber(value))
+          .filter((value) => !!value)
+      )
+    : null;
+
+  const roadFilteredRaw = await filterDriversByRoadRadius(
+    availableAir,
+    lat,
+    long,
+    roadRadius
+  );
+
+  const roadFiltered =
+    targetDriverIdSet && targetDriverIdSet.size > 0
+      ? availableAir.filter((driver) => {
+          const driverId = toNumber(driver?.driver_id);
+          return !!driverId && targetDriverIdSet.has(driverId);
+        })
+      : roadFilteredRaw;
 
 const existingCandidateSet = rideCandidates.get(rideId) ?? new Set();
 
@@ -3945,8 +3992,11 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   dispatch_total_stages: radiusPlan.stagesMeters.length,
   next_radius_m: radiusPlan.nextRadiusMeters ?? null,
   service_type_id: serviceTypeId ?? null,
+  target_driver_filter_applied: !!(targetDriverIdSet && targetDriverIdSet.size > 0),
+  target_driver_ids_count: targetDriverIdSet ? targetDriverIdSet.size : 0,
   nearby_air: nearbyAir.length,
   available_air: availableAir.length,
+  road_filtered_raw: roadFilteredRaw.length,
   road_filtered: roadFiltered.length,
   dispatch_eligible: eligibleForDispatch.length,
   nearby_smoking_ready: nearbySmokingReady,
