@@ -3511,6 +3511,7 @@ async function restartRideDispatch(io, payload = {}) {
   removeRideFromAllInboxes(io, safeRideId, {
     preserveSnapshot: true,
     preserveUser: true,
+    emitUnavailable: false,
   });
 
   const restartPayload = {
@@ -3536,6 +3537,7 @@ function removeRideFromAllInboxes(io, rideId, options = {}) {
   const {
     preserveSnapshot = false,
     preserveUser = false,
+    emitUnavailable = true,
     retryStateTtlMs = RETRY_STATE_TTL_MS,
   } = options || {};
   cancelRideTimeout(rideId);
@@ -3571,7 +3573,9 @@ function removeRideFromAllInboxes(io, rideId, options = {}) {
       if (box.size === 0) driverRideInbox.delete(driverId);
 
       emitDriverPatch(io, driverId, [{ op: "remove", ride_id: rideId }]);
-      emitRideUnavailable(io, driverId, rideId);
+      if (emitUnavailable) {
+        emitRideUnavailable(io, driverId, rideId);
+      }
     }
   }
 
@@ -3584,7 +3588,9 @@ function removeRideFromAllInboxes(io, rideId, options = {}) {
       driver_id: driverId,
       at: Date.now(),
     });
-    emitRideUnavailable(io, driverId, rideId);
+    if (emitUnavailable) {
+      emitRideUnavailable(io, driverId, rideId);
+    }
   }
 
   rideCandidates.delete(rideId);
