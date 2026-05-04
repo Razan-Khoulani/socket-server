@@ -1102,6 +1102,7 @@ async function syncDriverUpdateListNotification({
   serviceCategoryId,
   triggerEvent,
   dispatchPayload,
+  rideModel,
   minPrice,
   maxPrice,
   minFare,
@@ -1136,6 +1137,10 @@ async function syncDriverUpdateListNotification({
     dispatchPayload && typeof dispatchPayload === "object"
       ? sanitizeRidePayloadForClient(dispatchPayload)
       : null;
+  const normalizedRideModel =
+    rideModel && typeof rideModel === "object"
+      ? sanitizeRidePayloadForClient(rideModel)
+      : null;
 
   try {
     await axios.post(
@@ -1146,6 +1151,8 @@ async function syncDriverUpdateListNotification({
         service_category_id: serviceCategoryId ?? null,
         min_price: resolvedMinPrice,
         max_price: resolvedMaxPrice,
+        MIN_PRICE: resolvedMinPrice,
+        MAX_PRICE: resolvedMaxPrice,
         min_fare: resolvedMinFare,
         max_fare: resolvedMaxFare,
         route_api_distance_km: toNumber(routeApiDistanceKm),
@@ -1161,6 +1168,7 @@ async function syncDriverUpdateListNotification({
         trigger_event: triggerEvent ?? "ride:bidRequest",
         paired_event: "driver:rides:list",
         dispatch_payload: normalizedDispatchPayload,
+        ride_model: normalizedRideModel,
       },
       { timeout: 7000 }
     );
@@ -1183,6 +1191,10 @@ async function syncDriverUpdateListNotification({
       dispatch_payload_keys: normalizedDispatchPayload
         ? Object.keys(normalizedDispatchPayload).length
         : 0,
+      has_ride_model: !!normalizedRideModel,
+      ride_model_keys: normalizedRideModel
+        ? Object.keys(normalizedRideModel).length
+        : 0,
     });
     return true;
   } catch (error) {
@@ -1203,6 +1215,10 @@ async function syncDriverUpdateListNotification({
       has_dispatch_payload: !!normalizedDispatchPayload,
       dispatch_payload_keys: normalizedDispatchPayload
         ? Object.keys(normalizedDispatchPayload).length
+        : 0,
+      has_ride_model: !!normalizedRideModel,
+      ride_model_keys: normalizedRideModel
+        ? Object.keys(normalizedRideModel).length
         : 0,
       error: error?.response?.data || error?.message || error,
     });
@@ -1403,6 +1419,7 @@ async function emitDispatchNotificationSync(payload = {}) {
     driverId: safeDriverId,
     rideId: safeRideId,
     serviceCategoryId: toNumber(ridePayloadForDriver?.service_category_id),
+    rideModel: bidRequestPayload ?? ridePayloadForDriver ?? null,
     minPrice:
       toNumber(ridePayloadForDriver?.min_price) ??
       toNumber(ridePayloadForDriver?.ride_details?.min_price) ??
@@ -4233,6 +4250,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     base_fare: priceBounds.base_fare,
     min_price: priceBounds.min_price,
     max_price: priceBounds.max_price,
+    MIN_PRICE: priceBounds.min_price,
+    MAX_PRICE: priceBounds.max_price,
     min_fare: priceBounds.min_price,
     max_fare: priceBounds.max_price,
 
@@ -4260,6 +4279,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       base_fare: priceBounds.base_fare,
       min_price: priceBounds.min_price,
       max_price: priceBounds.max_price,
+      MIN_PRICE: priceBounds.min_price,
+      MAX_PRICE: priceBounds.max_price,
       min_fare: priceBounds.min_price,
       max_fare: priceBounds.max_price,
       min_fare: priceBounds.min_price,
@@ -4329,6 +4350,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         base_fare: priceBounds.base_fare,
         min_price: priceBounds.min_price,
         max_price: priceBounds.max_price,
+        MIN_PRICE: priceBounds.min_price,
+        MAX_PRICE: priceBounds.max_price,
         min_fare: priceBounds.min_price,
         max_fare: priceBounds.max_price,
         service_type_id: serviceTypeId,
@@ -4355,6 +4378,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
           base_fare: priceBounds.base_fare,
           min_price: priceBounds.min_price,
           max_price: priceBounds.max_price,
+          MIN_PRICE: priceBounds.min_price,
+          MAX_PRICE: priceBounds.max_price,
           min_fare: priceBounds.min_price,
           max_fare: priceBounds.max_price,
           service_type_id: serviceTypeId,
@@ -4495,6 +4520,10 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       base_fare: priceBounds.base_fare,
       min_price: priceBounds.min_price,
       max_price: priceBounds.max_price,
+      MIN_PRICE: priceBounds.min_price,
+      MAX_PRICE: priceBounds.max_price,
+      min_fare: priceBounds.min_price,
+      max_fare: priceBounds.max_price,
 
       user_id: bidReqUserId,
       user_name: bidReqUserName,
