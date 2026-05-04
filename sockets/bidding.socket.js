@@ -1141,35 +1141,42 @@ async function syncDriverUpdateListNotification({
     rideModel && typeof rideModel === "object"
       ? sanitizeRidePayloadForClient(rideModel)
       : null;
+  const laravelSyncPayload = {
+    driver_id: driverId,
+    ride_id: rideId,
+    service_category_id: serviceCategoryId ?? null,
+    min_price: resolvedMinPrice,
+    max_price: resolvedMaxPrice,
+    MIN_PRICE: resolvedMinPrice,
+    MAX_PRICE: resolvedMaxPrice,
+    min_fare: resolvedMinFare,
+    max_fare: resolvedMaxFare,
+    route_api_distance_km: toNumber(routeApiDistanceKm),
+    duration: toNumber(duration),
+    eta_min: toNumber(etaMin),
+    additional_remarks:
+      additionalRemarks === null || additionalRemarks === undefined
+        ? null
+        : String(additionalRemarks),
+    isPriceUpdated: isPriceUpdated ? 1 : 0,
+    server_time: toNumber(serverTime),
+    expires_at: toNumber(expiresAt),
+    trigger_event: triggerEvent ?? "ride:bidRequest",
+    paired_event: "driver:rides:list",
+    dispatch_payload: normalizedDispatchPayload,
+    ride_model: normalizedRideModel,
+  };
+  console.log("[driver:rides:list][push] Laravel sync request", {
+    driver_id: driverId,
+    ride_id: rideId,
+    payload_bytes: Buffer.byteLength(JSON.stringify(laravelSyncPayload), "utf8"),
+    payload: laravelSyncPayload,
+  });
 
   try {
     await axios.post(
       `${LARAVEL_BASE_URL}${LARAVEL_DRIVER_UPDATE_LIST_NOTIFICATION_PATH}`,
-      {
-        driver_id: driverId,
-        ride_id: rideId,
-        service_category_id: serviceCategoryId ?? null,
-        min_price: resolvedMinPrice,
-        max_price: resolvedMaxPrice,
-        MIN_PRICE: resolvedMinPrice,
-        MAX_PRICE: resolvedMaxPrice,
-        min_fare: resolvedMinFare,
-        max_fare: resolvedMaxFare,
-        route_api_distance_km: toNumber(routeApiDistanceKm),
-        duration: toNumber(duration),
-        eta_min: toNumber(etaMin),
-        additional_remarks:
-          additionalRemarks === null || additionalRemarks === undefined
-            ? null
-            : String(additionalRemarks),
-        isPriceUpdated: isPriceUpdated ? 1 : 0,
-        server_time: toNumber(serverTime),
-        expires_at: toNumber(expiresAt),
-        trigger_event: triggerEvent ?? "ride:bidRequest",
-        paired_event: "driver:rides:list",
-        dispatch_payload: normalizedDispatchPayload,
-        ride_model: normalizedRideModel,
-      },
+      laravelSyncPayload,
       { timeout: 7000 }
     );
 

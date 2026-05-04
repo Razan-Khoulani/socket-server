@@ -188,6 +188,7 @@ const fetchDriverAdminProfile = async ({ driverId, driverServiceId }) => {
 const getDriverAdminProfile = async ({
   driverId = null,
   driverServiceId = null,
+  forceRefresh = false,
 } = {}) => {
   const safeDriverId = toNumber(driverId);
   const safeDriverServiceId = toNumber(driverServiceId);
@@ -201,9 +202,11 @@ const getDriverAdminProfile = async ({
     safeDriverId ? `driver:${safeDriverId}` : null,
   ].filter(Boolean);
 
-  for (const cacheKey of cacheKeys) {
-    const cached = getCachedProfile(cacheKey);
-    if (cached) return cached;
+  if (!forceRefresh) {
+    for (const cacheKey of cacheKeys) {
+      const cached = getCachedProfile(cacheKey);
+      if (cached) return cached;
+    }
   }
 
   const profile = await fetchDriverAdminProfile({

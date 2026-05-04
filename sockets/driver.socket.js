@@ -11,6 +11,9 @@ const {
 } = require("../store/rideRoutes.store");
 const { getDistanceMeters } = require("../utils/geo.util");
 const { emitAdminDriverUpdate } = require("../services/adminDriverFeed.service");
+const {
+  getDriverAdminProfile,
+} = require("../services/adminDriverProfile.service");
 const biddingSocket = require("./bidding.socket");
 const ENABLE_RIDE_TRACKING_SERVICE =
   process.env.ENABLE_RIDE_TRACKING_SERVICE === "1";
@@ -26,6 +29,11 @@ const LARAVEL_BASE_URL =
   process.env.LARAVEL_URL ||
   "https://aiactive.co.uk/backend/backend-laravel/public";
 const LARAVEL_TIMEOUT_MS = 7000;
+const DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS = Number.isFinite(
+  Number(process.env.DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS)
+)
+  ? Math.max(10_000, Number(process.env.DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS))
+  : 30_000;
 const extraDistanceSessions = new Map(); // rideId -> { driverId, acceptedAt, baselineRoutePointCount, baselineTotalDistanceKm, acceptedLat, acceptedLong, settled }
 const STATUS_DEDUPE_TTL_MS = Number.isFinite(
   Number(process.env.STATUS_DEDUPE_TTL_MS)
@@ -212,6 +220,68 @@ module.exports = (io, socket) => {
     const n = toNumber(value);
     if (n == null) return null;
     return Math.round(n * 100) / 100;
+  };
+
+  const syncDriverAdminWalletMeta = async (
+    driverId,
+    { driverServiceId = null, forceRefresh = true } = {}
+  ) => {
+    const safeDriverId = toNumber(driverId);
+    if (!safeDriverId) return null;
+
+    const currentMeta = driverLocationService.getMeta(safeDriverId) || {};
+    const safeDriverServiceId = toNumber(
+      driverServiceId ?? currentMeta?.driver_service_id ?? null
+    );
+
+    try {
+      const profile = await getDriverAdminProfile({
+        driverId: safeDriverId,
+        driverServiceId: safeDriverServiceId,
+        forceRefresh,
+      });
+
+      if (!profile || typeof profile !== "object") {
+        return currentMeta;
+      }
+
+      const mergedMeta = {
+        ...currentMeta,
+        ...profile,
+        wallet_checked_at: Date.now(),
+        updatedAt: Date.now(),
+      };
+      driverLocationService.updateMeta(safeDriverId, mergedMeta);
+      return mergedMeta;
+    } catch (error) {
+      console.warn("[driver-wallet-sync] admin profile sync failed", {
+        driver_id: safeDriverId,
+        driver_service_id: safeDriverServiceId,
+        error: error?.message || error,
+      });
+      return currentMeta;
+    }
+  };
+
+  const syncDriverAdminWalletMetaIfStale = async (driverId, driverServiceId = null) => {
+    const safeDriverId = toNumber(driverId);
+    if (!safeDriverId) return null;
+
+    const meta = driverLocationService.getMeta(safeDriverId) || {};
+    const hasWalletFlag =
+      meta?.not_valid_wallet_balance !== undefined &&
+      meta?.not_valid_wallet_balance !== null;
+    const lastCheckedAt = toNumber(meta?.wallet_checked_at ?? null);
+    const shouldRefresh =
+      !hasWalletFlag ||
+      !Number.isFinite(lastCheckedAt) ||
+      Date.now() - lastCheckedAt >= DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS;
+
+    if (!shouldRefresh) return meta;
+    return syncDriverAdminWalletMeta(safeDriverId, {
+      driverServiceId,
+      forceRefresh: true,
+    });
   };
 
   const parseLatLongString = (value) => {
@@ -611,6 +681,13 @@ module.exports = (io, socket) => {
     }
 
     // ✅ ابعث المرشحين مباشرة عند أونلاين
+    // Sync wallet/block flags from Laravel even when update-current-status
+    // was skipped because access_token was missing in driver-online payload.
+    await syncDriverAdminWalletMeta(driverId, {
+      driverServiceId: socket.driverServiceId ?? driver_service_id ?? null,
+      forceRefresh: true,
+    });
+
     emitCandidatesSummaryForDriver(driverId);
     emitAdminDriverUpdate(io, driverId);
     socket.emit("driver:ready", {
