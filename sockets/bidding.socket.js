@@ -124,6 +124,58 @@ const pickFirstValue = (...values) => {
   }
   return null;
 };
+const parseMaybeJsonObject = (value) => {
+  if (!value) return null;
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+};
+const getNestedRidePayload = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return null;
+  return (
+    parseMaybeJsonObject(payload?.ride) ??
+    parseMaybeJsonObject(payload?.ride_data) ??
+    parseMaybeJsonObject(payload?.ride_model) ??
+    null
+  );
+};
+const getRideIdFromDriverPayload = (payload = {}) => {
+  const nestedRide = getNestedRidePayload(payload);
+  return pickFirstValue(
+    toNumber(payload?.ride_id),
+    toNumber(payload?.request_id),
+    toNumber(payload?.rideId),
+    toNumber(nestedRide?.ride_id),
+    toNumber(nestedRide?.request_id),
+    toNumber(payload?.ride_details?.ride_id),
+    toNumber(payload?.meta?.ride_id)
+  );
+};
+const getOfferedPriceFromDriverPayload = (payload = {}) => {
+  const nestedRide = getNestedRidePayload(payload);
+  return pickFirstValue(
+    toNumber(payload?.offered_price),
+    toNumber(payload?.price),
+    toNumber(payload?.user_bid_price),
+    toNumber(payload?.offer_price),
+    toNumber(payload?.bid_price),
+    toNumber(payload?.amount),
+    toNumber(nestedRide?.offered_price),
+    toNumber(nestedRide?.price),
+    toNumber(nestedRide?.user_bid_price),
+    toNumber(payload?.ride_details?.offered_price),
+    toNumber(payload?.ride_details?.price),
+    toNumber(payload?.ride_details?.user_bid_price),
+    toNumber(payload?.meta?.offered_price),
+    toNumber(payload?.meta?.price),
+    toNumber(payload?.meta?.user_bid_price)
+  );
+};
 const extractDriverIdentity = (...sources) => {
   let providerId = null;
   let driverServiceId = null;
@@ -5896,15 +5948,17 @@ socket.emit("ride:candidatesSummary", {
 
   // ✅ إذا السائق قبل العرض
   socket.on("driver:acceptOffer", async (payload) => {
+    const resolvedRideId = getRideIdFromDriverPayload(payload);
+    const resolvedOfferedPrice = getOfferedPriceFromDriverPayload(payload);
     console.log("[accept][driver:acceptOffer] incoming", {
-      ride_id: payload?.ride_id ?? null,
+      ride_id: resolvedRideId ?? payload?.ride_id ?? payload?.request_id ?? null,
       driver_id: payload?.driver_id ?? socket.driverId ?? null,
-      offered_price: payload?.offered_price ?? null,
+      offered_price: resolvedOfferedPrice ?? payload?.offered_price ?? payload?.price ?? null,
     });
 
     const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
-    const rideId = toNumber(payload?.ride_id);
-    const offeredPrice = toNumber(payload?.offered_price);
+    const rideId = resolvedRideId;
+    const offeredPrice = resolvedOfferedPrice;
 
     if (!driverId || !rideId || offeredPrice === null) return;
     if (!isDriverOfferStillActive(driverId, rideId)) {
@@ -6109,21 +6163,29 @@ if (removed) {
   });
 
   socket.on("driver:submitBid", async (payload) => {
+    const resolvedRideId = getRideIdFromDriverPayload(payload);
+    const resolvedOfferedPrice = getOfferedPriceFromDriverPayload(payload);
     debugLog("driver:submitBid", payload, socket.id);
     console.log("[bid][driver:submitBid] incoming", {
-      ride_id: payload?.ride_id ?? null,
+      ride_id: resolvedRideId ?? payload?.ride_id ?? payload?.request_id ?? null,
       driver_id: socket.driverId ?? payload?.driver_id ?? null,
-      offered_price: payload?.offered_price ?? null,
+      offered_price: resolvedOfferedPrice ?? payload?.offered_price ?? payload?.price ?? null,
     });
 
-    const rideId = toNumber(payload?.ride_id);
-const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
-    const offeredPrice = toNumber(payload?.offered_price);
+    const rideId = resolvedRideId;
+    const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
+    const offeredPrice = resolvedOfferedPrice;
 
     if (!driverId || !rideId || offeredPrice === null) {
       console.log(
         `⚠️ Invalid bid attempt - missing ride_id or driver_id or offered_price (socket: ${socket.id})`
       );
+      socket.emit("ride:bidBlocked", {
+        ride_id: rideId ?? null,
+        reason: "invalid_payload",
+        message: "Missing ride_id or offered_price",
+        at: Date.now(),
+      });
       return;
     }
     if (!isDriverOfferStillActive(driverId, rideId)) {
@@ -6572,6 +6634,12 @@ const driverId = toNumber(socket.driverId) ?? toNumber(payload?.driver_id);
     const lastBid = driverLastBidStatus.get(driverId);
     if (lastBid && lastBid.rideId === rideId && !lastBid.responded) {
       console.log(`⚠️ Driver ${driverId} cannot submit a new bid until user responds to the previous bid.`);
+      io.to(driverRoom(driverId)).emit("ride:bidBlocked", {
+        ride_id: rideId,
+        reason: "pending_previous_bid",
+        message: "User has not responded to the previous bid yet",
+        at: Date.now(),
+      });
       return;
     }
 
