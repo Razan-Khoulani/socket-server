@@ -610,7 +610,6 @@ function resolveRideDriverIdentity(rideId, payload = {}, options = {}) {
 const round2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
 const buildPriceBounds = (baseFare, distanceKm = null) => {
   const base = toNumber(baseFare);
-  const distance = toNumber(distanceKm);
   if (base === null) {
     return {
       base_fare: null,
@@ -621,7 +620,8 @@ const buildPriceBounds = (baseFare, distanceKm = null) => {
 
   return {
     base_fare: round2(base),
-    min_price: round2(distance !== null && distance <= 1 ? base : base * 0.7),
+    // Business rule: min is always 70% of computed trip price.
+    min_price: round2(base * 0.7),
     max_price: round2(base * 2),
   };
 };
@@ -665,43 +665,34 @@ const getRidePriceBounds = (payload = {}) => {
     return { base_fare: null, min_price: null, max_price: null };
   }
 
-  const explicitMin = toNumber(payload?.min_price ?? payload?.meta?.min_price ?? null);
-  const explicitMax = toNumber(payload?.max_price ?? payload?.meta?.max_price ?? null);
   const distanceKm = getPayloadDistanceKm(payload);
-  const explicitBase = toNumber(
-    payload?.base_fare ??
-      payload?.estimated_fare ??
-      payload?.meta?.base_fare ??
-      payload?.meta?.estimated_fare ??
-      null
+  const computedBase = pickFirstValue(
+    toNumber(payload?.user_bid_price),
+    toNumber(payload?.updatedPrice),
+    toNumber(payload?.base_fare),
+    toNumber(payload?.estimated_fare),
+    toNumber(payload?.meta?.base_fare),
+    toNumber(payload?.meta?.estimated_fare),
+    toNumber(payload?.ride_details?.user_bid_price),
+    toNumber(payload?.ride_details?.base_fare),
+    toNumber(payload?.ride_details?.estimated_fare),
+    toNumber(payload?.meta?.user_bid_price),
+    toNumber(payload?.price),
+    toNumber(payload?.offered_price),
+    toNumber(payload?.ride_details?.price),
+    toNumber(payload?.ride_details?.offered_price)
   );
 
-  if (explicitBase !== null) {
-    const built = buildPriceBounds(explicitBase, distanceKm);
-    const normalized = normalizePriceBoundsPair(
-      explicitMin ?? built.min_price,
-      explicitMax ?? built.max_price
-    );
-    return {
-      base_fare: built.base_fare,
-      // Prefer explicit bounds when available so validation matches UI snapshot.
-      min_price: normalized.min_price,
-      max_price: normalized.max_price,
-    };
+  if (computedBase !== null) {
+    return buildPriceBounds(computedBase, distanceKm);
   }
 
-  const fallbackBase = toNumber(
-    payload?.user_bid_price ?? payload?.updatedPrice ?? payload?.min_fare_amount ?? null
-  );
-
-  const built = buildPriceBounds(fallbackBase, distanceKm);
-  const normalized = normalizePriceBoundsPair(
-    explicitMin ?? built.min_price,
-    explicitMax ?? built.max_price
-  );
+  const explicitMin = toNumber(payload?.min_price ?? payload?.meta?.min_price ?? null);
+  const explicitMax = toNumber(payload?.max_price ?? payload?.meta?.max_price ?? null);
+  const normalized = normalizePriceBoundsPair(explicitMin, explicitMax);
 
   return {
-    base_fare: built.base_fare,
+    base_fare: null,
     min_price: normalized.min_price,
     max_price: normalized.max_price,
   };
@@ -3851,9 +3842,8 @@ async function dispatchToNearbyDrivers(io, data) {
   }
   dispatchBidPrice = dispatchBidPrice !== null ? round2(dispatchBidPrice) : null;
   const legacyMinFareAmount =
-    min !== null && min > 0
-      ? min
-      : toNumber(priceBounds?.min_price) ?? 0;
+    toNumber(priceBounds?.min_price) ??
+    (min !== null && min > 0 ? min : 0);
   const legacyMaxFareAmount =
     toNumber(priceBounds?.max_price) ??
     (base !== null && base > 0 ? round2(base * 2) : 0);
