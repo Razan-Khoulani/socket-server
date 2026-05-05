@@ -68,11 +68,13 @@ const upsertRideStatusSnapshot = (rideId, patch = {}) => {
     return getRideStatusSnapshot(safeRideId);
   }
 
+  // إضافة التقييم في حالة وجوده في `patch`
   const next = {
     ...current,
     ...patch,
     ride_id: safeRideId,
     ride_status: incomingStatus ?? currentStatus ?? null,
+    rating: patch?.rating ?? current?.rating ?? null,  // إضافة التقييم هنا
     updated_at: toNumber(patch?.updated_at) ?? Date.now(),
   };
 
