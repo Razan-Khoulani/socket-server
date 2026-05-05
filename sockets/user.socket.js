@@ -1770,7 +1770,7 @@ const syncNearbyRadius = async (payload = {}) => {
     return true;
   };
 
-  const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
+const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     const safeRideId = toNumber(rideId);
     if (!safeRideId) return;
 
@@ -1785,9 +1785,13 @@ const syncNearbyRadius = async (payload = {}) => {
     const snapshotWayPointStatus = toNumber(snapshot?.way_point_status);
     const snapshotReasonId = toNumber(snapshot?.reason_id);
 
+    // استخراج التقييم من الـ snapshot أو من مكان آخر إذا كان متاحًا
+    const rating = snapshot?.rating ?? null;  // إذا كان التقييم موجودًا في الـ snapshot أو يمكن استرجاعه من مكان آخر
+
     const catchupPayload = {
       ride_id: safeRideId,
       ride_status: rideStatus,
+      rating: rating,  // إضافة التقييم هنا
       ...(snapshotDriverId ? { driver_id: snapshotDriverId } : {}),
       ...(snapshotUserId ? { user_id: snapshotUserId } : {}),
       ...(snapshotWayPointStatus !== null ? { way_point_status: snapshotWayPointStatus } : {}),
@@ -1810,9 +1814,9 @@ const syncNearbyRadius = async (payload = {}) => {
     }
 
     console.log(
-      `[${source}] catchup status -> ride:${safeRideId} status:${catchupPayload.ride_status}`
+      `[${source}] catchup status -> ride:${safeRideId} status:${catchupPayload.ride_status} rating:${catchupPayload.rating}`
     );
-  };
+};
 
   const persistRideRouteMetrics = (payload = {}, routeKm = null, routeDurationMin = null, etaMin = null) => {
     const rideId = resolveRideIdFromPayload(payload);
