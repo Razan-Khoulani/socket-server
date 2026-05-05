@@ -1781,6 +1781,8 @@ function buildRideCandidatesSummary(rideId) {
 
     const isOnline = Number(driver?.is_online ?? meta?.is_online ?? 1) === 1;
     if (!isOnline) continue;
+    const walletBlocked = Number(meta?.not_valid_wallet_balance ?? 0) === 1;
+    if (walletBlocked) continue;
 
     const activeRide = getActiveRideByDriver(driverId);
     if (activeRide && activeRide !== rideId && !canDriverReceiveNewRideRequests(driverId)) continue;
@@ -2403,6 +2405,9 @@ function isDriverNearActiveRideDestination(driverId) {
 
 function canDriverReceiveNewRideRequests(driverId) {
   if (!driverId) return false;
+  const meta = driverLocationService.getMeta(driverId) || {};
+  const walletBlocked = Number(meta?.not_valid_wallet_balance ?? 0) === 1;
+  if (walletBlocked) return false;
 
   const activeRideId = getActiveRideByDriver(driverId);
   if (!activeRideId) return true;
@@ -3785,6 +3790,8 @@ function shouldKeepExistingCandidateForRide(rideId, driverId) {
 
   const isOnline = Number(driver?.is_online ?? meta?.is_online ?? 1) === 1;
   if (!isOnline) return false;
+  const walletBlocked = Number(meta?.not_valid_wallet_balance ?? 0) === 1;
+  if (walletBlocked) return false;
 
   // إذا عنده active ride ثانية غير هالرحلة -> لا تحتفظ فيه
   const activeRideId = getActiveRideByDriver(safeDriverId);

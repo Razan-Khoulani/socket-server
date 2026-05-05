@@ -627,12 +627,31 @@ module.exports = (io, socket) => {
         );
 
         // حالة السائق (من الريسبونس إذا بدك تكون أدق)
-        const currentStatus = Number(d.new_status ?? d.driver_current_status ?? 1);
+        const currentStatus = Number(
+          d.new_status ?? d.driver_current_status ?? d.current_status ?? 0
+        );
+        const notValidWalletBalance =
+          toNumber(
+            d.not_valid_wallet_balance ??
+              d.not_valid_wallet ??
+              d.wallet_blocked ??
+              null
+          ) ?? 0;
+        const notValidWalletBalanceMsg = String(
+          d.not_valid_wallet_balance_msg ??
+            d.not_valid_wallet_msg ??
+            d.wallet_blocked_message ??
+            ""
+        );
+        const canBeOnlineByApi =
+          currentStatus === 1 && Number(notValidWalletBalance) !== 1;
 
         const metaUpdate = {
           // status/meta
-          is_online: currentStatus === 1,
-          dashboard_is_online: currentStatus === 1,
+          is_online: canBeOnlineByApi,
+          dashboard_is_online: canBeOnlineByApi,
+          not_valid_wallet_balance: Number(notValidWalletBalance) === 1 ? 1 : 0,
+          not_valid_wallet_balance_msg: notValidWalletBalanceMsg,
           updatedAt: Date.now(),
           ...(Number.isFinite(resolvedProviderId) ? { provider_id: resolvedProviderId } : {}),
           ...(Number.isFinite(resolvedDriverServiceId)
@@ -731,11 +750,52 @@ module.exports = (io, socket) => {
     // ✅ source of truth: service only
     driverLocationService.updateMemory(socket.driverId, la, lo);
 
-    // ✅ mark as online on any location ping
+    // Keep wallet/status flags in sync with Laravel without hitting API on every ping.
+    void syncDriverAdminWalletMetaIfStale(
+      socket.driverId,
+      socket.driverServiceId ?? null
+    )
+      .then((freshMeta) => {
+        if (!freshMeta || typeof freshMeta !== "object") return;
+        const profileStatus = Number(
+          freshMeta.current_status ??
+            freshMeta.driver_current_status ??
+            freshMeta.new_status ??
+            freshMeta.provider_current_status ??
+            1
+        );
+        const walletBlocked =
+          Number(freshMeta.not_valid_wallet_balance ?? 0) === 1;
+        const shouldStayOnline = profileStatus === 1 && !walletBlocked;
+        if (!shouldStayOnline) {
+          driverLocationService.updateMeta(socket.driverId, {
+            is_online: false,
+            dashboard_is_online: false,
+            socket_disconnected: true,
+            updatedAt: Date.now(),
+          });
+          emitCandidatesSummaryForDriver(socket.driverId);
+          emitAdminDriverUpdate(io, socket.driverId);
+        }
+      })
+      .catch(() => {});
+
+    const currentMeta = driverLocationService.getMeta(socket.driverId) || {};
+    const profileStatusNow = Number(
+      currentMeta.current_status ??
+        currentMeta.driver_current_status ??
+        currentMeta.new_status ??
+        currentMeta.provider_current_status ??
+        1
+    );
+    const walletBlockedNow =
+      Number(currentMeta.not_valid_wallet_balance ?? 0) === 1;
+    const shouldStayOnlineNow = profileStatusNow === 1 && !walletBlockedNow;
+
     driverLocationService.updateMeta(socket.driverId, {
-      is_online: true,
-      dashboard_is_online: true,
-      socket_disconnected: false,
+      is_online: shouldStayOnlineNow,
+      dashboard_is_online: shouldStayOnlineNow,
+      socket_disconnected: !shouldStayOnlineNow,
       updatedAt: now,
     });
 
