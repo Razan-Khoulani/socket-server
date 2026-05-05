@@ -1662,65 +1662,74 @@ const syncNearbyRadius = async (payload = {}) => {
     return toNumber(byToken?.user_id ?? null);
   };
 
-  const registerUser = (payload, source = "user:loginInfo") => {
-    debugLog(source, payload, socket.id);
-    const details = extractUserDetails(payload);
-    if (!details) {
-      console.warn(`[${source}] Missing user_id in payload`);
-      return;
-    }
+const registerUser = (payload, source = "user:loginInfo") => {
+  debugLog(source, payload, socket.id);
+  
+  // استخراج تفاصيل المستخدم
+  const details = extractUserDetails(payload);
+  if (!details) {
+    console.warn(`[${source}] Missing user_id in payload`);
+    return;
+  }
 
-    const loginToken = normalizeToken(
-      details?.user_token ??
-        payload?.access_token ??
-        payload?.token ??
-        payload?.user_token ??
-        null
-    );
-    switchSocketUserSession(details.user_id, loginToken, source);
+  // استخراج صورة المستخدم إذا كانت موجودة
+  const userImage = details.user_image ?? null;
 
-    const normalizedDetails = {
-      ...details,
-      user_id: toNumber(details.user_id),
-      ...(socket.userToken
-        ? {
-            user_token: socket.userToken,
-            token: socket.userToken,
-            access_token: socket.userToken,
-          }
-        : {}),
-    };
-    setUserDetails(normalizedDetails.user_id, normalizedDetails);
+  const loginToken = normalizeToken(
+    details?.user_token ?? payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
+  );
 
-    if (typeof biddingSocket.refreshUserDetailsForUserId === "function") {
-      biddingSocket.refreshUserDetailsForUserId(io, normalizedDetails.user_id, normalizedDetails);
-    }
+  // تغيير الجلسة الخاصة بالمستخدم
+  switchSocketUserSession(details.user_id, loginToken, source);
 
-    const rideIdFromPayload = toNumber(payload?.ride_id ?? payload?.booking_id ?? null);
-    const activeRideId =
-      rideIdFromPayload ??
-      (typeof biddingSocket.getActiveRideIdForUser === "function"
-        ? toNumber(biddingSocket.getActiveRideIdForUser(normalizedDetails.user_id))
-        : null);
-
-    if (activeRideId) {
-      socket.join(`ride:${activeRideId}`);
-      socket.currentRideId = activeRideId;
-      socket.lastVehicleTypesSig = null;
-      if (typeof biddingSocket.touchUserActiveRide === "function") {
-        biddingSocket.touchUserActiveRide(normalizedDetails.user_id, activeRideId);
-      }
-      socket.emit("ride:joined", { ride_id: activeRideId });
-      emitRideStatusCatchup(activeRideId, source);
-      ensureNearbyCenterFromRide(activeRideId);
-      void emitNearbyVehicleTypes();
-      console.log(
-        `[${source}] auto-rejoin user ${normalizedDetails.user_id} -> ride:${activeRideId} (socket:${socket.id})`
-      );
-    }
-
-    console.log(`[${source}] user details:`, normalizedDetails);
+  // دمج التفاصيل مع صورة المستخدم
+  const normalizedDetails = {
+    ...details,
+    user_id: toNumber(details.user_id),
+    user_image: userImage,  // تأكد من تضمين صورة المستخدم هنا
+    ...(socket.userToken
+      ? {
+          user_token: socket.userToken,
+          token: socket.userToken,
+          access_token: socket.userToken,
+        }
+      : {}),
   };
+
+  // حفظ تفاصيل المستخدم بما في ذلك الصورة
+  setUserDetails(normalizedDetails.user_id, normalizedDetails);
+
+  // إذا كان موجودًا، يتم تحديث تفاصيل المستخدم عبر السوكيت
+  if (typeof biddingSocket.refreshUserDetailsForUserId === "function") {
+    biddingSocket.refreshUserDetailsForUserId(io, normalizedDetails.user_id, normalizedDetails);
+  }
+
+  // التحقق من الركوب النشط للمستخدم
+  const rideIdFromPayload = toNumber(payload?.ride_id ?? payload?.booking_id ?? null);
+  const activeRideId =
+    rideIdFromPayload ??
+    (typeof biddingSocket.getActiveRideIdForUser === "function"
+      ? toNumber(biddingSocket.getActiveRideIdForUser(normalizedDetails.user_id))
+      : null);
+
+  if (activeRideId) {
+    socket.join(`ride:${activeRideId}`);
+    socket.currentRideId = activeRideId;
+    socket.lastVehicleTypesSig = null;
+    if (typeof biddingSocket.touchUserActiveRide === "function") {
+      biddingSocket.touchUserActiveRide(normalizedDetails.user_id, activeRideId);
+    }
+    socket.emit("ride:joined", { ride_id: activeRideId });
+    emitRideStatusCatchup(activeRideId, source);
+    ensureNearbyCenterFromRide(activeRideId);
+    void emitNearbyVehicleTypes();
+    console.log(
+      `[${source}] auto-rejoin user ${normalizedDetails.user_id} -> ride:${activeRideId} (socket:${socket.id})`
+    );
+  }
+
+  console.log(`[${source}] user details:`, normalizedDetails);
+};
 
   const resolveRideIdFromPayload = (payload = {}) => {
     return (
