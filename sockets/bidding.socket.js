@@ -626,6 +626,21 @@ const buildPriceBounds = (baseFare, distanceKm = null) => {
   };
 };
 
+const normalizePriceBoundsPair = (minRaw, maxRaw) => {
+  const min = toNumber(minRaw);
+  const max = toNumber(maxRaw);
+
+  if (min !== null && max !== null && min > max) {
+    return { min_price: round2(max), max_price: round2(min), swapped: true };
+  }
+
+  return {
+    min_price: min !== null ? round2(min) : null,
+    max_price: max !== null ? round2(max) : null,
+    swapped: false,
+  };
+};
+
 const getPayloadDistanceKm = (payload = {}) => {
   const distance = pickFirstValue(
     toRouteMetricNumber(payload?.distance_km),
@@ -663,11 +678,15 @@ const getRidePriceBounds = (payload = {}) => {
 
   if (explicitBase !== null) {
     const built = buildPriceBounds(explicitBase, distanceKm);
+    const normalized = normalizePriceBoundsPair(
+      explicitMin ?? built.min_price,
+      explicitMax ?? built.max_price
+    );
     return {
       base_fare: built.base_fare,
       // Prefer explicit bounds when available so validation matches UI snapshot.
-      min_price: explicitMin ?? built.min_price,
-      max_price: explicitMax ?? built.max_price,
+      min_price: normalized.min_price,
+      max_price: normalized.max_price,
     };
   }
 
@@ -676,11 +695,15 @@ const getRidePriceBounds = (payload = {}) => {
   );
 
   const built = buildPriceBounds(fallbackBase, distanceKm);
+  const normalized = normalizePriceBoundsPair(
+    explicitMin ?? built.min_price,
+    explicitMax ?? built.max_price
+  );
 
   return {
     base_fare: built.base_fare,
-    min_price: explicitMin ?? built.min_price,
-    max_price: explicitMax ?? built.max_price,
+    min_price: normalized.min_price,
+    max_price: normalized.max_price,
   };
 };
 
@@ -871,6 +894,9 @@ const normalizeRideMetrics = (payload = {}) => {
     toNumber(meta?.max_fare),
     toNumber(computedBounds?.max_price)
   );
+  const normalizedPriceBounds = normalizePriceBoundsPair(minPrice, maxPrice);
+  const resolvedMinPrice = normalizedPriceBounds.min_price;
+  const resolvedMaxPrice = normalizedPriceBounds.max_price;
 
   if (duration !== null) {
     rideDetails.duration = duration;
@@ -884,17 +910,17 @@ const normalizeRideMetrics = (payload = {}) => {
     rideDetails.base_fare = baseFare;
     meta.base_fare = baseFare;
   }
-  if (minPrice !== null) {
-    rideDetails.min_price = minPrice;
-    rideDetails.min_fare = minPrice;
-    meta.min_price = minPrice;
-    meta.min_fare = minPrice;
+  if (resolvedMinPrice !== null) {
+    rideDetails.min_price = resolvedMinPrice;
+    rideDetails.min_fare = resolvedMinPrice;
+    meta.min_price = resolvedMinPrice;
+    meta.min_fare = resolvedMinPrice;
   }
-  if (maxPrice !== null) {
-    rideDetails.max_price = maxPrice;
-    rideDetails.max_fare = maxPrice;
-    meta.max_price = maxPrice;
-    meta.max_fare = maxPrice;
+  if (resolvedMaxPrice !== null) {
+    rideDetails.max_price = resolvedMaxPrice;
+    rideDetails.max_fare = resolvedMaxPrice;
+    meta.max_price = resolvedMaxPrice;
+    meta.max_fare = resolvedMaxPrice;
   }
 
   return {
@@ -910,8 +936,12 @@ const normalizeRideMetrics = (payload = {}) => {
       ? { distance: distanceKm, route_api_distance_km: distanceKm }
       : {}),
     ...(baseFare !== null ? { base_fare: baseFare } : {}),
-    ...(minPrice !== null ? { min_price: minPrice, min_fare: minPrice } : {}),
-    ...(maxPrice !== null ? { max_price: maxPrice, max_fare: maxPrice } : {}),
+    ...(resolvedMinPrice !== null
+      ? { min_price: resolvedMinPrice, min_fare: resolvedMinPrice }
+      : {}),
+    ...(resolvedMaxPrice !== null
+      ? { max_price: resolvedMaxPrice, max_fare: resolvedMaxPrice }
+      : {}),
     ride_details: rideDetails,
     meta,
   };
