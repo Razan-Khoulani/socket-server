@@ -1513,7 +1513,7 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       : Number.isFinite(Number(payload?.reason_id))
       ? Number(payload.reason_id)
       : null;
-
+const rating = payload?.rating ?? null; // إذا كان التقييم موجودًا في payload
     const evt = {
       ride_id: rideId,
       ride_status: status,
@@ -1521,6 +1521,8 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       ...(Number.isFinite(Number(userId)) ? { user_id: Number(userId) } : {}),
       ...(cancelBy ? { cancel_by: cancelBy } : {}),
       ...(cancelReasonId != null ? { reason_id: cancelReasonId } : {}),
+        ...(rating !== null ? { rating: rating } : {}), // إضافة التقييم إذا كان موجودًا
+
     };
     const wayPointStatus = Number.isFinite(
       Number(payload?.way_point_status ?? payload?.wayPointStatus)
