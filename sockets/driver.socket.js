@@ -854,6 +854,19 @@ module.exports = (io, socket) => {
     ride_id: payload?.ride_id ?? null,
     ride_status: payload?.ride_status ?? null,
     way_point_status: payload?.way_point_status ?? null,
+    rating:
+      payload?.rating ??
+      payload?.user_rating ??
+      payload?.customer_rating ??
+      payload?.meta?.rating ??
+      payload?.meta?.user_rating ??
+      null,
+    comment:
+      payload?.comment ??
+      payload?.user_comment ??
+      payload?.customer_comment ??
+      payload?.meta?.comment ??
+      null,
     driver_id: socket.driverId ?? payload?.driver_id ?? null,
   });
 
@@ -1176,6 +1189,29 @@ const acceptExtraPayload = {
   if (payload?.hail_ride_status != null) apiPayload.hail_ride_status = payload.hail_ride_status;
   if (Number.isFinite(currentLat)) apiPayload.current_lat = currentLat;
   if (Number.isFinite(currentLong)) apiPayload.current_long = currentLong;
+
+  const ratingValue = toNumber(
+    payload?.rating ??
+      payload?.user_rating ??
+      payload?.customer_rating ??
+      payload?.meta?.rating ??
+      payload?.meta?.user_rating ??
+      null
+  );
+  if (ratingValue !== null) {
+    apiPayload.rating = ratingValue;
+  }
+
+  const commentRaw =
+    payload?.comment ??
+    payload?.user_comment ??
+    payload?.customer_comment ??
+    payload?.meta?.comment ??
+    null;
+  if (commentRaw != null) {
+    const commentText = String(commentRaw).trim();
+    if (commentText.length > 0) apiPayload.comment = commentText;
+  }
 
   const optionalKeys = [
     "reason_id",
