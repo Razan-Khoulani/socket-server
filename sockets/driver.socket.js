@@ -1522,6 +1522,10 @@ const acceptExtraPayload = {
     if (socket.driverId) {
       const now = Date.now();
       const driverId = socket.driverId;
+      const driverRoomName = driverRoom(driverId);
+      const remainingRoomSockets = io?.sockets?.adapter?.rooms?.get(driverRoomName);
+      const hasOtherConnectedSockets =
+        !!remainingRoomSockets && remainingRoomSockets.size > 0;
       const activeRideId =
         getActiveRideByDriver(driverId) ?? toNumber(socket.activeRideId);
 
@@ -1532,8 +1536,8 @@ const acceptExtraPayload = {
       lastAcceptedLocationByDriver.delete(driverId);
       pendingRelocationByDriver.delete(driverId);
 
-      if (activeRideId) {
-        // ✅ إذا عنده رحلة شغالة: لا تحوله offline
+      if (activeRideId || hasOtherConnectedSockets) {
+        // ✅ Keep driver online if ride is active OR another device/socket is still connected.
         driverLocationService.updateMeta(driverId, {
           is_online: true,
           dashboard_is_online: true,
@@ -1543,7 +1547,7 @@ const acceptExtraPayload = {
         });
 
         console.log(
-          `🟡 Driver ${driverId} disconnected but kept online because active ride ${activeRideId} is running (socket: ${socket.id})`
+          `🟡 Driver ${driverId} disconnected but kept online (activeRide:${activeRideId ?? "none"}, otherSockets:${hasOtherConnectedSockets ? "yes" : "no"}, socket:${socket.id})`
         );
       } else {
         // ✅ إذا ما عنده رحلة: يصير offline طبيعي

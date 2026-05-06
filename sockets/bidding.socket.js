@@ -403,18 +403,24 @@ const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
 
   const ratingRaw = pickFirstValue(src.rating, src.driver_rating, meta.rating, meta.driver_rating);
   const rating = toNumber(ratingRaw) ?? ratingRaw ?? null;
-  const driverImage = toTrimmedText(
-    pickFirstValue(
-      src.driver_image,
-      src.driver_image_url,
-      src.profile_image,
-      src.avatar,
-      src.image,
-      meta.driver_image,
-      meta.driver_image_url,
-      meta.profile_image,
-      meta.avatar,
-      meta.image
+  const driverImage = normalizeDriverImageUrl(
+    toTrimmedText(
+      pickFirstValue(
+        src.driver_image,
+        src.driver_image_url,
+        src.driver_profile_image,
+        src.provider_image,
+        src.profile_image,
+        src.avatar,
+        src.image,
+        meta.driver_image,
+        meta.driver_image_url,
+        meta.driver_profile_image,
+        meta.provider_image,
+        meta.profile_image,
+        meta.avatar,
+        meta.image
+      )
     )
   );
 
@@ -491,44 +497,67 @@ const resolveDriverImageFromPayload = (payload = {}, explicitDriverId = null) =>
   const snapshotMeta =
     snapshot?.meta && typeof snapshot.meta === "object" ? snapshot.meta : {};
 
-  return toTrimmedText(
-    pickFirstValue(
-      p?.driver_image,
-      p?.driver_image_url,
-      details?.driver_image,
-      details?.driver_image_url,
-      details?.profile_image,
-      details?.avatar,
-      details?.image,
-      rideDetails?.driver_image,
-      rideDetails?.driver_image_url,
-      rideDriverDetails?.driver_image,
-      rideDriverDetails?.driver_image_url,
-      rideDriverDetails?.profile_image,
-      rideDriverDetails?.avatar,
-      rideDriverDetails?.image,
-      meta?.driver_image,
-      meta?.driver_image_url,
-      meta?.profile_image,
-      meta?.avatar,
-      meta?.image,
-      snapshot?.driver_image,
-      snapshot?.driver_image_url,
-      snapshotDetails?.driver_image,
-      snapshotDetails?.driver_image_url,
-      snapshotDetails?.profile_image,
-      snapshotDetails?.avatar,
-      snapshotDetails?.image,
-      snapshotMeta?.driver_image,
-      snapshotMeta?.driver_image_url,
-      snapshotMeta?.profile_image,
-      snapshotMeta?.avatar,
-      snapshotMeta?.image,
-      memoryMeta?.driver_image,
-      memoryMeta?.driver_image_url,
-      memoryMeta?.profile_image,
-      memoryMeta?.avatar,
-      memoryMeta?.image
+  return normalizeDriverImageUrl(
+    toTrimmedText(
+      pickFirstValue(
+        p?.driver_image,
+        p?.driver_image_url,
+        p?.driver_profile_image,
+        p?.provider_image,
+        p?.profile_image,
+        p?.avatar,
+        p?.image,
+        details?.driver_image,
+        details?.driver_image_url,
+        details?.driver_profile_image,
+        details?.provider_image,
+        details?.profile_image,
+        details?.avatar,
+        details?.image,
+        rideDetails?.driver_image,
+        rideDetails?.driver_image_url,
+        rideDetails?.driver_profile_image,
+        rideDetails?.provider_image,
+        rideDriverDetails?.driver_image,
+        rideDriverDetails?.driver_image_url,
+        rideDriverDetails?.driver_profile_image,
+        rideDriverDetails?.provider_image,
+        rideDriverDetails?.profile_image,
+        rideDriverDetails?.avatar,
+        rideDriverDetails?.image,
+        meta?.driver_image,
+        meta?.driver_image_url,
+        meta?.driver_profile_image,
+        meta?.provider_image,
+        meta?.profile_image,
+        meta?.avatar,
+        meta?.image,
+        snapshot?.driver_image,
+        snapshot?.driver_image_url,
+        snapshot?.driver_profile_image,
+        snapshot?.provider_image,
+        snapshotDetails?.driver_image,
+        snapshotDetails?.driver_image_url,
+        snapshotDetails?.driver_profile_image,
+        snapshotDetails?.provider_image,
+        snapshotDetails?.profile_image,
+        snapshotDetails?.avatar,
+        snapshotDetails?.image,
+        snapshotMeta?.driver_image,
+        snapshotMeta?.driver_image_url,
+        snapshotMeta?.driver_profile_image,
+        snapshotMeta?.provider_image,
+        snapshotMeta?.profile_image,
+        snapshotMeta?.avatar,
+        snapshotMeta?.image,
+        memoryMeta?.driver_image,
+        memoryMeta?.driver_image_url,
+        memoryMeta?.driver_profile_image,
+        memoryMeta?.provider_image,
+        memoryMeta?.profile_image,
+        memoryMeta?.avatar,
+        memoryMeta?.image
+      )
     )
   );
 };
@@ -549,6 +578,18 @@ const withDriverImage = (payload = {}, explicitDriverId = null) => {
     patched = { ...patched, driver_image_url: resolvedImage };
     changed = true;
   }
+  if (!toTrimmedText(patched?.profile_image)) {
+    patched = { ...patched, profile_image: resolvedImage };
+    changed = true;
+  }
+  if (!toTrimmedText(patched?.driver_profile_image)) {
+    patched = { ...patched, driver_profile_image: resolvedImage };
+    changed = true;
+  }
+  if (!toTrimmedText(patched?.provider_image)) {
+    patched = { ...patched, provider_image: resolvedImage };
+    changed = true;
+  }
 
   if (patched?.driver_details && typeof patched.driver_details === "object") {
     const existingDetails = patched.driver_details;
@@ -560,6 +601,15 @@ const withDriverImage = (payload = {}, explicitDriverId = null) => {
       ...(toTrimmedText(existingDetails?.driver_image_url)
         ? {}
         : { driver_image_url: resolvedImage }),
+      ...(toTrimmedText(existingDetails?.profile_image)
+        ? {}
+        : { profile_image: resolvedImage }),
+      ...(toTrimmedText(existingDetails?.driver_profile_image)
+        ? {}
+        : { driver_profile_image: resolvedImage }),
+      ...(toTrimmedText(existingDetails?.provider_image)
+        ? {}
+        : { provider_image: resolvedImage }),
     };
     patched = { ...patched, driver_details: nextDetails };
     changed = true;
@@ -575,6 +625,15 @@ const withDriverImage = (payload = {}, explicitDriverId = null) => {
       ...(toTrimmedText(existingRideDetails?.driver_image_url)
         ? {}
         : { driver_image_url: resolvedImage }),
+      ...(toTrimmedText(existingRideDetails?.profile_image)
+        ? {}
+        : { profile_image: resolvedImage }),
+      ...(toTrimmedText(existingRideDetails?.driver_profile_image)
+        ? {}
+        : { driver_profile_image: resolvedImage }),
+      ...(toTrimmedText(existingRideDetails?.provider_image)
+        ? {}
+        : { provider_image: resolvedImage }),
     };
     patched = { ...patched, ride_details: nextRideDetails };
     changed = true;
@@ -1947,7 +2006,22 @@ function buildRideCandidatesSummary(rideId) {
 
     const vehicleTypeName = driver?.vehicle_type_name ?? meta?.vehicle_type_name ?? "";
     const vehicleTypeIcon = driver?.vehicle_type_icon ?? meta?.vehicle_type_icon ?? null;
-    const driverImage = driver?.driver_image ?? meta?.driver_image ?? null;
+    const driverImage = normalizeDriverImageUrl(
+      pickFirstValue(
+        driver?.driver_image,
+        driver?.driver_image_url,
+        driver?.driver_profile_image,
+        driver?.provider_image,
+        driver?.profile_image,
+        driver?.avatar,
+        meta?.driver_image,
+        meta?.driver_image_url,
+        meta?.driver_profile_image,
+        meta?.provider_image,
+        meta?.profile_image,
+        meta?.avatar
+      )
+    );
     const lat = toNumber(driver?.lat);
     const long = toNumber(driver?.long);
 
@@ -2182,6 +2256,31 @@ const normalizeCustomerImageUrl = (value) => {
     ""
   )}`;
 };
+
+function normalizeDriverImageUrl(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (raw.startsWith("//")) {
+    return `${NORMALIZED_LARAVEL_BASE_URL.startsWith("https://") ? "https:" : "http:"}${raw}`;
+  }
+
+  const cleaned = raw.replace(/\\/g, "/");
+  if (cleaned.startsWith("/assets/")) {
+    return `${NORMALIZED_LARAVEL_BASE_URL}${cleaned}`;
+  }
+
+  const assetsIndex = cleaned.indexOf("assets/");
+  if (assetsIndex >= 0) {
+    const rel = cleaned.slice(assetsIndex).replace(/^\/+/, "");
+    return `${NORMALIZED_LARAVEL_BASE_URL}/${rel}`;
+  }
+
+  return `${NORMALIZED_LARAVEL_BASE_URL}/assets/images/profile-images/provider/${cleaned.replace(
+    /^\/+/,
+    ""
+  )}`;
+}
 
 const buildUserDetails = (data) => {
   const src =
@@ -4419,6 +4518,7 @@ const candidateSync = syncRideCandidates(
 // إذا كان في تحديث سعر، ابعت bidRequest لكل المرشحين الحاليين
 // أما إذا كان dispatch عادي، ابعت فقط للجدد
 const shouldRebroadcastBidRequest =
+  incrementalExpansion ||
   data?.dispatch_expand_reason === "user_response" ||
   data?.isPriceUpdated === true ||
   toNumber(data?.updatedPrice) !== null;
