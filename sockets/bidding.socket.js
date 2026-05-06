@@ -212,6 +212,44 @@ const resolveAdditionalRemarks = (...sources) => {
 
   return null;
 };
+const resolveDispatchPreferenceValue = (payload = {}, keys = []) => {
+  if (!payload || typeof payload !== "object" || !Array.isArray(keys) || keys.length === 0) {
+    return null;
+  }
+
+  const dispatchPayload = toObjectPayload(
+    payload?.dispatch_payload ?? payload?.dispatchPayload ?? null
+  );
+  const rideModel = toObjectPayload(payload?.ride_model ?? payload?.rideModel ?? null);
+  const nestedPayload = toObjectPayload(payload?.payload ?? null);
+  const nestedRide = getNestedRidePayload(payload);
+
+  const scopes = [
+    payload,
+    payload?.ride_details,
+    payload?.meta,
+    dispatchPayload,
+    dispatchPayload?.ride_details,
+    dispatchPayload?.meta,
+    rideModel,
+    rideModel?.ride_details,
+    rideModel?.meta,
+    nestedPayload,
+    nestedPayload?.ride_details,
+    nestedPayload?.meta,
+    nestedRide,
+    nestedRide?.ride_details,
+    nestedRide?.meta,
+  ];
+
+  for (const scope of scopes) {
+    if (!scope || typeof scope !== "object") continue;
+    const resolved = pickFirstValue(...keys.map((key) => scope?.[key]));
+    if (resolved !== null) return resolved;
+  }
+
+  return null;
+};
 const getRideIdFromDriverPayload = (payload = {}) => {
   const nestedRide = getNestedRidePayload(payload);
   return pickFirstValue(
@@ -4054,30 +4092,67 @@ async function dispatchToNearbyDrivers(io, data) {
   );
 
   // ✅ optional filter requirements (apply only if provided)
-  const requiredGender = toGenderFilter(
-    data?.required_driver_gender ??
-      data?.required_gender ??
-      data?.driver_gender ??
-      data?.gender ??
-      null
-  );
-  const needChildSeat = toBinaryFlag(
-    data?.need_child_seat ??
-      data?.child_seat ??
-      data?.require_child_seat ??
-      data?.smoking ??
-      data?.need_smoking ??
-      null
-  );
-  const needHandicap = toBinaryFlag(
-    data?.need_handicap ??
-      data?.handicap ??
-      data?.require_handicap ??
-      data?.need_special_needs ??
-      data?.special_needs ??
-      data?.handicap_accessibility ??
-      null
-  );
+  const requiredGenderRaw = resolveDispatchPreferenceValue(data, [
+    "required_driver_gender",
+    "required_gender",
+    "driver_gender",
+    "gender",
+    "requiredDriverGender",
+    "driverGender",
+  ]);
+  const needChildSeatRaw = resolveDispatchPreferenceValue(data, [
+    "need_child_seat",
+    "child_seat",
+    "require_child_seat",
+    "smoking",
+    "need_smoking",
+    "smoking_value",
+    "child_seat_accessibility",
+  ]);
+  const needHandicapRaw = resolveDispatchPreferenceValue(data, [
+    "need_handicap",
+    "handicap",
+    "require_handicap",
+    "need_special_needs",
+    "special_needs",
+    "handicap_accessibility",
+    "can_receive_special_needs",
+  ]);
+  const requiredGender = toGenderFilter(requiredGenderRaw);
+  const needChildSeat = toBinaryFlag(needChildSeatRaw);
+  const needHandicap = toBinaryFlag(needHandicapRaw);
+  const dispatchPreferencePayload = {
+    ...(requiredGender === 1 || requiredGender === 2 || requiredGender === 0
+      ? {
+          required_driver_gender: requiredGender,
+          required_gender: requiredGender,
+          driver_gender: requiredGender,
+          gender: requiredGender,
+        }
+      : {}),
+    ...(needChildSeat === 0 || needChildSeat === 1
+      ? {
+          need_child_seat: needChildSeat,
+          child_seat: needChildSeat,
+          require_child_seat: needChildSeat,
+          smoking: needChildSeat,
+          need_smoking: needChildSeat,
+          smoking_value: needChildSeat,
+          child_seat_accessibility: needChildSeat,
+        }
+      : {}),
+    ...(needHandicap === 0 || needHandicap === 1
+      ? {
+          need_handicap: needHandicap,
+          handicap: needHandicap,
+          require_handicap: needHandicap,
+          need_special_needs: needHandicap,
+          special_needs: needHandicap,
+          handicap_accessibility: needHandicap,
+          can_receive_special_needs: needHandicap,
+        }
+      : {}),
+  };
 
   if (lat === null || long === null) {
     console.log("[dispatch] Invalid dispatch data:", {
@@ -4312,16 +4387,17 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   required_gender: requiredGender ?? null,
   need_child_seat: needChildSeat ?? null,
   need_child_seat_filter_applied: needChildSeat === 0 || needChildSeat === 1,
-  raw_smoking: data?.smoking ?? null,
-  raw_child_seat: data?.child_seat ?? null,
-  raw_need_child_seat: data?.need_child_seat ?? null,
+  raw_required_gender: requiredGenderRaw ?? null,
+  raw_smoking: needChildSeatRaw ?? null,
+  raw_child_seat: needChildSeatRaw ?? null,
+  raw_need_child_seat: needChildSeatRaw ?? null,
   need_handicap: needHandicap ?? null,
   need_handicap_filter_applied: needHandicap === 0 || needHandicap === 1,
-  raw_handicap: data?.handicap ?? null,
-  raw_need_handicap: data?.need_handicap ?? null,
-  raw_require_handicap: data?.require_handicap ?? null,
-  raw_special_needs: data?.special_needs ?? null,
-  raw_need_special_needs: data?.need_special_needs ?? null,
+  raw_handicap: needHandicapRaw ?? null,
+  raw_need_handicap: needHandicapRaw ?? null,
+  raw_require_handicap: needHandicapRaw ?? null,
+  raw_special_needs: needHandicapRaw ?? null,
+  raw_need_special_needs: needHandicapRaw ?? null,
   has_user_details: !!userDetails,
   token_present: !!tokenTmp,
   additional_remarks: additionalRemarks ?? null,
@@ -4416,6 +4492,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
 
     // ✅ keep token for later accept/merge paths
     token: tokenTmp ?? null,
+    ...dispatchPreferencePayload,
 
     pickup_lat: lat,
     pickup_long: long,
@@ -4476,6 +4553,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       service_category_id: toNumber(data.service_category_id) ?? null,
       duration: finalRouteApiDurationMin,
       route_api_distance_km: finalRouteApiDistanceKm,
+      ...dispatchPreferencePayload,
       ...(routeKm !== null ? { route: routeKm } : {}),
       ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
     },
@@ -4489,6 +4567,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       ...(priceBounds.base_fare !== null ? { base_fare: priceBounds.base_fare } : {}),
       ...(priceBounds.min_price !== null ? { min_price: priceBounds.min_price } : {}),
       ...(priceBounds.max_price !== null ? { max_price: priceBounds.max_price } : {}),
+      ...dispatchPreferencePayload,
       ...(routeApiData && typeof routeApiData === "object"
         ? { route_api_data: routeApiData }
         : {}),
@@ -4550,6 +4629,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
         duration: finalRouteApiDurationMin,
         route_api_distance_km: finalRouteApiDistanceKm,
+        ...dispatchPreferencePayload,
         ride_details: {
           ride_id: rideId,
           pickup_lat: lat,
@@ -4575,6 +4655,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
           service_category_id: toNumber(data.service_category_id) ?? null,
           duration: finalRouteApiDurationMin,
           route_api_distance_km: finalRouteApiDistanceKm,
+          ...dispatchPreferencePayload,
           ...(routeKm !== null ? { route: routeKm } : {}),
           ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
         },
@@ -4588,6 +4669,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
           ...(priceBounds.base_fare !== null ? { base_fare: priceBounds.base_fare } : {}),
           ...(priceBounds.min_price !== null ? { min_price: priceBounds.min_price } : {}),
           ...(priceBounds.max_price !== null ? { max_price: priceBounds.max_price } : {}),
+          ...dispatchPreferencePayload,
           ...(routeApiData && typeof routeApiData === "object"
             ? { route_api_data: routeApiData }
             : {}),
@@ -4603,6 +4685,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         user_phone_full: userDetails?.user_phone_full ?? null,
 
         token: tokenTmp ?? null,
+        ...dispatchPreferencePayload,
         user_details: userDetails
           ? {
               ...userDetails,
