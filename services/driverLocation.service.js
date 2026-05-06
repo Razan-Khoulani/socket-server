@@ -4,6 +4,53 @@ const { getDistanceMeters } = require("../utils/geo.util");
 const driverLocations = new Map();   // driverId -> { lat, long, timestamp, ...meta }
 const driverListeners = new Map();   // driverId -> Set<callback>
 
+const toNumber = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeToken = (value) => {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+};
+
+const toBinaryFlag = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "boolean") return value ? 1 : 0;
+
+  const n = toNumber(value);
+  if (n === 0 || n === 1) return n;
+
+  const token = normalizeToken(value);
+  if (!token) return null;
+
+  if (["1", "true", "yes", "on", "required", "need"].includes(token)) return 1;
+  if (["0", "false", "no", "off", "none"].includes(token)) return 0;
+
+  return null;
+};
+
+const toGenderFilter = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+
+  const n = toNumber(value);
+  if (n === 1 || n === 2) return n;
+  if (n === 0) return 0;
+
+  const token = normalizeToken(value);
+  if (!token) return null;
+
+  if (["male", "man", "m", "ذكر"].includes(token)) return 1;
+  if (["female", "woman", "f", "انثى", "أنثى"].includes(token)) return 2;
+  if (["0", "all", "any", "both", "none"].includes(token)) return 0;
+
+  return null;
+};
+
 // ─────────────────────────────────────────────
 // DB update (كما هو)
 // ─────────────────────────────────────────────
@@ -105,10 +152,31 @@ exports.getNearbyDriversFromMemory = (lat, long, radius = 5000, opts = null) => 
   const onlyOnline = opts?.only_online ?? true;
   const filterTypeId = opts?.service_type_id ?? null;
 
-  // ✅ NEW (optional filters)
-  const requiredGender = opts?.required_gender; // 1/2 فقط
-  const needChildSeat = opts?.need_child_seat === 1; // فلترة فقط إذا 1
-  const needHandicap = opts?.need_handicap === 1; // فلترة فقط إذا 1
+  // preference filters (exact-match when provided)
+  const requiredGender = toGenderFilter(
+    opts?.required_gender ??
+      opts?.required_driver_gender ??
+      opts?.driver_gender ??
+      opts?.gender ??
+      null
+  );
+  const childSeatFilter = toBinaryFlag(
+    opts?.need_child_seat ??
+      opts?.child_seat ??
+      opts?.require_child_seat ??
+      opts?.smoking ??
+      opts?.need_smoking ??
+      null
+  );
+  const handicapFilter = toBinaryFlag(
+    opts?.need_handicap ??
+      opts?.handicap ??
+      opts?.require_handicap ??
+      opts?.need_special_needs ??
+      opts?.special_needs ??
+      opts?.handicap_accessibility ??
+      null
+  );
 
   const maxAgeMs =
     typeof opts?.max_age_ms === "number" && opts.max_age_ms >= 0
@@ -137,21 +205,30 @@ exports.getNearbyDriversFromMemory = (lat, long, radius = 5000, opts = null) => 
 
     if (data.lat == null || data.long == null) continue;
 
-    // ✅ NEW: gender filter (only if provided 1/2)
+    // Gender filter (only when requested with 1/2)
     if (requiredGender === 1 || requiredGender === 2) {
-      const dg = Number(data.driver_gender);
-      if (!(dg === 1 || dg === 2)) continue;
-      if (dg !== requiredGender) continue;
+      const driverGender = toGenderFilter(data.driver_gender ?? data.gender ?? null);
+      if (driverGender !== requiredGender) continue;
     }
 
-    // ✅ NEW: child seat filter (only if requested)
-    if (needChildSeat) {
-      if (Number(data.child_seat ?? 0) !== 1) continue;
+    // Child-seat/smoking filter (exact 0/1 when requested)
+    if (childSeatFilter === 0 || childSeatFilter === 1) {
+      const driverChildSeat = toBinaryFlag(
+        data.child_seat ??
+          data.child_seat_accessibility ??
+          data.smoking ??
+          data.smoking_value ??
+          null
+      );
+      if (driverChildSeat !== childSeatFilter) continue;
     }
 
-    // ✅ NEW: handicap filter (only if requested)
-    if (needHandicap) {
-      if (Number(data.handicap ?? 0) !== 1) continue;
+    // Handicap/special-needs filter (exact 0/1 when requested)
+    if (handicapFilter === 0 || handicapFilter === 1) {
+      const driverHandicap = toBinaryFlag(
+        data.handicap ?? data.handicap_accessibility ?? data.special_needs ?? null
+      );
+      if (driverHandicap !== handicapFilter) continue;
     }
 
     const distance = getDistanceMeters(lat, long, data.lat, data.long);

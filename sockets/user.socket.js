@@ -95,6 +95,19 @@ const getFirstNumber = (...values) => {
   }
   return null;
 };
+const pickFirstDefined = (...values) => {
+  for (const value of values) {
+    if (value !== undefined) return value;
+  }
+  return undefined;
+};
+const normalizeFilterToken = (value) => {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+};
 
 const uniqueSortedNumbers = (values = []) =>
   Array.from(
@@ -669,13 +682,123 @@ const buildPriceBounds = (baseFare, estimatedFare = null, distanceKm = null) => 
 };
 
 const toBinaryFlag = (v) => {
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v === "boolean") return v ? 1 : 0;
+
   const n = toNumber(v);
-  return n === 0 || n === 1 ? n : null;
+  if (n === 0 || n === 1) return n;
+
+  const token = normalizeFilterToken(v);
+  if (!token) return null;
+
+  if (
+    [
+      "1",
+      "true",
+      "yes",
+      "on",
+      "enable",
+      "enabled",
+      "allowed",
+      "required",
+      "need",
+      "smoker",
+      "smoking",
+      "childseat",
+      "مدخن",
+      "نعم",
+      "اي",
+      "ايوه",
+      "احتياجاتخاصة",
+      "specialneeds",
+      "handicap",
+    ].includes(token)
+  ) {
+    return 1;
+  }
+
+  if (
+    [
+      "0",
+      "false",
+      "no",
+      "off",
+      "disable",
+      "disabled",
+      "notallowed",
+      "none",
+      "nonsmoker",
+      "غيرمدخن",
+      "لا",
+      "مو",
+      "لااحتياجات",
+      "nospecialneeds",
+      "nonhandicap",
+    ].includes(token)
+  ) {
+    return 0;
+  }
+
+  return null;
 };
 
 const toGenderFilter = (v) => {
+  if (v === null || v === undefined || v === "") return null;
   const n = toNumber(v);
-  return n === 1 || n === 2 ? n : null;
+  if (n === 1 || n === 2) return n;
+
+  const token = normalizeFilterToken(v);
+  if (!token) return null;
+
+  if (
+    [
+      "male",
+      "man",
+      "boy",
+      "m",
+      "ذكر",
+      "رجل",
+      "شاب",
+    ].includes(token)
+  ) {
+    return 1;
+  }
+
+  if (
+    [
+      "female",
+      "woman",
+      "girl",
+      "f",
+      "femaledriver",
+      "انثى",
+      "أنثى",
+      "امراه",
+      "امرأة",
+      "سيده",
+      "سيدة",
+    ].includes(token)
+  ) {
+    return 2;
+  }
+
+  if (
+    [
+      "0",
+      "all",
+      "any",
+      "both",
+      "none",
+      "anygender",
+      "غيرمحدد",
+      "الكل",
+      "الكلالجنسين",
+    ].includes(token)
+  ) {
+    return null;
+  }
+
+  return null;
 };
 
 const summarizeVehicleTypesForLog = (types) => {
@@ -1492,69 +1615,81 @@ const syncNearbyRadius = async (payload = {}) => {
 };
   const applyNearbyFiltersFromPayload = (payload = {}, options = {}) => {
     const { resetMissing = false } = options || {};
+    const base = payload && typeof payload === "object" ? payload : {};
+    const nested = [
+      base,
+      base?.filters && typeof base.filters === "object" ? base.filters : null,
+      base?.filter && typeof base.filter === "object" ? base.filter : null,
+      base?.preferences && typeof base.preferences === "object" ? base.preferences : null,
+      base?.meta && typeof base.meta === "object" ? base.meta : null,
+      base?.ride_details && typeof base.ride_details === "object" ? base.ride_details : null,
+    ].filter(Boolean);
+    const readFirstDefined = (...keys) => {
+      for (const src of nested) {
+        const value = pickFirstDefined(...keys.map((key) => src?.[key]));
+        if (value !== undefined) return value;
+      }
+      return undefined;
+    };
     let changed = false;
 
-    const hasGender =
-      payload?.required_driver_gender !== undefined ||
-      payload?.required_gender !== undefined ||
-      payload?.driver_gender !== undefined ||
-      payload?.gender !== undefined;
-    const nextGender = hasGender
-      ? toGenderFilter(
-          payload?.required_driver_gender ??
-            payload?.required_gender ??
-            payload?.driver_gender ??
-            payload?.gender
-        )
-      : resetMissing
-      ? null
+    const genderInput = readFirstDefined(
+      "required_driver_gender",
+      "required_gender",
+      "driver_gender",
+      "gender",
+      "driverGender",
+      "requiredDriverGender"
+    );
+    const hasGender = genderInput !== undefined;
+    let nextGender = hasGender
+      ? toGenderFilter(genderInput)
       : socket.nearbyRequiredGender;
+
+    const childSeatInput = readFirstDefined(
+      "need_child_seat",
+      "child_seat",
+      "require_child_seat",
+      "need_smoking",
+      "smoking",
+      "smoking_value",
+      "child_seat_accessibility"
+    );
+    const hasChildSeat = childSeatInput !== undefined;
+    let nextChildSeat = hasChildSeat
+      ? toBinaryFlag(childSeatInput)
+      : socket.nearbyNeedChildSeat;
+
+    const handicapInput = readFirstDefined(
+      "need_handicap",
+      "handicap",
+      "require_handicap",
+      "special_needs",
+      "need_special_needs",
+      "handicap_accessibility",
+      "can_receive_special_needs"
+    );
+    const hasHandicap = handicapInput !== undefined;
+    let nextHandicap = hasHandicap
+      ? toBinaryFlag(handicapInput)
+      : socket.nearbyNeedHandicap;
+
+    const hasAnyFilterKey = hasGender || hasChildSeat || hasHandicap;
+    if (resetMissing && hasAnyFilterKey) {
+      if (!hasGender) nextGender = null;
+      if (!hasChildSeat) nextChildSeat = null;
+      if (!hasHandicap) nextHandicap = null;
+    }
 
     if (nextGender !== socket.nearbyRequiredGender) {
       socket.nearbyRequiredGender = nextGender;
       changed = true;
     }
 
-    const hasChildSeat =
-      payload?.need_child_seat !== undefined ||
-      payload?.child_seat !== undefined ||
-      payload?.require_child_seat !== undefined ||
-      payload?.smoking !== undefined;
-    const nextChildSeat = hasChildSeat
-      ? toBinaryFlag(
-          payload?.need_child_seat ??
-            payload?.child_seat ??
-            payload?.require_child_seat ??
-            payload?.smoking
-        )
-      : resetMissing
-      ? null
-      : socket.nearbyNeedChildSeat;
-
     if (nextChildSeat !== socket.nearbyNeedChildSeat) {
       socket.nearbyNeedChildSeat = nextChildSeat;
       changed = true;
     }
-
-    const hasHandicap =
-      payload?.need_handicap !== undefined ||
-      payload?.handicap !== undefined ||
-      payload?.require_handicap !== undefined ||
-      payload?.special_needs !== undefined ||
-      payload?.need_special_needs !== undefined ||
-      payload?.handicap_accessibility !== undefined;
-    const nextHandicap = hasHandicap
-      ? toBinaryFlag(
-          payload?.need_handicap ??
-            payload?.handicap ??
-            payload?.require_handicap ??
-            payload?.need_special_needs ??
-            payload?.special_needs ??
-            payload?.handicap_accessibility
-        )
-      : resetMissing
-      ? null
-      : socket.nearbyNeedHandicap;
 
     if (nextHandicap !== socket.nearbyNeedHandicap) {
       socket.nearbyNeedHandicap = nextHandicap;
@@ -1563,7 +1698,52 @@ const syncNearbyRadius = async (payload = {}) => {
 
     if (changed) {
       socket.lastVehicleTypesSig = null;
+      console.log("[nearby-filters] updated", {
+        socket_id: socket.id,
+        required_gender: socket.nearbyRequiredGender,
+        need_child_seat: socket.nearbyNeedChildSeat,
+        need_handicap: socket.nearbyNeedHandicap,
+      });
     }
+  };
+  const applyNearbyDriverPreferenceFilters = (drivers = []) => {
+    if (!Array.isArray(drivers) || drivers.length === 0) return [];
+
+    const requiredGender = toGenderFilter(socket.nearbyRequiredGender);
+    const requiredChildSeat = toBinaryFlag(socket.nearbyNeedChildSeat);
+    const requiredHandicap = toBinaryFlag(socket.nearbyNeedHandicap);
+
+    return drivers.filter((driver) => {
+      if (requiredGender === 1 || requiredGender === 2) {
+        const driverGender = toGenderFilter(
+          driver?.driver_gender ?? driver?.gender ?? null
+        );
+        if (driverGender !== requiredGender) return false;
+      }
+
+      if (requiredChildSeat === 0 || requiredChildSeat === 1) {
+        const driverChildSeat = toBinaryFlag(
+          driver?.child_seat ??
+            driver?.smoking ??
+            driver?.smoking_value ??
+            driver?.child_seat_accessibility ??
+            null
+        );
+        if (driverChildSeat !== requiredChildSeat) return false;
+      }
+
+      if (requiredHandicap === 0 || requiredHandicap === 1) {
+        const driverHandicap = toBinaryFlag(
+          driver?.handicap ??
+            driver?.handicap_accessibility ??
+            driver?.special_needs ??
+            null
+        );
+        if (driverHandicap !== requiredHandicap) return false;
+      }
+
+      return true;
+    });
   };
 
   const setNearbyRouteDistanceKm = (value) => {
@@ -2045,8 +2225,9 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
         need_handicap: socket.nearbyNeedHandicap,
       }
     );
+    const nearbyPreferenceMatched = applyNearbyDriverPreferenceFilters(nearbyAll);
 
-    const nearbyAvailable = nearbyAll.filter((d) => {
+    const nearbyAvailable = nearbyPreferenceMatched.filter((d) => {
       const dId = toNumber(d?.driver_id);
       return canDriverAppearInNearby(dId);
     });
@@ -2064,6 +2245,7 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       stage_total: radiusPlan.stageTotal,
       road_radius_m: roadRadius,
       air_candidates: nearbyAll.length,
+      preference_filtered_candidates: nearbyPreferenceMatched.length,
       available_candidates: nearbyAvailable.length,
       road_filtered_candidates: nearbyDrivers.length,
       next_radius_m: radiusPlan.nextRadiusMeters,
@@ -2488,8 +2670,9 @@ item.max_price = priceBounds.max_price;
         max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
       }
     );
+    const nearbyPreferenceMatched = applyNearbyDriverPreferenceFilters(nearbyAll);
 
-    const nearbyAvailable = nearbyAll.filter((d) => {
+    const nearbyAvailable = nearbyPreferenceMatched.filter((d) => {
       const dId = toNumber(d?.driver_id);
       return canDriverAppearInNearby(dId);
     });
@@ -2512,6 +2695,16 @@ item.max_price = priceBounds.max_price;
     console.log(
       `?? Nearby -> ${nearby.length} drivers within road radius ${roadRadius}m (stage ${radiusPlan.stageNumber}/${radiusPlan.stageTotal})`
     );
+    console.log("[nearbyDrivers] filter counters", {
+      socket_id: socket.id,
+      required_gender: socket.nearbyRequiredGender,
+      need_child_seat: socket.nearbyNeedChildSeat,
+      need_handicap: socket.nearbyNeedHandicap,
+      air_candidates: nearbyAll.length,
+      preference_filtered_candidates: nearbyPreferenceMatched.length,
+      available_candidates: nearbyAvailable.length,
+      road_filtered_candidates: nearby.length,
+    });
   };
 
   socket.on("user:findNearbyDrivers", async (payload = {}) => {
@@ -2609,7 +2802,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     toNumber(previousCenter?.lat) !== la ||
     toNumber(previousCenter?.long) !== lo;
 
-  applyNearbyFiltersFromPayload(payload, { resetMissing: true });
+  applyNearbyFiltersFromPayload(payload, { resetMissing: false });
   syncRideContextFromPayload(payload, "user:getNearbyVehicleTypes");
 
   const payloadServiceTypeId = toNumber(
@@ -2859,4 +3052,3 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     socket.userId = null;
   });
 };
-

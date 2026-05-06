@@ -67,6 +67,22 @@ const toBinaryFlag = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? (n === 1 ? 1 : n === 0 ? 0 : null) : null;
 };
+const toGenderFilter = (v) => {
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v === "number") return v === 1 ? 1 : v === 2 ? 2 : v === 0 ? 0 : null;
+
+  const n = Number(v);
+  if (Number.isFinite(n)) return n === 1 ? 1 : n === 2 ? 2 : n === 0 ? 0 : null;
+
+  if (typeof v === "string") {
+    const token = v.trim().toLowerCase();
+    if (["male", "man", "m", "ذكر"].includes(token)) return 1;
+    if (["female", "woman", "f", "انثى", "أنثى"].includes(token)) return 2;
+    if (["0", "all", "any", "both", "none"].includes(token)) return 0;
+  }
+
+  return null;
+};
 const toTrimmedText = (v) => {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
@@ -1981,7 +1997,7 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
     const handicapFromApi = toBinaryFlag(
       d?.handicap_accessibility ?? d?.handicap ?? null
     );
-    const driverGenderFromApi = toNumber(d?.driver_gender ?? d?.gender ?? null);
+    const driverGenderFromApi = toGenderFilter(d?.driver_gender ?? d?.gender ?? null);
     const providerId = toNumber(d.provider_id ?? d.driver_id ?? driverId);
     const resolvedDriverServiceId = toNumber(d.driver_service_id ?? driverServiceId);
     const driverDetailId = toNumber(d.driver_detail_id ?? d.driver_details_id ?? null);
@@ -4038,8 +4054,12 @@ async function dispatchToNearbyDrivers(io, data) {
   );
 
   // ✅ optional filter requirements (apply only if provided)
-  const requiredGender = toNumber(
-    data?.required_driver_gender ?? data?.required_gender ?? data?.driver_gender ?? null
+  const requiredGender = toGenderFilter(
+    data?.required_driver_gender ??
+      data?.required_gender ??
+      data?.driver_gender ??
+      data?.gender ??
+      null
   );
   const needChildSeat = toBinaryFlag(
     data?.need_child_seat ??
@@ -4291,12 +4311,12 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   final_candidates: nextCandidateIds.length,
   required_gender: requiredGender ?? null,
   need_child_seat: needChildSeat ?? null,
-  need_child_seat_filter_applied: needChildSeat === 1,
+  need_child_seat_filter_applied: needChildSeat === 0 || needChildSeat === 1,
   raw_smoking: data?.smoking ?? null,
   raw_child_seat: data?.child_seat ?? null,
   raw_need_child_seat: data?.need_child_seat ?? null,
   need_handicap: needHandicap ?? null,
-  need_handicap_filter_applied: needHandicap === 1,
+  need_handicap_filter_applied: needHandicap === 0 || needHandicap === 1,
   raw_handicap: data?.handicap ?? null,
   raw_need_handicap: data?.need_handicap ?? null,
   raw_require_handicap: data?.require_handicap ?? null,
