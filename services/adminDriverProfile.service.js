@@ -1,6 +1,10 @@
 const axios = require("axios");
 
-const PROFILE_CACHE_TTL_MS = 5 * 60 * 1000;
+const PROFILE_CACHE_TTL_MS = Number.isFinite(
+  Number(process.env.DRIVER_ADMIN_PROFILE_CACHE_TTL_MS)
+)
+  ? Math.max(5000, Number(process.env.DRIVER_ADMIN_PROFILE_CACHE_TTL_MS))
+  : 30 * 1000;
 const profileCache = new Map();
 
 const LARAVEL_BASE_URL = String(
@@ -89,19 +93,27 @@ const setCachedProfile = (profile = {}) => {
     driver_image: profile.driver_image ?? profile.image ?? profile.driver_profile ?? null,
     phone: String(profile.phone ?? profile.contact_number ?? "").trim(),
     country_code: String(profile.country_code ?? "").trim(),
-    driver_gender: toNumber(profile.driver_gender ?? profile.gender),
+    driver_gender: toNumber(
+      profile.driver_gender ?? profile.gender ?? profile.driverGender
+    ),
     child_seat: toNumber(
       profile.child_seat ??
         profile.child_seat_accessibility ??
-        profile.smoking
+        profile.smoking ??
+        profile.smoking_value
     ),
     smoking: toNumber(
       profile.smoking ??
+        profile.smoking_value ??
         profile.child_seat ??
         profile.child_seat_accessibility
     ),
     handicap: toNumber(
-      profile.handicap ?? profile.handicap_accessibility
+      profile.handicap ??
+        profile.handicap_accessibility ??
+        profile.special_needs ??
+        profile.need_special_needs ??
+        profile.can_receive_special_needs
     ),
     current_lat: toNumber(profile.current_lat ?? profile.lat),
     current_long: toNumber(profile.current_long ?? profile.lng ?? profile.long),
