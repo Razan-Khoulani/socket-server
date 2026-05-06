@@ -144,6 +144,58 @@ const getNestedRidePayload = (payload = {}) => {
     null
   );
 };
+const toObjectPayload = (value) => {
+  if (!value) return null;
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  return parseMaybeJsonObject(value);
+};
+const resolveAdditionalRemarks = (...sources) => {
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+
+    const dispatchPayload = toObjectPayload(
+      source?.dispatch_payload ?? source?.dispatchPayload ?? null
+    );
+    const rideModel = toObjectPayload(source?.ride_model ?? source?.rideModel ?? null);
+    const nestedPayload = toObjectPayload(source?.payload ?? null);
+    const nestedRide = getNestedRidePayload(source);
+
+    const scopes = [
+      source,
+      source?.ride_details,
+      source?.meta,
+      dispatchPayload,
+      dispatchPayload?.ride_details,
+      dispatchPayload?.meta,
+      rideModel,
+      rideModel?.ride_details,
+      rideModel?.meta,
+      nestedPayload,
+      nestedPayload?.ride_details,
+      nestedPayload?.meta,
+      nestedRide,
+      nestedRide?.ride_details,
+      nestedRide?.meta,
+    ];
+
+    for (const scope of scopes) {
+      if (!scope || typeof scope !== "object") continue;
+      const resolved = toTrimmedText(
+        pickFirstValue(
+          scope?.additional_remarks,
+          scope?.additional_remark,
+          scope?.additional_request,
+          scope?.additionalRemarks,
+          scope?.additionalRemark,
+          scope?.additionalRequest
+        )
+      );
+      if (resolved !== null) return resolved;
+    }
+  }
+
+  return null;
+};
 const getRideIdFromDriverPayload = (payload = {}) => {
   const nestedRide = getNestedRidePayload(payload);
   return pickFirstValue(
@@ -564,15 +616,7 @@ const buildNewBidEmitDebugSnapshot = (payload = {}) => {
         details?.plat_no ??
         null
     ),
-    additional_remarks: toTrimmedText(
-      p?.additional_remarks ??
-        p?.additional_remark ??
-        p?.ride_details?.additional_remarks ??
-        p?.ride_details?.additional_remark ??
-        p?.meta?.additional_remarks ??
-        p?.meta?.additional_remark ??
-        null
-    ),
+    additional_remarks: resolveAdditionalRemarks(p),
   };
 };
 const buildDriverIdentityPayload = (identity = {}, legacyDriverId = null) => {
@@ -1250,6 +1294,7 @@ async function syncDriverUpdateListNotification({
     rideModel && typeof rideModel === "object"
       ? sanitizeRidePayloadForClient(rideModel)
       : null;
+  const normalizedAdditionalRemarks = toTrimmedText(additionalRemarks);
   const laravelSyncPayload = {
     driver_id: driverId,
     ride_id: rideId,
@@ -1263,10 +1308,9 @@ async function syncDriverUpdateListNotification({
     route_api_distance_km: toNumber(routeApiDistanceKm),
     duration: toNumber(duration),
     eta_min: toNumber(etaMin),
-    additional_remarks:
-      additionalRemarks === null || additionalRemarks === undefined
-        ? null
-        : String(additionalRemarks),
+    additional_remarks: normalizedAdditionalRemarks,
+    additional_remark: normalizedAdditionalRemarks,
+    additional_request: normalizedAdditionalRemarks,
     isPriceUpdated: isPriceUpdated ? 1 : 0,
     server_time: toNumber(serverTime),
     expires_at: toNumber(expiresAt),
@@ -1569,12 +1613,10 @@ async function emitDispatchNotificationSync(payload = {}) {
     etaMin:
       toNumber(ridePayloadForDriver?.eta_min) ??
       toNumber(ridePayloadForDriver?.ride_details?.eta_min),
-    additionalRemarks:
-      ridePayloadForDriver?.additional_remarks ??
-      ridePayloadForDriver?.additional_remark ??
-      ridePayloadForDriver?.ride_details?.additional_remarks ??
-      ridePayloadForDriver?.ride_details?.additional_remark ??
-      null,
+    additionalRemarks: resolveAdditionalRemarks(
+      ridePayloadForDriver,
+      bidRequestPayload
+    ),
     isPriceUpdated:
       ridePayloadForDriver?.isPriceUpdated === true ||
       ridePayloadForDriver?.isPriceUpdated === 1 ||
@@ -3972,19 +4014,7 @@ async function dispatchToNearbyDrivers(io, data) {
   const isPriceUpdated = !!data?.isPriceUpdated;
   const updatedPrice = toNumber(data?.updatedPrice ?? null);
   const updatedAt = toNumber(data?.updatedAt ?? null);
-  const additionalRemarks = pickFirstValue(
-    data?.additional_remarks,
-    data?.additional_remark,
-    data?.additionalRemarks,
-    data?.additionalRemark,
-    data?.additional_request,
-    data?.ride_details?.additional_remarks,
-    data?.ride_details?.additional_remark,
-    data?.ride_details?.additional_request,
-    data?.meta?.additional_remarks,
-    data?.meta?.additional_remark,
-    data?.meta?.additional_request
-  );
+  const additionalRemarks = resolveAdditionalRemarks(data);
 
   const storedUser = userId ? getUserDetails(userId) : null;
   const storedByToken = !storedUser && tokenTmp ? getUserDetailsByToken(tokenTmp) : null;
@@ -4376,6 +4406,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     destination_address: data.destination_address ?? null,
       additional_remarks: additionalRemarks,
       additional_remark: additionalRemarks,
+      additional_request: additionalRemarks,
 
     radius: roadRadius,
     ...dispatchStagePayload,
@@ -4408,6 +4439,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       destination_address: data.destination_address ?? null,
       additional_remarks: additionalRemarks,
       additional_remark: additionalRemarks,
+      additional_request: additionalRemarks,
       user_bid_price: dispatchBidPrice,
       min_fare_amount: legacyMinFareAmount,
       max_fare_amount: legacyMaxFareAmount,
@@ -4476,6 +4508,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         destination_address: data.destination_address ?? null,
               additional_remarks: additionalRemarks,
               additional_remark: additionalRemarks,
+              additional_request: additionalRemarks,
 
         radius: roadRadius,
         ...dispatchStagePayload,
@@ -4507,6 +4540,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
           destination_address: data.destination_address ?? null,
           additional_remarks: additionalRemarks,
           additional_remark: additionalRemarks,
+          additional_request: additionalRemarks,
           user_bid_price: dispatchBidPrice,
           min_fare_amount: legacyMinFareAmount,
           max_fare_amount: legacyMaxFareAmount,
@@ -4646,6 +4680,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       destination_address: data.destination_address ?? null,
         additional_remarks: additionalRemarks,
         additional_remark: additionalRemarks,
+        additional_request: additionalRemarks,
 
       radius: roadRadius,
       ...dispatchStagePayload,
@@ -4699,6 +4734,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         destination_address: data.destination_address ?? null,
         additional_remarks: additionalRemarks,
         additional_remark: additionalRemarks,
+        additional_request: additionalRemarks,
         user_bid_price: dispatchBidPrice,
         min_fare_amount: legacyMinFareAmount,
         max_fare_amount: legacyMaxFareAmount,
@@ -4735,10 +4771,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         bidRequestPayload?.min_fare ?? bidRequestPayload?.ride_details?.min_fare ?? null,
       max_fare:
         bidRequestPayload?.max_fare ?? bidRequestPayload?.ride_details?.max_fare ?? null,
-      additional_remarks:
-        bidRequestPayload?.additional_remarks ??
-        bidRequestPayload?.additional_remark ??
-        null,
+      additional_remarks: resolveAdditionalRemarks(bidRequestPayload),
     });
 
     const ridePayloadForDriver = attachCustomerFields(
@@ -5797,9 +5830,7 @@ socket.emit("ride:candidatesSummary", {
         toNumber(
           safePayload?.client_ts ?? safePayload?.received_at ?? safePayload?.at ?? null
         ) ?? null,
-      additional_remarks: toTrimmedText(
-        safePayload?.additional_remarks ?? safePayload?.additional_remark ?? null
-      ),
+      additional_remarks: resolveAdditionalRemarks(safePayload),
       at: Date.now(),
     });
   });
@@ -6817,7 +6848,7 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       driver_rating: ridePayload?.driver_rating ?? null,
       driver_image: ridePayload?.driver_image ?? null,
       additional_remarks:
-        ridePayload?.additional_remarks ?? ridePayload?.additional_remark ?? null,
+        resolveAdditionalRemarks(ridePayload),
       at: Date.now(),
     });
 
