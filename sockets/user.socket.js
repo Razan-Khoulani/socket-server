@@ -3028,6 +3028,16 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     centerShiftMeters === null ||
     centerShiftMeters > NEARBY_CENTER_RESET_THRESHOLD_M;
 
+  const driverSearchStartedAt = toNumber(socket.nearbyDriversSearchStartedAt);
+  const vehicleTypesSearchStartedAt = toNumber(socket.nearbyVehicleTypesSearchStartedAt);
+  const needsTimerSync =
+    driverSearchStartedAt !== null &&
+    (vehicleTypesSearchStartedAt === null ||
+      vehicleTypesSearchStartedAt < driverSearchStartedAt);
+  if (needsTimerSync) {
+    socket.nearbyVehicleTypesSearchStartedAt = driverSearchStartedAt;
+  }
+
   applyNearbyFiltersFromPayload(payload, { resetMissing: false });
   syncRideContextFromPayload(payload, "user:getNearbyVehicleTypes");
 
@@ -3116,6 +3126,9 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     center_changed: centerChanged,
     center_shift_m: centerShiftMeters,
     center_reset_threshold_m: NEARBY_CENTER_RESET_THRESHOLD_M,
+    timer_synced_with_drivers: needsTimerSync,
+    drivers_search_started_at: driverSearchStartedAt,
+    vehicle_types_search_started_at: toNumber(socket.nearbyVehicleTypesSearchStartedAt),
     dispatch_stages_m: socket.nearbyDispatchStagesMeters,
     dispatch_timeout_s: socket.nearbyDispatchTimeoutS,
     base_radius_m: socket.nearbyRadius,
