@@ -1217,15 +1217,15 @@ const AIR_CANDIDATE_RADIUS_METERS = Number.isFinite(Number(process.env.AIR_CANDI
   : 8000;
 
 const MAX_ROAD_FILTER_CANDIDATES = Number.isFinite(Number(process.env.MAX_ROAD_FILTER_CANDIDATES))
-  ? Math.max(1, Number(process.env.MAX_ROAD_FILTER_CANDIDATES))
-  : 25;
+  ? Math.max(0, Number(process.env.MAX_ROAD_FILTER_CANDIDATES))
+  : 0;
 const MAX_DISPATCH_RADIUS_METERS = Number.isFinite(Number(process.env.MAX_DISPATCH_RADIUS_METERS))
   ? Math.max(MIN_DISPATCH_RADIUS_METERS, Number(process.env.MAX_DISPATCH_RADIUS_METERS))
   : DEFAULT_MAX_DISPATCH_RADIUS_METERS;
 
 const MAX_DISPATCH_CANDIDATES = Number.isFinite(Number(process.env.MAX_DISPATCH_CANDIDATES))
-  ? Number(process.env.MAX_DISPATCH_CANDIDATES)
-  : 30;
+  ? Math.max(0, Number(process.env.MAX_DISPATCH_CANDIDATES))
+  : 0;
 
 const MAX_DRIVER_LOCATION_AGE_MS = Number.isFinite(Number(process.env.MAX_DRIVER_LOCATION_AGE_MS))
   ? Number(process.env.MAX_DRIVER_LOCATION_AGE_MS)
@@ -3840,12 +3840,15 @@ async function restartRideDispatch(io, payload = {}) {
         snapshot?.radius ??
         null
     ) ?? ROAD_RADIUS_METERS;
-
-  removeRideFromAllInboxes(io, safeRideId, {
-    preserveSnapshot: true,
-    preserveUser: true,
-    emitUnavailable: false,
-  });
+  const shouldHardReset =
+    toBinaryFlag(payload?.hard_reset ?? payload?.reset_candidates ?? null) === 1;
+  if (shouldHardReset) {
+    removeRideFromAllInboxes(io, safeRideId, {
+      preserveSnapshot: true,
+      preserveUser: true,
+      emitUnavailable: false,
+    });
+  }
 
   const restartPayload = {
     ...(snapshot && typeof snapshot === "object" ? snapshot : {}),
@@ -4366,6 +4369,8 @@ async function dispatchToNearbyDrivers(io, data) {
           .filter((value) => !!value)
       )
     : null;
+  const strictTargetDispatch =
+    toBinaryFlag(data?.restrict_to_driver_ids ?? data?.target_only ?? null) === 1;
 
   const roadFilteredRaw = await filterDriversByRoadRadius(
     availableAir,
@@ -4375,8 +4380,8 @@ async function dispatchToNearbyDrivers(io, data) {
   );
 
   const roadFiltered =
-    targetDriverIdSet && targetDriverIdSet.size > 0
-      ? availableAir.filter((driver) => {
+    strictTargetDispatch && targetDriverIdSet && targetDriverIdSet.size > 0
+      ? roadFilteredRaw.filter((driver) => {
           const driverId = toNumber(driver?.driver_id);
           return !!driverId && targetDriverIdSet.has(driverId);
         })
@@ -4414,10 +4419,20 @@ const roadHandicapReady = roadFiltered.filter(
   (driver) => toBinaryFlag(driver?.handicap) === 1
 ).length;
 
+const prioritizedEligibleForDispatch =
+  !strictTargetDispatch && targetDriverIdSet && targetDriverIdSet.size > 0
+    ? [...eligibleForDispatch].sort((a, b) => {
+        const aPriority = targetDriverIdSet.has(toNumber(a?.driver_id)) ? 1 : 0;
+        const bPriority = targetDriverIdSet.has(toNumber(b?.driver_id)) ? 1 : 0;
+        if (aPriority !== bPriority) return bPriority - aPriority;
+        return 0;
+      })
+    : eligibleForDispatch;
+
 const candidateDriversRaw =
   MAX_DISPATCH_CANDIDATES > 0
-    ? eligibleForDispatch.slice(0, MAX_DISPATCH_CANDIDATES)
-    : eligibleForDispatch;
+    ? prioritizedEligibleForDispatch.slice(0, MAX_DISPATCH_CANDIDATES)
+    : prioritizedEligibleForDispatch;
 
 // احتفظ بالمرشحين القدامى طالما:
 // - online
@@ -4467,7 +4482,11 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   dispatch_total_stages: radiusPlan.stagesMeters.length,
   next_radius_m: radiusPlan.nextRadiusMeters ?? null,
   service_type_id: serviceTypeId ?? null,
-  target_driver_filter_applied: !!(targetDriverIdSet && targetDriverIdSet.size > 0),
+  target_driver_filter_applied:
+    !!(strictTargetDispatch && targetDriverIdSet && targetDriverIdSet.size > 0),
+  target_driver_prioritized:
+    !!(!strictTargetDispatch && targetDriverIdSet && targetDriverIdSet.size > 0),
+  target_driver_strict_mode: strictTargetDispatch,
   target_driver_ids_count: targetDriverIdSet ? targetDriverIdSet.size : 0,
   nearby_air: nearbyAir.length,
   available_air: availableAir.length,
@@ -5346,13 +5365,20 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
     const roadDistanceM = extractRoadDistanceMeters(data);
     const durationMin = toRouteMetricNumber(data?.duration ?? null);
     const durationS = durationMin !== null ? Math.round(durationMin * 60) : null;
+    const resolvedRoadDistanceM = roadDistanceM ?? airDistanceM;
+    const resolvedDurationS = durationS ?? airDurationS;
 
     return {
-      road_distance_m: roadDistanceM,
-      road_duration_s: durationS,
-      road_duration_min: durationMin !== null ? round2(durationMin) : null,
+      road_distance_m: resolvedRoadDistanceM,
+      road_duration_s: resolvedDurationS,
+      road_duration_min:
+        resolvedDurationS !== null
+          ? round2(resolvedDurationS / 60)
+          : durationMin !== null
+          ? round2(durationMin)
+          : null,
       raw: data,
-      source: roadDistanceM !== null ? "road-api" : "road-api-empty",
+      source: roadDistanceM !== null ? "road-api" : "air-fallback-road-api-empty",
     };
   } catch (error) {
     console.error(
@@ -5373,7 +5399,11 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
 }
 
 async function filterDriversByRoadRadius(drivers, pickupLat, pickupLong, roadRadiusM) {
-  const list = Array.isArray(drivers) ? drivers.slice(0, MAX_ROAD_FILTER_CANDIDATES) : [];
+  const list = Array.isArray(drivers)
+    ? MAX_ROAD_FILTER_CANDIDATES > 0
+      ? drivers.slice(0, MAX_ROAD_FILTER_CANDIDATES)
+      : drivers
+    : [];
 
   const results = await Promise.all(
     list.map(async (d) => {
