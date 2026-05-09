@@ -83,6 +83,41 @@ const toGenderFilter = (v) => {
 
   return null;
 };
+const toRequiredNeedFlag = (v) => {
+  const parsed = toBinaryFlag(v);
+  return parsed === 1 ? 1 : null;
+};
+const matchesDispatchPreference = (driver = null, requiredGender = null, needChildSeat = null, needHandicap = null) => {
+  if (!driver || typeof driver !== "object") return false;
+
+  if (requiredGender === 1 || requiredGender === 2) {
+    const driverGender = toGenderFilter(driver?.driver_gender ?? driver?.gender ?? null);
+    if (driverGender !== requiredGender) return false;
+  }
+
+  if (needChildSeat === 1) {
+    const driverChildSeat = toBinaryFlag(
+      driver?.child_seat ??
+        driver?.child_seat_accessibility ??
+        driver?.smoking ??
+        driver?.smoking_value ??
+        null
+    );
+    if (driverChildSeat !== 1) return false;
+  }
+
+  if (needHandicap === 1) {
+    const driverHandicap = toBinaryFlag(
+      driver?.handicap ??
+        driver?.handicap_accessibility ??
+        driver?.special_needs ??
+        null
+    );
+    if (driverHandicap !== 1) return false;
+  }
+
+  return true;
+};
 const toTrimmedText = (v) => {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
@@ -4238,7 +4273,6 @@ async function dispatchToNearbyDrivers(io, data) {
     "required_driver_gender",
     "required_gender",
     "driver_gender",
-    "gender",
     "requiredDriverGender",
     "driverGender",
   ]);
@@ -4261,20 +4295,19 @@ async function dispatchToNearbyDrivers(io, data) {
     "can_receive_special_needs",
   ]);
   const requiredGender = toGenderFilter(requiredGenderRaw);
-  const needChildSeat = toBinaryFlag(needChildSeatRaw);
-  const needHandicap = toBinaryFlag(needHandicapRaw);
+  const needChildSeat = toRequiredNeedFlag(needChildSeatRaw);
+  const needHandicap = toRequiredNeedFlag(needHandicapRaw);
   const dispatchPreferencePayload = {
-    ...(requiredGender === 1 || requiredGender === 2 || requiredGender === 0
+    ...(requiredGender === 1 || requiredGender === 2
       ? {
           required_driver_gender: requiredGender,
           required_gender: requiredGender,
           driver_gender: requiredGender,
-          gender: requiredGender,
         }
       : {}),
-    ...(needChildSeat === 0 || needChildSeat === 1
+    ...(needChildSeat === 1
       ? {
-          need_child_seat: needChildSeat,
+        need_child_seat: needChildSeat,
           child_seat: needChildSeat,
           require_child_seat: needChildSeat,
           smoking: needChildSeat,
@@ -4283,7 +4316,7 @@ async function dispatchToNearbyDrivers(io, data) {
           child_seat_accessibility: needChildSeat,
         }
       : {}),
-    ...(needHandicap === 0 || needHandicap === 1
+    ...(needHandicap === 1
       ? {
           need_handicap: needHandicap,
           handicap: needHandicap,
@@ -4428,6 +4461,8 @@ async function dispatchToNearbyDrivers(io, data) {
       : roadFilteredRaw;
 
 const existingCandidateSet = rideCandidates.get(rideId) ?? new Set();
+const forceNewSearchWindow =
+  toNumber(data?.force_new_search_window ?? data?.reset_search_window ?? null) === 1;
 
 const eligibleForDispatch = roadFiltered.filter((driver) => {
   const driverId = toNumber(driver?.driver_id);
@@ -4479,9 +4514,22 @@ const candidateDriversRaw =
 // - ما عندهم رحلة ثانية
 // - ما عندهم queued ride ثانية
 // - العرض لسا صالح
-const retainedExistingIds = Array.from(existingCandidateSet).filter((driverId) =>
-  shouldKeepExistingCandidateForRide(rideId, driverId)
-);
+const retainedExistingIds = forceNewSearchWindow
+  ? []
+  : Array.from(existingCandidateSet).filter((driverId) => {
+      if (!shouldKeepExistingCandidateForRide(rideId, driverId)) return false;
+      const live = driverLocationService.getDriver(driverId);
+      const meta = driverLocationService.getMeta(driverId) || {};
+      return matchesDispatchPreference(
+        {
+          ...(meta && typeof meta === "object" ? meta : {}),
+          ...(live && typeof live === "object" ? live : {}),
+        },
+        requiredGender,
+        needChildSeat,
+        needHandicap
+      );
+    });
 
 // السائقين الجدد من الفلترة الحالية
 const newCandidateIds = candidateDriversRaw
@@ -4528,6 +4576,7 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
     !!(!strictTargetDispatch && targetDriverIdSet && targetDriverIdSet.size > 0),
   target_driver_strict_mode: strictTargetDispatch,
   target_driver_ids_count: targetDriverIdSet ? targetDriverIdSet.size : 0,
+  force_new_search_window: forceNewSearchWindow,
   nearby_air: nearbyAir.length,
   available_air: availableAir.length,
   road_filtered_raw: roadFilteredRaw.length,
@@ -4544,13 +4593,13 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   final_candidates: nextCandidateIds.length,
   required_gender: requiredGender ?? null,
   need_child_seat: needChildSeat ?? null,
-  need_child_seat_filter_applied: needChildSeat === 0 || needChildSeat === 1,
+  need_child_seat_filter_applied: needChildSeat === 1,
   raw_required_gender: requiredGenderRaw ?? null,
   raw_smoking: needChildSeatRaw ?? null,
   raw_child_seat: needChildSeatRaw ?? null,
   raw_need_child_seat: needChildSeatRaw ?? null,
   need_handicap: needHandicap ?? null,
-  need_handicap_filter_applied: needHandicap === 0 || needHandicap === 1,
+  need_handicap_filter_applied: needHandicap === 1,
   raw_handicap: needHandicapRaw ?? null,
   raw_need_handicap: needHandicapRaw ?? null,
   raw_require_handicap: needHandicapRaw ?? null,
