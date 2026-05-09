@@ -2540,6 +2540,7 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
 
   const builtCustomer = buildCustomerPayload(payload, user_details ?? customer_details ?? customer ?? null);
   const safeCustomer = sanitizeCustomerForClient(builtCustomer);
+  const normalizedAdditionalRemarks = resolveAdditionalRemarks(payload);
 
   const sanitized = {
     ...stripTokenFields(rest),
@@ -2571,6 +2572,29 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
     sanitized.customer_phone = null;
     sanitized.customer_phone_full = null;
     sanitized.customer_image = null;
+  }
+
+  if (normalizedAdditionalRemarks !== null) {
+    sanitized.additional_remarks = normalizedAdditionalRemarks;
+    sanitized.additional_remark = normalizedAdditionalRemarks;
+    sanitized.additional_request = normalizedAdditionalRemarks;
+  }
+
+  if (
+    sanitized?.ride_details &&
+    typeof sanitized.ride_details === "object" &&
+    !Array.isArray(sanitized.ride_details)
+  ) {
+    sanitized.ride_details = {
+      ...sanitized.ride_details,
+      ...(normalizedAdditionalRemarks !== null
+        ? {
+            additional_remarks: normalizedAdditionalRemarks,
+            additional_remark: normalizedAdditionalRemarks,
+            additional_request: normalizedAdditionalRemarks,
+          }
+        : {}),
+    };
   }
 
   return withDriverImage(sanitized);

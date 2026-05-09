@@ -1,6 +1,7 @@
 // sockets/user.socket.js
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios");
+const { getDistanceMeters } = require("../utils/geo.util");
 const {
   setUserDetails,
   getUserDetailsByToken,
@@ -23,6 +24,11 @@ const userRoom = (userId) => `user:${userId}`;
 const DEFAULT_NEARBY_RADIUS_METERS = 5000;
 const NEARBY_EVERY_MS = 3000;
 const MAX_DRIVER_LOCATION_AGE_MS = 2 * 60 * 1000;
+const NEARBY_CENTER_RESET_THRESHOLD_M = Number.isFinite(
+  Number(process.env.NEARBY_CENTER_RESET_THRESHOLD_M)
+)
+  ? Math.max(0, Number(process.env.NEARBY_CENTER_RESET_THRESHOLD_M))
+  : 75;
 const KNOWN_SERVICE_CATEGORY_IDS = new Set([1, 2, 3, 4, 5, 6, 7, 31, 32]);
 
 // ? NEW: road-based filtering
@@ -81,6 +87,107 @@ const parseLatLongPair = (value) => {
   const long = toNumber(rawLong);
   if (lat === null || long === null) return null;
   return { lat, long };
+};
+const extractPickupCenterFromPayload = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return null;
+
+  const directPairs = [
+    { lat: payload?.pickup_lat, long: payload?.pickup_long },
+    { lat: payload?.pickupLat, long: payload?.pickupLong },
+    {
+      lat: payload?.pickup?.lat ?? payload?.pickup?.latitude,
+      long:
+        payload?.pickup?.long ??
+        payload?.pickup?.lng ??
+        payload?.pickup?.longitude ??
+        payload?.pickup?.lon,
+    },
+  ];
+
+  for (const pair of directPairs) {
+    const lat = toNumber(pair?.lat);
+    const long = toNumber(pair?.long);
+    if (lat !== null && long !== null) {
+      return { lat, long };
+    }
+  }
+
+  const pairFromString = parseLatLongPair(
+    payload?.pickup_latlong ??
+      payload?.pickupLatLong ??
+      payload?.pickup_coordinates ??
+      payload?.pickupCoordinates ??
+      null
+  );
+  if (pairFromString) return pairFromString;
+
+  const rawAddressList = payload?.address_list ?? payload?.addressList ?? null;
+  let addressList = null;
+  if (Array.isArray(rawAddressList)) {
+    addressList = rawAddressList;
+  } else if (typeof rawAddressList === "string" && rawAddressList.trim() !== "") {
+    try {
+      const parsed = JSON.parse(rawAddressList);
+      if (Array.isArray(parsed)) {
+        addressList = parsed;
+      }
+    } catch (_) {}
+  }
+
+  if (Array.isArray(addressList) && addressList.length > 0) {
+    const first = addressList[0];
+    if (first && typeof first === "object") {
+      const lat = toNumber(
+        first?.address_lat ?? first?.addressLat ?? first?.lat ?? first?.latitude ?? null
+      );
+      const long = toNumber(
+        first?.address_long ??
+          first?.addressLong ??
+          first?.lng ??
+          first?.long ??
+          first?.longitude ??
+          first?.lon ??
+          null
+      );
+      if (lat !== null && long !== null) {
+        return { lat, long };
+      }
+    }
+  }
+
+  return null;
+};
+const extractGenericCenterFromPayload = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return null;
+  const lat = toNumber(payload?.lat ?? payload?.latitude ?? null);
+  const long = toNumber(
+    payload?.long ?? payload?.lng ?? payload?.longitude ?? payload?.lon ?? null
+  );
+  if (lat === null || long === null) return null;
+  return { lat, long };
+};
+const resolveNearbyCenterFromPayload = (payload = {}, options = {}) => {
+  const preferPickup = options?.preferPickup === true;
+  const pickupCenter = extractPickupCenterFromPayload(payload);
+  const genericCenter = extractGenericCenterFromPayload(payload);
+  return preferPickup ? pickupCenter ?? genericCenter : genericCenter ?? pickupCenter;
+};
+const getNearbyCenterShiftMeters = (previousCenter, nextCenter) => {
+  const prevLat = toNumber(previousCenter?.lat);
+  const prevLong = toNumber(previousCenter?.long);
+  const nextLat = toNumber(nextCenter?.lat);
+  const nextLong = toNumber(nextCenter?.long);
+  if (
+    prevLat === null ||
+    prevLong === null ||
+    nextLat === null ||
+    nextLong === null
+  ) {
+    return null;
+  }
+
+  const distance = getDistanceMeters(prevLat, prevLong, nextLat, nextLong);
+  return Number.isFinite(distance) ? distance : null;
 };
 const normalizeToken = (value) => {
   if (value === null || value === undefined) return null;
@@ -2710,7 +2817,7 @@ item.max_price = priceBounds.max_price;
   socket.on("user:findNearbyDrivers", async (payload = {}) => {
     debugLog("user:findNearbyDrivers", payload, socket.id);
     console.log("?? payload from frontend:", payload);
-    const { user_id, lat, long, service_type_id } = payload;
+    const { user_id, service_type_id } = payload;
     const nearbyToken = normalizeToken(
       payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
     );
@@ -2747,9 +2854,10 @@ item.max_price = priceBounds.max_price;
     socket.nearbyDispatchTimeoutS = RIDE_TIMEOUT_S;
     socket.nearbyDriversSearchStartedAt = Date.now();
 
-    const la = toNumber(lat);
-    const lo = toNumber(long);
-    if (la === null || lo === null) return;
+    const center = resolveNearbyCenterFromPayload(payload, { preferPickup: false });
+    if (!center) return;
+    const la = center.lat;
+    const lo = center.long;
 
     socket.nearbyCenter = { lat: la, long: lo };
 
@@ -2781,8 +2889,8 @@ item.max_price = priceBounds.max_price;
   //////////////////////////////////////////////////////////
 
 const handleGetNearbyVehicleTypes = async (payload = {}) => {
-  const { lat, long } = payload;
-  debugLog("user:getNearbyVehicleTypes", { lat, long }, socket.id);
+  const requestedCenter = resolveNearbyCenterFromPayload(payload, { preferPickup: true });
+  debugLog("user:getNearbyVehicleTypes", { center: requestedCenter }, socket.id);
   console.log("[user:getNearbyVehicleTypes] payload:", payload);
 
   const nearbyTypesToken = normalizeToken(
@@ -2793,14 +2901,24 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     resolvePayloadUserId(payload) ?? toNumber(payload?.user_id) ?? toNumber(socket.userId);
   switchSocketUserSession(resolvedUserId, nearbyTypesToken, "user:getNearbyVehicleTypes");
 
-  const la = toNumber(lat);
-  const lo = toNumber(long);
+  let la = toNumber(requestedCenter?.lat);
+  let lo = toNumber(requestedCenter?.long);
+  if (la === null || lo === null) {
+    const rideId = resolveRideIdFromPayload(payload);
+    if (rideId) {
+      ensureNearbyCenterFromRide(rideId);
+    }
+    la = toNumber(socket.nearbyCenter?.lat);
+    lo = toNumber(socket.nearbyCenter?.long);
+  }
   if (la === null || lo === null) return;
+  const nextCenter = { lat: la, long: lo };
   const previousCenter = socket.nearbyCenter;
+  const centerShiftMeters = getNearbyCenterShiftMeters(previousCenter, nextCenter);
   const centerChanged =
-    !previousCenter ||
-    toNumber(previousCenter?.lat) !== la ||
-    toNumber(previousCenter?.long) !== lo;
+    previousCenter == null ||
+    centerShiftMeters === null ||
+    centerShiftMeters > NEARBY_CENTER_RESET_THRESHOLD_M;
 
   applyNearbyFiltersFromPayload(payload, { resetMissing: false });
   syncRideContextFromPayload(payload, "user:getNearbyVehicleTypes");
@@ -2875,7 +2993,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   if (centerChanged) {
     socket.lastVehicleTypesSig = null;
   }
-  socket.nearbyCenter = { lat: la, long: lo };
+  socket.nearbyCenter = nextCenter;
 
   const resolvedServiceCategoryId =
     normalizeServiceCategoryId(socket.nearbyServiceCategoryId) ??
@@ -2884,6 +3002,8 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     socket_id: socket.id,
     service_category_id: resolvedServiceCategoryId ?? null,
     center_changed: centerChanged,
+    center_shift_m: centerShiftMeters,
+    center_reset_threshold_m: NEARBY_CENTER_RESET_THRESHOLD_M,
     dispatch_stages_m: socket.nearbyDispatchStagesMeters,
     dispatch_timeout_s: socket.nearbyDispatchTimeoutS,
     base_radius_m: socket.nearbyRadius,
@@ -2910,19 +3030,33 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   socket.on("getUserNearbyVecletype", handleGetNearbyVehicleTypes);
 
   socket.on("user:updateNearbyCenter", async (payload = {}) => {
-    const { lat, long } = payload;
-    debugLog("user:updateNearbyCenter", { lat, long }, socket.id);
+    const requestedCenter = resolveNearbyCenterFromPayload(payload, { preferPickup: false });
+    debugLog("user:updateNearbyCenter", { center: requestedCenter }, socket.id);
     if (!socket.nearbyCenter) return;
 
-    const la = toNumber(lat);
-    const lo = toNumber(long);
+    const la = toNumber(requestedCenter?.lat);
+    const lo = toNumber(requestedCenter?.long);
     if (la === null || lo === null) return;
+    const nextCenter = { lat: la, long: lo };
+    const centerShiftMeters = getNearbyCenterShiftMeters(socket.nearbyCenter, nextCenter);
+    const centerChanged =
+      centerShiftMeters === null ||
+      centerShiftMeters > NEARBY_CENTER_RESET_THRESHOLD_M;
     applyNearbyFiltersFromPayload(payload, { resetMissing: false });
     syncRideContextFromPayload(payload, "user:updateNearbyCenter");
 
-    socket.nearbyCenter = { lat: la, long: lo };
-    socket.nearbyDriversSearchStartedAt = Date.now();
-    socket.nearbyVehicleTypesSearchStartedAt = Date.now();
+    socket.nearbyCenter = nextCenter;
+    if (centerChanged) {
+      socket.nearbyDriversSearchStartedAt = Date.now();
+      socket.nearbyVehicleTypesSearchStartedAt = Date.now();
+      socket.lastVehicleTypesSig = null;
+    }
+    console.log("[nearby-center] update", {
+      socket_id: socket.id,
+      center_changed: centerChanged,
+      center_shift_m: centerShiftMeters,
+      center_reset_threshold_m: NEARBY_CENTER_RESET_THRESHOLD_M,
+    });
 
     const sc = extractServiceCategoryIdFromPayload(payload);
     if (sc !== null) setNearbyServiceCategoryId(sc, "user:updateNearbyCenter");
