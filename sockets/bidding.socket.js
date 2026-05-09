@@ -3625,6 +3625,22 @@ function emitPendingBidRequestsForDriver(io, driverId, source = "driver:getRides
   return { attempted, delivered, pending };
 }
 
+function recoverDriverPendingDispatch(io, driverId, source = "driver:recovery") {
+  const safeDriverId = toNumber(driverId);
+  if (!safeDriverId) return { attempted: 0, delivered: 0, pending: 0 };
+
+  emitDriverInbox(io, safeDriverId, "driver:rides:list");
+  const recoveryReport = emitPendingBidRequestsForDriver(io, safeDriverId, source);
+  console.log("[dispatch][driver-recovery]", {
+    driver_id: safeDriverId,
+    source,
+    attempted: recoveryReport.attempted,
+    delivered: recoveryReport.delivered,
+    pending: recoveryReport.pending,
+  });
+  return recoveryReport;
+}
+
 function updateRideUserDetailsInInbox(io, rideId, userDetails) {
   if (!rideId || !userDetails) return;
 
@@ -4533,14 +4549,15 @@ const candidateSync = syncRideCandidates(
   { preserveExisting: false }
 );
 
-// فقط السائقين الجدد تُرسل لهم bidRequest من جديد
-// إذا كان في تحديث سعر، ابعت bidRequest لكل المرشحين الحاليين
-// أما إذا كان dispatch عادي، ابعت فقط للجدد
+// افتراضياً: dispatch يكون فقط للجدد حتى لا نكرر bidRequest على نفس السائق.
+// إعادة البث للجميع تكون فقط للحالات المقصودة (تحديث سعر/تفاعل مستخدم/طلب صريح).
+const forcedRebroadcast =
+  toBinaryFlag(data?.force_rebroadcast ?? data?.rebroadcast_all ?? null) === 1;
 const shouldRebroadcastBidRequest =
-  incrementalExpansion ||
-  data?.dispatch_expand_reason === "user_response" ||
+  forcedRebroadcast ||
   data?.isPriceUpdated === true ||
-  toNumber(data?.updatedPrice) !== null;
+  toNumber(data?.updatedPrice) !== null ||
+  data?.dispatch_expand_reason === "user_response";
 
 const notifyDriverIdSet = new Set(
   shouldRebroadcastBidRequest
@@ -5939,18 +5956,7 @@ module.exports = (io, socket) => {
       updatedAt: Date.now(),
     });
 
-    emitDriverInbox(io, driverId, "driver:rides:list");
-    const recoveryReport = emitPendingBidRequestsForDriver(
-      io,
-      driverId,
-      "driver:getRidesList"
-    );
-    console.log("[dispatch][driver:getRidesList][recovery]", {
-      driver_id: driverId,
-      attempted: recoveryReport.attempted,
-      delivered: recoveryReport.delivered,
-      pending: recoveryReport.pending,
-    });
+    recoverDriverPendingDispatch(io, driverId, "driver:getRidesList");
 
     // Recovery must be explicit to avoid forcing driver UI into running screen.
     const shouldRecoverActiveRide =
@@ -8107,3 +8113,4 @@ module.exports.emitCandidatesSummaryForDriverStateChange = emitCandidatesSummary
 module.exports.canDriverReceiveNewRideRequests = canDriverReceiveNewRideRequests;
 module.exports.activateQueuedRideForDriver = activateQueuedRideForDriver;
 module.exports.getDriverInboxStats = getDriverInboxStats;
+module.exports.recoverDriverPendingDispatch = recoverDriverPendingDispatch;

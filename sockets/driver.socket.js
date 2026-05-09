@@ -643,15 +643,19 @@ module.exports = (io, socket) => {
             d.wallet_blocked_message ??
             ""
         );
+        const walletBlocked = Number(notValidWalletBalance) === 1;
+        // Keep socket presence online even when wallet is blocked; dispatch layer
+        // already excludes blocked wallets from receiving new requests.
         const canBeOnlineByApi =
-          currentStatus === 1 && Number(notValidWalletBalance) !== 1;
+          currentStatus === 1 || walletBlocked;
 
         const metaUpdate = {
           // status/meta
           is_online: canBeOnlineByApi,
           dashboard_is_online: canBeOnlineByApi,
-          not_valid_wallet_balance: Number(notValidWalletBalance) === 1 ? 1 : 0,
+          not_valid_wallet_balance: walletBlocked ? 1 : 0,
           not_valid_wallet_balance_msg: notValidWalletBalanceMsg,
+          can_receive_new_requests: walletBlocked ? 0 : 1,
           updatedAt: Date.now(),
           ...(Number.isFinite(resolvedProviderId) ? { provider_id: resolvedProviderId } : {}),
           ...(Number.isFinite(resolvedDriverServiceId)
@@ -706,6 +710,10 @@ module.exports = (io, socket) => {
       driverServiceId: socket.driverServiceId ?? driver_service_id ?? null,
       forceRefresh: true,
     });
+
+    if (typeof biddingSocket.recoverDriverPendingDispatch === "function") {
+      biddingSocket.recoverDriverPendingDispatch(io, driverId, "driver-online");
+    }
 
     emitCandidatesSummaryForDriver(driverId);
     emitAdminDriverUpdate(io, driverId);
@@ -766,7 +774,11 @@ module.exports = (io, socket) => {
         );
         const walletBlocked =
           Number(freshMeta.not_valid_wallet_balance ?? 0) === 1;
-        const shouldStayOnline = profileStatus === 1 && !walletBlocked;
+        const driverRoomSockets =
+          io?.sockets?.adapter?.rooms?.get(driverRoom(socket.driverId))?.size ?? 0;
+        const hasActiveSocketRoom = driverRoomSockets > 0;
+        const shouldStayOnline =
+          profileStatus === 1 || hasActiveSocketRoom || walletBlocked;
         if (!shouldStayOnline) {
           driverLocationService.updateMeta(socket.driverId, {
             is_online: false,
@@ -790,12 +802,17 @@ module.exports = (io, socket) => {
     );
     const walletBlockedNow =
       Number(currentMeta.not_valid_wallet_balance ?? 0) === 1;
-    const shouldStayOnlineNow = profileStatusNow === 1 && !walletBlockedNow;
+    const driverRoomSocketsNow =
+      io?.sockets?.adapter?.rooms?.get(driverRoom(socket.driverId))?.size ?? 0;
+    const hasActiveSocketRoomNow = driverRoomSocketsNow > 0;
+    const shouldStayOnlineNow =
+      profileStatusNow === 1 || hasActiveSocketRoomNow || walletBlockedNow;
 
     driverLocationService.updateMeta(socket.driverId, {
       is_online: shouldStayOnlineNow,
       dashboard_is_online: shouldStayOnlineNow,
       socket_disconnected: !shouldStayOnlineNow,
+      can_receive_new_requests: walletBlockedNow ? 0 : 1,
       updatedAt: now,
     });
 

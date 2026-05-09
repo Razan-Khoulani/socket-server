@@ -1044,11 +1044,15 @@ app.post("/events/internal/driver-location", async (req, res) => {
   const hasProfileStatus = Number.isFinite(profileStatusNumber);
   const resolvedOnline = hasExplicitStatus
     ? explicitStatusNumber === 1
+    : isOnlineByRoom
+    ? true
     : hasProfileStatus
     ? profileStatusNumber === 1
     : (existingMeta.is_online === false ? false : isOnlineByRoom);
   const resolvedDashboardOnline = hasExplicitStatus
     ? explicitStatusNumber === 1
+    : isOnlineByRoom
+    ? true
     : hasProfileStatus
     ? profileStatusNumber === 1
     : (existingMeta.dashboard_is_online === false ? false : isOnlineByRoom);
