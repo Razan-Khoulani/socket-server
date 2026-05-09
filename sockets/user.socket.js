@@ -1868,8 +1868,7 @@ const syncNearbyRadius = async (payload = {}) => {
       ? toBinaryFlag(handicapInput)
       : socket.nearbyNeedHandicap;
 
-    const hasAnyFilterKey = hasGender || hasChildSeat || hasHandicap;
-    if (resetMissing && hasAnyFilterKey) {
+    if (resetMissing) {
       if (!hasGender) nextGender = null;
       if (!hasChildSeat) nextChildSeat = null;
       if (!hasHandicap) nextHandicap = null;
