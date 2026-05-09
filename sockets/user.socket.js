@@ -1807,6 +1807,11 @@ const syncNearbyRadius = async (payload = {}) => {
 
   return normalizedRadius;
 };
+  const normalizeNearbyNeedFlag = (value) => {
+    const parsed = toBinaryFlag(value);
+    return parsed === 1 ? 1 : null;
+  };
+
   const applyNearbyFiltersFromPayload = (payload = {}, options = {}) => {
     const { resetMissing = false } = options || {};
     const base = payload && typeof payload === "object" ? payload : {};
@@ -1831,7 +1836,6 @@ const syncNearbyRadius = async (payload = {}) => {
       "required_driver_gender",
       "required_gender",
       "driver_gender",
-      "gender",
       "driverGender",
       "requiredDriverGender"
     );
@@ -1851,7 +1855,7 @@ const syncNearbyRadius = async (payload = {}) => {
     );
     const hasChildSeat = childSeatInput !== undefined;
     let nextChildSeat = hasChildSeat
-      ? toBinaryFlag(childSeatInput)
+      ? normalizeNearbyNeedFlag(childSeatInput)
       : socket.nearbyNeedChildSeat;
 
     const handicapInput = readFirstDefined(
@@ -1865,7 +1869,7 @@ const syncNearbyRadius = async (payload = {}) => {
     );
     const hasHandicap = handicapInput !== undefined;
     let nextHandicap = hasHandicap
-      ? toBinaryFlag(handicapInput)
+      ? normalizeNearbyNeedFlag(handicapInput)
       : socket.nearbyNeedHandicap;
 
     if (resetMissing) {
@@ -1914,7 +1918,7 @@ const syncNearbyRadius = async (payload = {}) => {
         if (driverGender !== requiredGender) return false;
       }
 
-      if (requiredChildSeat === 0 || requiredChildSeat === 1) {
+      if (requiredChildSeat === 1) {
         const driverChildSeat = toBinaryFlag(
           driver?.child_seat ??
             driver?.smoking ??
@@ -1925,7 +1929,7 @@ const syncNearbyRadius = async (payload = {}) => {
         if (driverChildSeat !== requiredChildSeat) return false;
       }
 
-      if (requiredHandicap === 0 || requiredHandicap === 1) {
+      if (requiredHandicap === 1) {
         const driverHandicap = toBinaryFlag(
           driver?.handicap ??
             driver?.handicap_accessibility ??
