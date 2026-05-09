@@ -1134,6 +1134,17 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
   const lo1 = toNumber(driverLong);
   const la2 = toNumber(pickupLat);
   const lo2 = toNumber(pickupLong);
+  const airDistanceM = getDistanceMeters(la1, lo1, la2, lo2);
+  const safeAirDistanceM =
+    Number.isFinite(airDistanceM) && airDistanceM >= 0 ? Math.round(airDistanceM) : null;
+  const fallbackSpeedKmph = 28;
+  const safeAirDurationS =
+    safeAirDistanceM !== null
+      ? Math.max(
+          1,
+          Math.round((safeAirDistanceM / 1000 / Math.max(1, fallbackSpeedKmph)) * 3600)
+        )
+      : null;
 
   if (la1 === null || lo1 === null || la2 === null || lo2 === null) {
     return {
@@ -1141,6 +1152,7 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
       road_duration_s: null,
       road_duration_min: null,
       raw: null,
+      source: "invalid-input",
     };
   }
 
@@ -1160,20 +1172,30 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
     const roadDistanceM = extractRoadDistanceMeters(data);
     const durationMin = toNumber(data?.duration ?? null);
     const durationS = durationMin !== null ? Math.round(durationMin * 60) : null;
+    const resolvedDistanceM = roadDistanceM ?? safeAirDistanceM;
+    const resolvedDurationS = durationS ?? safeAirDurationS;
+    const resolvedDurationMin =
+      resolvedDurationS !== null
+        ? roundMoney(resolvedDurationS / 60)
+        : durationMin !== null
+        ? roundMoney(durationMin)
+        : null;
 
     return {
-      road_distance_m: roadDistanceM,
-      road_duration_s: durationS,
-      road_duration_min: durationMin !== null ? roundMoney(durationMin) : null,
+      road_distance_m: resolvedDistanceM,
+      road_duration_s: resolvedDurationS,
+      road_duration_min: resolvedDurationMin,
       raw: data,
+      source: roadDistanceM !== null ? "road-api" : "air-fallback-empty-route",
     };
   } catch (e) {
     console.warn("[driverToPickupRoadMetrics] failed:", e?.response?.data || e?.message || e);
     return {
-      road_distance_m: null,
-      road_duration_s: null,
-      road_duration_min: null,
+      road_distance_m: safeAirDistanceM,
+      road_duration_s: safeAirDurationS,
+      road_duration_min: safeAirDurationS !== null ? roundMoney(safeAirDurationS / 60) : null,
       raw: null,
+      source: safeAirDistanceM !== null ? "air-fallback-error" : "error",
     };
   }
 };
