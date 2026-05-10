@@ -4628,11 +4628,7 @@ const candidateSync = syncRideCandidates(
 // إعادة البث للجميع تكون فقط للحالات المقصودة (تحديث سعر/تفاعل مستخدم/طلب صريح).
 const forcedRebroadcast =
   toBinaryFlag(data?.force_rebroadcast ?? data?.rebroadcast_all ?? null) === 1;
-const shouldRebroadcastBidRequest =
-  forcedRebroadcast ||
-  data?.isPriceUpdated === true ||
-  toNumber(data?.updatedPrice) !== null ||
-  data?.dispatch_expand_reason === "user_response";
+const shouldRebroadcastBidRequest = forcedRebroadcast;
 
 const notifyDriverIdSet = new Set(
   shouldRebroadcastBidRequest
