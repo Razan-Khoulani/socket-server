@@ -2601,6 +2601,24 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
   }
 
   if (safeCustomer) {
+    sanitized.user_id = safeCustomer.user_id ?? sanitized.user_id ?? null;
+    sanitized.user_name = safeCustomer.user_name ?? sanitized.user_name ?? null;
+    sanitized.user_gender = safeCustomer.user_gender ?? sanitized.user_gender ?? null;
+    sanitized.user_country_code =
+      safeCustomer.user_country_code ?? sanitized.user_country_code ?? null;
+    sanitized.user_phone = safeCustomer.user_phone ?? sanitized.user_phone ?? null;
+    sanitized.user_phone_full = safeCustomer.user_phone_full ?? sanitized.user_phone_full ?? null;
+    sanitized.user_image = safeCustomer.user_image ?? sanitized.user_image ?? null;
+    if (!toTrimmedText(sanitized.profile_image) && toTrimmedText(safeCustomer.user_image)) {
+      sanitized.profile_image = safeCustomer.user_image;
+    }
+    if (!toTrimmedText(sanitized.avatar) && toTrimmedText(safeCustomer.user_image)) {
+      sanitized.avatar = safeCustomer.user_image;
+    }
+    if (!toTrimmedText(sanitized.image) && toTrimmedText(safeCustomer.user_image)) {
+      sanitized.image = safeCustomer.user_image;
+    }
+
     sanitized.user_details = safeCustomer;
     sanitized.customer = safeCustomer;
     sanitized.customer_details = safeCustomer;
@@ -2612,6 +2630,7 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
     sanitized.customer_phone_full = safeCustomer.user_phone_full ?? null;
     sanitized.customer_image = safeCustomer.user_image ?? null;
   } else {
+    sanitized.user_image = sanitized.user_image ?? null;
     sanitized.user_details = null;
     sanitized.customer = null;
     sanitized.customer_details = null;
@@ -5104,6 +5123,11 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     console.log("[ride:bidRequest] payload", {
       driver_id: d.driver_id,
       ride_id: bidRequestPayload?.ride_id ?? null,
+      user_image:
+        bidRequestPayload?.user_image ??
+        bidRequestPayload?.user_details?.user_image ??
+        bidRequestPayload?.customer_image ??
+        null,
       duration:
         bidRequestPayload?.ride_details?.duration ?? bidRequestPayload?.duration ?? null,
       route_api_distance_km: bidRequestPayload?.route_api_distance_km ?? null,
