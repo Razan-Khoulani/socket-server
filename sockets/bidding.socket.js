@@ -2369,6 +2369,8 @@ const buildUserDetails = (data) => {
     src?.avatar ??
     data?.profile_image ??
     data?.user_image ??
+    data?.image ??
+    data?.avatar ??
     data?.customer_image ??
     null;
 
@@ -2391,7 +2393,16 @@ const buildUserDetails = (data) => {
         ? `${countryCode}${contactNumber}`
         : stored?.user_phone_full ?? storedByToken?.user_phone_full ?? null,
     user_image: normalizeCustomerImageUrl(
-      userImage ?? stored?.user_image ?? storedByToken?.user_image ?? null
+      userImage ??
+        stored?.user_image ??
+        stored?.profile_image ??
+        stored?.image ??
+        stored?.avatar ??
+        storedByToken?.user_image ??
+        storedByToken?.profile_image ??
+        storedByToken?.image ??
+        storedByToken?.avatar ??
+        null
     ),
 
     // ✅ NEW: keep token in user_details snapshot (helps later merges on retry)
@@ -2471,9 +2482,13 @@ const buildCustomerPayload = (payload = {}, userDetails = null) => {
 
   const customerImage =
     details?.user_image ??
+    details?.profile_image ??
+    details?.image ??
+    details?.avatar ??
     payload?.user_image ??
     payload?.customer_image ??
     payload?.profile_image ??
+    payload?.image ??
     payload?.avatar ??
     null;
 
@@ -4943,10 +4958,27 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     null;
   const bidReqUserImage =
     ridePayload?.user_image ??
+    ridePayload?.customer_image ??
+    ridePayload?.profile_image ??
+    ridePayload?.image ??
+    ridePayload?.avatar ??
     data?.user_image ??
+    data?.customer_image ??
+    data?.profile_image ??
+    data?.image ??
+    data?.avatar ??
     userDetails?.user_image ??
+    userDetails?.profile_image ??
+    userDetails?.image ??
+    userDetails?.avatar ??
     bidReqStoredUser?.user_image ??
+    bidReqStoredUser?.profile_image ??
+    bidReqStoredUser?.image ??
+    bidReqStoredUser?.avatar ??
     bidReqStoredByToken?.user_image ??
+    bidReqStoredByToken?.profile_image ??
+    bidReqStoredByToken?.image ??
+    bidReqStoredByToken?.avatar ??
     null;
   const bidReqUserPhone =
     ridePayload?.user_phone ??
