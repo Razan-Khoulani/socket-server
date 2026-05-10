@@ -5710,7 +5710,42 @@ function applyRouteOverrideToTrackedRide(io, rideId, routeOverride, options = {}
     emitDriverPatch(io, driverId, [{ op: "upsert", ride: updated }]);
 
     if (emit_bid_request) {
-      io.to(driverRoom(driverId)).emit("ride:bidRequest", sanitizeRidePayloadForClient(updated));
+      const safeRideId = toNumber(rideId);
+      const safeDriverId = toNumber(driverId);
+      const currentState =
+        safeRideId && safeDriverId
+          ? getRideDriverState(safeRideId, safeDriverId)
+          : null;
+
+      // Avoid re-opening the same bid request modal for drivers already notified.
+      if (currentState?.notified_at) {
+        console.log("[ride:updateRouteMetrics][skip-bidRequest-duplicate]", {
+          ride_id: safeRideId,
+          driver_id: safeDriverId,
+          source: "route-metrics",
+        });
+      } else {
+        const bidRequestPayload = sanitizeRidePayloadForClient(updated);
+        const emitResult = tryEmitBidRequestToDriver(io, {
+          rideId: safeRideId,
+          driverId: safeDriverId,
+          bidRequestPayload,
+          ridePayloadForDriver: updated,
+          source: "route-metrics",
+          attempt: 1,
+        });
+
+        if (!emitResult.delivered) {
+          scheduleBidRequestRetry(io, {
+            rideId: safeRideId,
+            driverId: safeDriverId,
+            bidRequestPayload,
+            ridePayloadForDriver: updated,
+            source: "route-metrics",
+            attempt: 1,
+          });
+        }
+      }
     }
   }
 }
