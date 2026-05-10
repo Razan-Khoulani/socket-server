@@ -2369,8 +2369,6 @@ const buildUserDetails = (data) => {
     src?.avatar ??
     data?.profile_image ??
     data?.user_image ??
-    data?.image ??
-    data?.avatar ??
     data?.customer_image ??
     null;
 
@@ -2393,16 +2391,7 @@ const buildUserDetails = (data) => {
         ? `${countryCode}${contactNumber}`
         : stored?.user_phone_full ?? storedByToken?.user_phone_full ?? null,
     user_image: normalizeCustomerImageUrl(
-      userImage ??
-        stored?.user_image ??
-        stored?.profile_image ??
-        stored?.image ??
-        stored?.avatar ??
-        storedByToken?.user_image ??
-        storedByToken?.profile_image ??
-        storedByToken?.image ??
-        storedByToken?.avatar ??
-        null
+      userImage ?? stored?.user_image ?? storedByToken?.user_image ?? null
     ),
 
     // ✅ NEW: keep token in user_details snapshot (helps later merges on retry)
@@ -2482,13 +2471,9 @@ const buildCustomerPayload = (payload = {}, userDetails = null) => {
 
   const customerImage =
     details?.user_image ??
-    details?.profile_image ??
-    details?.image ??
-    details?.avatar ??
     payload?.user_image ??
     payload?.customer_image ??
     payload?.profile_image ??
-    payload?.image ??
     payload?.avatar ??
     null;
 
@@ -2601,24 +2586,6 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
   }
 
   if (safeCustomer) {
-    sanitized.user_id = safeCustomer.user_id ?? sanitized.user_id ?? null;
-    sanitized.user_name = safeCustomer.user_name ?? sanitized.user_name ?? null;
-    sanitized.user_gender = safeCustomer.user_gender ?? sanitized.user_gender ?? null;
-    sanitized.user_country_code =
-      safeCustomer.user_country_code ?? sanitized.user_country_code ?? null;
-    sanitized.user_phone = safeCustomer.user_phone ?? sanitized.user_phone ?? null;
-    sanitized.user_phone_full = safeCustomer.user_phone_full ?? sanitized.user_phone_full ?? null;
-    sanitized.user_image = safeCustomer.user_image ?? sanitized.user_image ?? null;
-    if (!toTrimmedText(sanitized.profile_image) && toTrimmedText(safeCustomer.user_image)) {
-      sanitized.profile_image = safeCustomer.user_image;
-    }
-    if (!toTrimmedText(sanitized.avatar) && toTrimmedText(safeCustomer.user_image)) {
-      sanitized.avatar = safeCustomer.user_image;
-    }
-    if (!toTrimmedText(sanitized.image) && toTrimmedText(safeCustomer.user_image)) {
-      sanitized.image = safeCustomer.user_image;
-    }
-
     sanitized.user_details = safeCustomer;
     sanitized.customer = safeCustomer;
     sanitized.customer_details = safeCustomer;
@@ -2630,7 +2597,6 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
     sanitized.customer_phone_full = safeCustomer.user_phone_full ?? null;
     sanitized.customer_image = safeCustomer.user_image ?? null;
   } else {
-    sanitized.user_image = sanitized.user_image ?? null;
     sanitized.user_details = null;
     sanitized.customer = null;
     sanitized.customer_details = null;
@@ -4977,27 +4943,10 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     null;
   const bidReqUserImage =
     ridePayload?.user_image ??
-    ridePayload?.customer_image ??
-    ridePayload?.profile_image ??
-    ridePayload?.image ??
-    ridePayload?.avatar ??
     data?.user_image ??
-    data?.customer_image ??
-    data?.profile_image ??
-    data?.image ??
-    data?.avatar ??
     userDetails?.user_image ??
-    userDetails?.profile_image ??
-    userDetails?.image ??
-    userDetails?.avatar ??
     bidReqStoredUser?.user_image ??
-    bidReqStoredUser?.profile_image ??
-    bidReqStoredUser?.image ??
-    bidReqStoredUser?.avatar ??
     bidReqStoredByToken?.user_image ??
-    bidReqStoredByToken?.profile_image ??
-    bidReqStoredByToken?.image ??
-    bidReqStoredByToken?.avatar ??
     null;
   const bidReqUserPhone =
     ridePayload?.user_phone ??
@@ -5123,11 +5072,6 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     console.log("[ride:bidRequest] payload", {
       driver_id: d.driver_id,
       ride_id: bidRequestPayload?.ride_id ?? null,
-      user_image:
-        bidRequestPayload?.user_image ??
-        bidRequestPayload?.user_details?.user_image ??
-        bidRequestPayload?.customer_image ??
-        null,
       duration:
         bidRequestPayload?.ride_details?.duration ?? bidRequestPayload?.duration ?? null,
       route_api_distance_km: bidRequestPayload?.route_api_distance_km ?? null,
