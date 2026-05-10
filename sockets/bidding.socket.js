@@ -3641,6 +3641,13 @@ function emitPendingBidRequestsForDriver(io, driverId, source = "driver:getRides
       is_running_ride: false,
     });
 
+    bidRequestPayload.user_image =
+  ridePayloadForDriver?.user_image ??
+  ridePayload?.user_image ??
+  userDetails?.user_image ??
+  null;
+
+
     const emitResult = tryEmitBidRequestToDriver(io, {
       rideId: safeRideId,
       driverId: safeDriverId,
