@@ -3641,12 +3641,7 @@ function emitPendingBidRequestsForDriver(io, driverId, source = "driver:getRides
       is_running_ride: false,
     });
 
-    bidRequestPayload.user_image =
-  ridePayloadForDriver?.user_image ??
-  ridePayload?.user_image ??
-  userDetails?.user_image ??
-  null;
-
+    
 
     const emitResult = tryEmitBidRequestToDriver(io, {
       rideId: safeRideId,
@@ -5021,6 +5016,16 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       user_phone: bidReqUserPhone,
       user_country_code: bidReqUserCountryCode,
       user_phone_full: bidReqUserPhoneFull,
+            customer_image: bidReqUserImage,
+user_details: {
+  user_id: bidReqUserId,
+  user_name: bidReqUserName,
+  user_gender: bidReqUserGender,
+  user_image: bidReqUserImage,
+  user_phone: bidReqUserPhone,
+  user_country_code: bidReqUserCountryCode,
+  user_phone_full: bidReqUserPhoneFull,
+},
 
       token: tokenTmp ?? null,
 
