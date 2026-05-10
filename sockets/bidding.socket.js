@@ -7386,40 +7386,90 @@ if (removed) {
       const rideFull = driverRideInbox.get(dId)?.get(rideId);
       const baseRide = rideFull ?? snapshotBase;
 
-      if (baseRide) {
-        const mergedUD = incomingUserDetails ?? baseRide.user_details ?? snapshotDetails ?? null;
+     if (baseRide) {
+const storedUser = fallbackUserId
+  ? getUserDetails(fallbackUserId)
+  : null;
 
-        const updatedRide = attachCustomerFields(
-          {
-            ...baseRide,
-            user_details: mergedUD ?? baseRide.user_details ?? null,
-            user_id: mergedUD?.user_id ?? baseRide.user_id ?? null,
-            user_name: mergedUD?.user_name ?? baseRide.user_name ?? null,
-            user_gender: mergedUD?.user_gender ?? baseRide.user_gender ?? null,
-            user_image: mergedUD?.user_image ?? baseRide.user_image ?? null,
-            user_phone: mergedUD?.user_phone ?? baseRide.user_phone ?? null,
-            user_country_code: mergedUD?.user_country_code ?? baseRide.user_country_code ?? null,
-            user_phone_full: mergedUD?.user_phone_full ?? baseRide.user_phone_full ?? null,
-            token:
-              mergedUD?.user_token ??
-              mergedUD?.token ??
-              baseRide?.token ??
-              payloadToken ??
-              null,
-            user_bid_price: newPrice,
-            isPriceUpdated: true,
-            updatedPrice: newPrice,
-            updatedAt: Date.now(),
+const mergedUD = {
+  ...(storedUser || {}),
+  ...(snapshotDetails || {}),
+  ...(baseRide?.user_details || {}),
+  ...(incomingUserDetails || {}),
+};
 
-            // ✅ timer fields (SECONDS)
-            ...(timer ? timer : {}),
-          },
-          mergedUD
-        );
+const updatedRide = attachCustomerFields(
+  {
+    ...baseRide,
+
+    user_details:
+      Object.keys(mergedUD).length > 0
+        ? mergedUD
+        : null,
+
+    user_id:
+      mergedUD.user_id ??
+      baseRide.user_id ??
+      snapshot?.user_id ??
+      null,
+
+    user_name:
+      mergedUD.user_name ??
+      baseRide.user_name ??
+      snapshot?.user_name ??
+      null,
+
+    user_gender:
+      mergedUD.user_gender ??
+      baseRide.user_gender ??
+      snapshot?.user_gender ??
+      null,
+
+    user_image:
+      mergedUD.user_image ??
+      baseRide.user_image ??
+      snapshot?.user_image ??
+      snapshot?.customer_image ??
+      null,
+
+    user_phone:
+      mergedUD.user_phone ??
+      baseRide.user_phone ??
+      null,
+
+    user_country_code:
+      mergedUD.user_country_code ??
+      baseRide.user_country_code ??
+      null,
+
+    user_phone_full:
+      mergedUD.user_phone_full ??
+      baseRide.user_phone_full ??
+      null,
+
+    token:
+      mergedUD.user_token ??
+      mergedUD.token ??
+      baseRide?.token ??
+      payloadToken ??
+      null,
+
+    user_bid_price: newPrice,
+    isPriceUpdated: true,
+    updatedPrice: newPrice,
+    updatedAt: Date.now(),
+
+    ...(timer ? timer : {}),
+  },
+  Object.keys(mergedUD).length > 0
+    ? mergedUD
+    : null
+);
 
         inboxUpsert(dId, rideId, updatedRide);
         emitDriverPatch(io, dId, [{ op: "upsert", ride: updatedRide }]);
-      } else {
+      }
+       else {
         console.log(`ℹ️ ride ${rideId} not found in inbox for driver ${dId} (skip update)`);
       }
 
