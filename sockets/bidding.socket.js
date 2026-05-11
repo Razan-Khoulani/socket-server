@@ -1443,6 +1443,17 @@ async function syncDriverUpdateListNotification({
       ? sanitizeRidePayloadForClient(rideModel)
       : null;
   const normalizedAdditionalRemarks = toTrimmedText(additionalRemarks);
+  const resolvedCustomerImage =
+  normalizedDispatchPayload?.user_image ??
+  normalizedDispatchPayload?.customer_image ??
+  normalizedDispatchPayload?.user_details?.user_image ??
+  normalizedDispatchPayload?.customer?.user_image ??
+  normalizedRideModel?.user_image ??
+  normalizedRideModel?.customer_image ??
+  normalizedRideModel?.user_details?.user_image ??
+  normalizedRideModel?.customer?.user_image ??
+  null;
+
   const laravelSyncPayload = {
     driver_id: driverId,
     ride_id: rideId,
@@ -1466,6 +1477,8 @@ async function syncDriverUpdateListNotification({
     paired_event: "driver:rides:list",
     dispatch_payload: normalizedDispatchPayload,
     ride_model: normalizedRideModel,
+    user_image: resolvedCustomerImage,
+customer_image: resolvedCustomerImage,
   };
   console.log("[driver:rides:list][push] Laravel sync request", {
     driver_id: driverId,
