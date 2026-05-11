@@ -1911,15 +1911,15 @@ io.to(room).emit("ride:bidRequest", finalBidRequestPayload);
     last_emit_reason: "emitted_ok",
   });
   clearPendingBidEmitRetry(safeRideId, safeDriverId);
-  void emitDispatchNotificationSync({
-    rideId: safeRideId,
-    driverId: safeDriverId,
-    bidRequestPayload,
-    ridePayloadForDriver,
-    alreadyNotified: wasNotifiedBefore,
-    alreadyPushNotified: hasRideDriverPushBeenNotified(safeRideId, safeDriverId),
-    pushSource: "dispatch:emitted_ok",
-  });
+void emitDispatchNotificationSync({
+  rideId: safeRideId,
+  driverId: safeDriverId,
+  bidRequestPayload: finalBidRequestPayload,
+  ridePayloadForDriver,
+  alreadyNotified: wasNotifiedBefore,
+  alreadyPushNotified: hasRideDriverPushBeenNotified(safeRideId, safeDriverId),
+  pushSource: "dispatch:emitted_ok",
+});
 
   console.log("[dispatch][emit-ok]", {
     ride_id: safeRideId,
