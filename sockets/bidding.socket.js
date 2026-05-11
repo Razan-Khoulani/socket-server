@@ -1849,7 +1849,50 @@ function tryEmitBidRequestToDriver(
     return { delivered: false, room_sockets: roomSocketCount, reason: "room_empty" };
   }
 
-  io.to(room).emit("ride:bidRequest", bidRequestPayload);
+const customerImage =
+  bidRequestPayload?.user_image ??
+  bidRequestPayload?.customer_image ??
+  bidRequestPayload?.user_details?.user_image ??
+  ridePayloadForDriver?.user_image ??
+  ridePayloadForDriver?.customer_image ??
+  ridePayloadForDriver?.user_details?.user_image ??
+  ridePayloadForDriver?.customer?.user_image ??
+  null;
+
+const finalBidRequestPayload = {
+  ...bidRequestPayload,
+
+  user_image: customerImage,
+  customer_image: customerImage,
+
+  user_details: {
+    ...(bidRequestPayload?.user_details || {}),
+    ...(ridePayloadForDriver?.user_details || {}),
+    user_image: customerImage,
+  },
+
+  customer: {
+    ...(bidRequestPayload?.customer || {}),
+    ...(ridePayloadForDriver?.customer || {}),
+    user_image: customerImage,
+  },
+
+  customer_details: {
+    ...(bidRequestPayload?.customer_details || {}),
+    ...(ridePayloadForDriver?.customer_details || {}),
+    user_image: customerImage,
+  },
+};
+
+console.log("[ride:bidRequest][FINAL_EMIT]", {
+  ride_id: safeRideId,
+  driver_id: safeDriverId,
+  user_image: finalBidRequestPayload.user_image,
+  customer_image: finalBidRequestPayload.customer_image,
+  details_image: finalBidRequestPayload.user_details?.user_image,
+});
+
+io.to(room).emit("ride:bidRequest", finalBidRequestPayload);
   markRideDriverState(safeRideId, safeDriverId, "notified", {
     ...stateMeta,
     last_emit_reason: "emitted_ok",
