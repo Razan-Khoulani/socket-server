@@ -1845,7 +1845,7 @@ function tryEmitBidRequestToDriver(
     void emitDispatchNotificationSync({
       rideId: safeRideId,
       driverId: safeDriverId,
-      bidRequestPayload,
+  bidRequestPayload: finalBidRequestPayload,
       ridePayloadForDriver,
       alreadyNotified: wasNotifiedBefore,
       alreadyPushNotified: hasRideDriverPushBeenNotified(safeRideId, safeDriverId),
@@ -1863,13 +1863,13 @@ function tryEmitBidRequestToDriver(
   }
 
 const customerImage =
-  bidRequestPayload?.user_image ??
-  bidRequestPayload?.customer_image ??
-  bidRequestPayload?.user_details?.user_image ??
-  ridePayloadForDriver?.user_image ??
-  ridePayloadForDriver?.customer_image ??
-  ridePayloadForDriver?.user_details?.user_image ??
-  ridePayloadForDriver?.customer?.user_image ??
+  toTrimmedText(bidRequestPayload?.user_image) ||
+  toTrimmedText(bidRequestPayload?.customer_image) ||
+  toTrimmedText(bidRequestPayload?.user_details?.user_image) ||
+  toTrimmedText(ridePayloadForDriver?.user_image) ||
+  toTrimmedText(ridePayloadForDriver?.customer_image) ||
+  toTrimmedText(ridePayloadForDriver?.user_details?.user_image) ||
+  toTrimmedText(ridePayloadForDriver?.customer?.user_image) ||
   null;
 
 const finalBidRequestPayload = {
