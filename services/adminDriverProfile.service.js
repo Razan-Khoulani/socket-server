@@ -83,6 +83,12 @@ const setCachedProfile = (profile = {}) => {
       profile.service_category_id ?? profile.service_cat_id
     ),
     service_cat_id: toNumber(profile.service_category_id ?? profile.service_cat_id),
+    service_type_id: toNumber(
+      profile.service_type_id ??
+        profile.transport_vehicle_type?.service_type_id ??
+        profile.vehicle_service_type_id ??
+        profile.vehicle_type_id
+    ),
     service_category_ids: parseServiceCategoryIds(
       profile.service_category_ids ?? profile.driver_vehicle_service_lists
     ),

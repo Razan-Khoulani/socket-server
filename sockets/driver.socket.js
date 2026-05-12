@@ -550,6 +550,9 @@ module.exports = (io, socket) => {
       current_lat,
       current_long,
       access_token,
+      provider_token,
+      driver_access_token,
+      auth_token,
       driver_service_id,
       service_type_id,
       service_category_id,
@@ -562,12 +565,44 @@ module.exports = (io, socket) => {
     } = payload || {};
 
     const driverId = toNumber(driver_id);
-    const la = toNumber(lat ?? current_lat ?? latitude);
-    const lo = toNumber(long ?? lng ?? current_long ?? longitude);
+    const la = toNumber(
+      lat ??
+        current_lat ??
+        latitude ??
+        payload?.location?.lat ??
+        payload?.coords?.lat ??
+        payload?.position?.lat
+    );
+    const lo = toNumber(
+      long ??
+        lng ??
+        current_long ??
+        longitude ??
+        payload?.location?.long ??
+        payload?.location?.lng ??
+        payload?.coords?.long ??
+        payload?.coords?.lng ??
+        payload?.position?.long ??
+        payload?.position?.lng
+    );
     const hasInitialLocation = la !== null && lo !== null;
     const normalizedAccessToken =
       access_token ??
+      provider_token ??
+      driver_access_token ??
+      auth_token ??
       payload?.accessToken ??
+      payload?.providerToken ??
+      payload?.driverAccessToken ??
+      payload?.auth?.access_token ??
+      payload?.auth?.token ??
+      payload?.meta?.access_token ??
+      payload?.meta?.token ??
+      socket?.handshake?.auth?.access_token ??
+      socket?.handshake?.auth?.token ??
+      socket?.handshake?.query?.access_token ??
+      socket?.handshake?.query?.token ??
+      socket?.driverAccessToken ??
       payload?.token ??
       null;
     if (!driverId) {
@@ -640,7 +675,19 @@ module.exports = (io, socket) => {
 
     // ✅ جيب معلومات النوع + كل بيانات السيارة من Laravel وخزّنها بالميموري (كما هو)
     if (!normalizedAccessToken) {
-      console.warn("[driver-online] Missing access_token; skipping Laravel update-current-status");
+      console.warn("[driver-online] Missing access_token; skipping Laravel update-current-status", {
+        driver_id: driverId,
+        socket_id: socket.id,
+        has_payload_token:
+          !!(payload?.token || payload?.accessToken || payload?.access_token || payload?.provider_token),
+        has_handshake_token:
+          !!(
+            socket?.handshake?.auth?.access_token ||
+            socket?.handshake?.auth?.token ||
+            socket?.handshake?.query?.access_token ||
+            socket?.handshake?.query?.token
+          ),
+      });
     } else {
       try {
         const statusPayload = {
@@ -718,12 +765,9 @@ module.exports = (io, socket) => {
             d.current_long ?? d.driver_current_long ?? d.longitude ?? d.lng ?? d.long ?? null
           );
           if (profileLat !== null && profileLong !== null) {
+            // Keep profile fallback for nearby memory, but do not anchor
+            // jump-filter baseline before the first live GPS ping arrives.
             driverLocationService.updateMemory(driverId, profileLat, profileLong);
-            lastAcceptedLocationByDriver.set(driverId, {
-              lat: profileLat,
-              long: profileLong,
-              at: Date.now(),
-            });
           }
         }
 
@@ -873,12 +917,9 @@ module.exports = (io, socket) => {
           null
       );
       if (fallbackLat !== null && fallbackLong !== null) {
+        // Same as above: keep fallback location only in memory and wait
+        // for first live GPS update to establish filter baseline.
         driverLocationService.updateMemory(driverId, fallbackLat, fallbackLong);
-        lastAcceptedLocationByDriver.set(driverId, {
-          lat: fallbackLat,
-          long: fallbackLong,
-          at: Date.now(),
-        });
       }
     }
     const onlineWalletState = applyDriverWalletState(driverId, syncedWalletMeta, {
