@@ -542,8 +542,14 @@ module.exports = (io, socket) => {
   socket.on("driver-online", async (payload = {}) => {
     const {
       driver_id,
+      provider_id,
       lat,
       long,
+      lng,
+      latitude,
+      longitude,
+      current_lat,
+      current_long,
       access_token,
       driver_service_id,
       service_type_id,
@@ -556,15 +562,16 @@ module.exports = (io, socket) => {
       handicap,
     } = payload || {};
 
-    const driverId = toNumber(driver_id);
-    const la = toNumber(lat);
-    const lo = toNumber(long);
+    const driverId = toNumber(driver_id ?? provider_id);
+    const la = toNumber(lat ?? current_lat ?? latitude);
+    const lo = toNumber(long ?? lng ?? current_long ?? longitude);
+    const hasInitialLocation = la !== null && lo !== null;
     const normalizedAccessToken =
       access_token ??
       payload?.accessToken ??
       payload?.token ??
       null;
-    if (!driverId || la === null || lo === null) return;
+    if (!driverId) return;
     if (!bindDriverOnce(driverId)) return;
 
     const payloadServiceTypeId = toNumber(
@@ -582,12 +589,19 @@ module.exports = (io, socket) => {
 
     // ✅ خزّن أولياً لوكيشن + online (بدون upsert)
     const onlineNow = Date.now();
-    driverLocationService.updateMemory(driverId, la, lo);
-    lastAcceptedLocationByDriver.set(driverId, {
-      lat: la,
-      long: lo,
-      at: onlineNow,
-    });
+    if (hasInitialLocation) {
+      driverLocationService.updateMemory(driverId, la, lo);
+      lastAcceptedLocationByDriver.set(driverId, {
+        lat: la,
+        long: lo,
+        at: onlineNow,
+      });
+    } else {
+      console.warn("[driver-online] Missing initial lat/long; waiting for update-location", {
+        driver_id: driverId,
+        socket_id: socket.id,
+      });
+    }
 
     const baseMeta = {
       driver_id: driverId,
@@ -625,16 +639,20 @@ module.exports = (io, socket) => {
       console.warn("[driver-online] Missing access_token; skipping Laravel update-current-status");
     } else {
       try {
+        const statusPayload = {
+          driver_id: driverId,
+          update_status: 1,
+          access_token: normalizedAccessToken,
+          driver_service_id,
+        };
+        if (hasInitialLocation) {
+          statusPayload.current_lat = la;
+          statusPayload.current_long = lo;
+        }
+
         const res = await axios.post(
           `${LARAVEL_BASE_URL}/api/driver/update-current-status`,
-          {
-            driver_id: driverId,
-            update_status: 1,
-            access_token: normalizedAccessToken,
-            driver_service_id,
-            current_lat: la,
-            current_long: lo,
-          },
+          statusPayload,
           { timeout: LARAVEL_TIMEOUT_MS }
         );
 
@@ -688,6 +706,23 @@ module.exports = (io, socket) => {
         }
 
         // ✅ كل بيانات السيارة (حسب الريسبونس اللي عندك)
+        if (!hasInitialLocation) {
+          const profileLat = toNumber(
+            d.current_lat ?? d.driver_current_lat ?? d.latitude ?? d.lat ?? null
+          );
+          const profileLong = toNumber(
+            d.current_long ?? d.driver_current_long ?? d.longitude ?? d.lng ?? d.long ?? null
+          );
+          if (profileLat !== null && profileLong !== null) {
+            driverLocationService.updateMemory(driverId, profileLat, profileLong);
+            lastAcceptedLocationByDriver.set(driverId, {
+              lat: profileLat,
+              long: profileLong,
+              at: Date.now(),
+            });
+          }
+        }
+
         const vehicle_company = d.vehicle_company ?? "";
         const plat_no = d.plat_no ?? "";
         const model_year = d.model_year ?? null;
