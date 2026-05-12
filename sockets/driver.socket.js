@@ -544,15 +544,7 @@ module.exports = (io, socket) => {
       driver_id,
       lat,
       long,
-      lng,
-      latitude,
-      longitude,
-      current_lat,
-      current_long,
       access_token,
-      provider_token,
-      driver_access_token,
-      auth_token,
       driver_service_id,
       service_type_id,
       service_category_id,
@@ -565,52 +557,14 @@ module.exports = (io, socket) => {
     } = payload || {};
 
     const driverId = toNumber(driver_id);
-    const la = toNumber(
-      lat ??
-        current_lat ??
-        latitude ??
-        payload?.location?.lat ??
-        payload?.coords?.lat ??
-        payload?.position?.lat
-    );
-    const lo = toNumber(
-      long ??
-        lng ??
-        current_long ??
-        longitude ??
-        payload?.location?.long ??
-        payload?.location?.lng ??
-        payload?.coords?.long ??
-        payload?.coords?.lng ??
-        payload?.position?.long ??
-        payload?.position?.lng
-    );
-    const hasInitialLocation = la !== null && lo !== null;
+    const la = toNumber(lat);
+    const lo = toNumber(long);
     const normalizedAccessToken =
       access_token ??
-      provider_token ??
-      driver_access_token ??
-      auth_token ??
       payload?.accessToken ??
-      payload?.providerToken ??
-      payload?.driverAccessToken ??
-      payload?.auth?.access_token ??
-      payload?.auth?.token ??
-      payload?.meta?.access_token ??
-      payload?.meta?.token ??
-      socket?.handshake?.auth?.access_token ??
-      socket?.handshake?.auth?.token ??
-      socket?.handshake?.query?.access_token ??
-      socket?.handshake?.query?.token ??
-      socket?.driverAccessToken ??
       payload?.token ??
       null;
-    if (!driverId) {
-      console.warn("[driver-online] Missing driver_id; ignoring payload", {
-        socket_id: socket.id,
-      });
-      return;
-    }
+    if (!driverId || la === null || lo === null) return;
     if (!bindDriverOnce(driverId)) return;
 
     const payloadServiceTypeId = toNumber(
@@ -628,19 +582,12 @@ module.exports = (io, socket) => {
 
     // ✅ خزّن أولياً لوكيشن + online (بدون upsert)
     const onlineNow = Date.now();
-    if (hasInitialLocation) {
-      driverLocationService.updateMemory(driverId, la, lo);
-      lastAcceptedLocationByDriver.set(driverId, {
-        lat: la,
-        long: lo,
-        at: onlineNow,
-      });
-    } else {
-      console.warn("[driver-online] Missing initial lat/long; waiting for update-location", {
-        driver_id: driverId,
-        socket_id: socket.id,
-      });
-    }
+    driverLocationService.updateMemory(driverId, la, lo);
+    lastAcceptedLocationByDriver.set(driverId, {
+      lat: la,
+      long: lo,
+      at: onlineNow,
+    });
 
     const baseMeta = {
       driver_id: driverId,
@@ -675,35 +622,19 @@ module.exports = (io, socket) => {
 
     // ✅ جيب معلومات النوع + كل بيانات السيارة من Laravel وخزّنها بالميموري (كما هو)
     if (!normalizedAccessToken) {
-      console.warn("[driver-online] Missing access_token; skipping Laravel update-current-status", {
-        driver_id: driverId,
-        socket_id: socket.id,
-        has_payload_token:
-          !!(payload?.token || payload?.accessToken || payload?.access_token || payload?.provider_token),
-        has_handshake_token:
-          !!(
-            socket?.handshake?.auth?.access_token ||
-            socket?.handshake?.auth?.token ||
-            socket?.handshake?.query?.access_token ||
-            socket?.handshake?.query?.token
-          ),
-      });
+      console.warn("[driver-online] Missing access_token; skipping Laravel update-current-status");
     } else {
       try {
-        const statusPayload = {
-          driver_id: driverId,
-          update_status: 1,
-          access_token: normalizedAccessToken,
-          driver_service_id,
-        };
-        if (hasInitialLocation) {
-          statusPayload.current_lat = la;
-          statusPayload.current_long = lo;
-        }
-
         const res = await axios.post(
           `${LARAVEL_BASE_URL}/api/driver/update-current-status`,
-          statusPayload,
+          {
+            driver_id: driverId,
+            update_status: 1,
+            access_token: normalizedAccessToken,
+            driver_service_id,
+            current_lat: la,
+            current_long: lo,
+          },
           { timeout: LARAVEL_TIMEOUT_MS }
         );
 
@@ -757,20 +688,6 @@ module.exports = (io, socket) => {
         }
 
         // ✅ كل بيانات السيارة (حسب الريسبونس اللي عندك)
-        if (!hasInitialLocation) {
-          const profileLat = toNumber(
-            d.current_lat ?? d.driver_current_lat ?? d.latitude ?? d.lat ?? null
-          );
-          const profileLong = toNumber(
-            d.current_long ?? d.driver_current_long ?? d.longitude ?? d.lng ?? d.long ?? null
-          );
-          if (profileLat !== null && profileLong !== null) {
-            // Keep profile fallback for nearby memory, but do not anchor
-            // jump-filter baseline before the first live GPS ping arrives.
-            driverLocationService.updateMemory(driverId, profileLat, profileLong);
-          }
-        }
-
         const vehicle_company = d.vehicle_company ?? "";
         const plat_no = d.plat_no ?? "";
         const model_year = d.model_year ?? null;
@@ -906,22 +823,6 @@ module.exports = (io, socket) => {
       driverServiceId: socket.driverServiceId ?? driver_service_id ?? null,
       forceRefresh: true,
     });
-    if (!hasInitialLocation) {
-      const fallbackLat = toNumber(
-        syncedWalletMeta?.current_lat ?? syncedWalletMeta?.lat ?? null
-      );
-      const fallbackLong = toNumber(
-        syncedWalletMeta?.current_long ??
-          syncedWalletMeta?.lng ??
-          syncedWalletMeta?.long ??
-          null
-      );
-      if (fallbackLat !== null && fallbackLong !== null) {
-        // Same as above: keep fallback location only in memory and wait
-        // for first live GPS update to establish filter baseline.
-        driverLocationService.updateMemory(driverId, fallbackLat, fallbackLong);
-      }
-    }
     const onlineWalletState = applyDriverWalletState(driverId, syncedWalletMeta, {
       source: "driver-online",
       targetSocket: socket,

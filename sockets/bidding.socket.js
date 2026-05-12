@@ -1443,17 +1443,6 @@ async function syncDriverUpdateListNotification({
       ? sanitizeRidePayloadForClient(rideModel)
       : null;
   const normalizedAdditionalRemarks = toTrimmedText(additionalRemarks);
-  const resolvedCustomerImage =
-  normalizedDispatchPayload?.user_image ??
-  normalizedDispatchPayload?.customer_image ??
-  normalizedDispatchPayload?.user_details?.user_image ??
-  normalizedDispatchPayload?.customer?.user_image ??
-  normalizedRideModel?.user_image ??
-  normalizedRideModel?.customer_image ??
-  normalizedRideModel?.user_details?.user_image ??
-  normalizedRideModel?.customer?.user_image ??
-  null;
-
   const laravelSyncPayload = {
     driver_id: driverId,
     ride_id: rideId,
@@ -1477,8 +1466,6 @@ async function syncDriverUpdateListNotification({
     paired_event: "driver:rides:list",
     dispatch_payload: normalizedDispatchPayload,
     ride_model: normalizedRideModel,
-    user_image: resolvedCustomerImage,
-customer_image: resolvedCustomerImage,
   };
   console.log("[driver:rides:list][push] Laravel sync request", {
     driver_id: driverId,
@@ -1845,7 +1832,7 @@ function tryEmitBidRequestToDriver(
     void emitDispatchNotificationSync({
       rideId: safeRideId,
       driverId: safeDriverId,
-  bidRequestPayload: finalBidRequestPayload,
+      bidRequestPayload,
       ridePayloadForDriver,
       alreadyNotified: wasNotifiedBefore,
       alreadyPushNotified: hasRideDriverPushBeenNotified(safeRideId, safeDriverId),
@@ -1862,64 +1849,21 @@ function tryEmitBidRequestToDriver(
     return { delivered: false, room_sockets: roomSocketCount, reason: "room_empty" };
   }
 
-const customerImage =
-  toTrimmedText(bidRequestPayload?.user_image) ||
-  toTrimmedText(bidRequestPayload?.customer_image) ||
-  toTrimmedText(bidRequestPayload?.user_details?.user_image) ||
-  toTrimmedText(ridePayloadForDriver?.user_image) ||
-  toTrimmedText(ridePayloadForDriver?.customer_image) ||
-  toTrimmedText(ridePayloadForDriver?.user_details?.user_image) ||
-  toTrimmedText(ridePayloadForDriver?.customer?.user_image) ||
-  null;
-
-const finalBidRequestPayload = {
-  ...bidRequestPayload,
-
-  user_image: customerImage,
-  customer_image: customerImage,
-
-  user_details: {
-    ...(bidRequestPayload?.user_details || {}),
-    ...(ridePayloadForDriver?.user_details || {}),
-    user_image: customerImage,
-  },
-
-  customer: {
-    ...(bidRequestPayload?.customer || {}),
-    ...(ridePayloadForDriver?.customer || {}),
-    user_image: customerImage,
-  },
-
-  customer_details: {
-    ...(bidRequestPayload?.customer_details || {}),
-    ...(ridePayloadForDriver?.customer_details || {}),
-    user_image: customerImage,
-  },
-};
-
-console.log("[ride:bidRequest][FINAL_EMIT]", {
-  ride_id: safeRideId,
-  driver_id: safeDriverId,
-  user_image: finalBidRequestPayload.user_image,
-  customer_image: finalBidRequestPayload.customer_image,
-  details_image: finalBidRequestPayload.user_details?.user_image,
-});
-
-io.to(room).emit("ride:bidRequest", finalBidRequestPayload);
+  io.to(room).emit("ride:bidRequest", bidRequestPayload);
   markRideDriverState(safeRideId, safeDriverId, "notified", {
     ...stateMeta,
     last_emit_reason: "emitted_ok",
   });
   clearPendingBidEmitRetry(safeRideId, safeDriverId);
-void emitDispatchNotificationSync({
-  rideId: safeRideId,
-  driverId: safeDriverId,
-  bidRequestPayload: finalBidRequestPayload,
-  ridePayloadForDriver,
-  alreadyNotified: wasNotifiedBefore,
-  alreadyPushNotified: hasRideDriverPushBeenNotified(safeRideId, safeDriverId),
-  pushSource: "dispatch:emitted_ok",
-});
+  void emitDispatchNotificationSync({
+    rideId: safeRideId,
+    driverId: safeDriverId,
+    bidRequestPayload,
+    ridePayloadForDriver,
+    alreadyNotified: wasNotifiedBefore,
+    alreadyPushNotified: hasRideDriverPushBeenNotified(safeRideId, safeDriverId),
+    pushSource: "dispatch:emitted_ok",
+  });
 
   console.log("[dispatch][emit-ok]", {
     ride_id: safeRideId,
@@ -2425,6 +2369,8 @@ const buildUserDetails = (data) => {
     src?.avatar ??
     data?.profile_image ??
     data?.user_image ??
+    data?.image ??
+    data?.avatar ??
     data?.customer_image ??
     null;
 
@@ -2447,7 +2393,16 @@ const buildUserDetails = (data) => {
         ? `${countryCode}${contactNumber}`
         : stored?.user_phone_full ?? storedByToken?.user_phone_full ?? null,
     user_image: normalizeCustomerImageUrl(
-      userImage ?? stored?.user_image ?? storedByToken?.user_image ?? null
+      userImage ??
+        stored?.user_image ??
+        stored?.profile_image ??
+        stored?.image ??
+        stored?.avatar ??
+        storedByToken?.user_image ??
+        storedByToken?.profile_image ??
+        storedByToken?.image ??
+        storedByToken?.avatar ??
+        null
     ),
 
     // ✅ NEW: keep token in user_details snapshot (helps later merges on retry)
@@ -2527,9 +2482,13 @@ const buildCustomerPayload = (payload = {}, userDetails = null) => {
 
   const customerImage =
     details?.user_image ??
+    details?.profile_image ??
+    details?.image ??
+    details?.avatar ??
     payload?.user_image ??
     payload?.customer_image ??
     payload?.profile_image ??
+    payload?.image ??
     payload?.avatar ??
     null;
 
@@ -2642,6 +2601,24 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
   }
 
   if (safeCustomer) {
+    sanitized.user_id = safeCustomer.user_id ?? sanitized.user_id ?? null;
+    sanitized.user_name = safeCustomer.user_name ?? sanitized.user_name ?? null;
+    sanitized.user_gender = safeCustomer.user_gender ?? sanitized.user_gender ?? null;
+    sanitized.user_country_code =
+      safeCustomer.user_country_code ?? sanitized.user_country_code ?? null;
+    sanitized.user_phone = safeCustomer.user_phone ?? sanitized.user_phone ?? null;
+    sanitized.user_phone_full = safeCustomer.user_phone_full ?? sanitized.user_phone_full ?? null;
+    sanitized.user_image = safeCustomer.user_image ?? sanitized.user_image ?? null;
+    if (!toTrimmedText(sanitized.profile_image) && toTrimmedText(safeCustomer.user_image)) {
+      sanitized.profile_image = safeCustomer.user_image;
+    }
+    if (!toTrimmedText(sanitized.avatar) && toTrimmedText(safeCustomer.user_image)) {
+      sanitized.avatar = safeCustomer.user_image;
+    }
+    if (!toTrimmedText(sanitized.image) && toTrimmedText(safeCustomer.user_image)) {
+      sanitized.image = safeCustomer.user_image;
+    }
+
     sanitized.user_details = safeCustomer;
     sanitized.customer = safeCustomer;
     sanitized.customer_details = safeCustomer;
@@ -2653,6 +2630,7 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
     sanitized.customer_phone_full = safeCustomer.user_phone_full ?? null;
     sanitized.customer_image = safeCustomer.user_image ?? null;
   } else {
+    sanitized.user_image = sanitized.user_image ?? null;
     sanitized.user_details = null;
     sanitized.customer = null;
     sanitized.customer_details = null;
@@ -3697,8 +3675,6 @@ function emitPendingBidRequestsForDriver(io, driverId, source = "driver:getRides
       is_running_ride: false,
     });
 
-    
-
     const emitResult = tryEmitBidRequestToDriver(io, {
       rideId: safeRideId,
       driverId: safeDriverId,
@@ -4684,7 +4660,11 @@ const candidateSync = syncRideCandidates(
 // إعادة البث للجميع تكون فقط للحالات المقصودة (تحديث سعر/تفاعل مستخدم/طلب صريح).
 const forcedRebroadcast =
   toBinaryFlag(data?.force_rebroadcast ?? data?.rebroadcast_all ?? null) === 1;
-const shouldRebroadcastBidRequest = forcedRebroadcast;
+const shouldRebroadcastBidRequest =
+  forcedRebroadcast ||
+  data?.isPriceUpdated === true ||
+  toNumber(data?.updatedPrice) !== null ||
+  data?.dispatch_expand_reason === "user_response";
 
 const notifyDriverIdSet = new Set(
   shouldRebroadcastBidRequest
@@ -4997,10 +4977,27 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     null;
   const bidReqUserImage =
     ridePayload?.user_image ??
+    ridePayload?.customer_image ??
+    ridePayload?.profile_image ??
+    ridePayload?.image ??
+    ridePayload?.avatar ??
     data?.user_image ??
+    data?.customer_image ??
+    data?.profile_image ??
+    data?.image ??
+    data?.avatar ??
     userDetails?.user_image ??
+    userDetails?.profile_image ??
+    userDetails?.image ??
+    userDetails?.avatar ??
     bidReqStoredUser?.user_image ??
+    bidReqStoredUser?.profile_image ??
+    bidReqStoredUser?.image ??
+    bidReqStoredUser?.avatar ??
     bidReqStoredByToken?.user_image ??
+    bidReqStoredByToken?.profile_image ??
+    bidReqStoredByToken?.image ??
+    bidReqStoredByToken?.avatar ??
     null;
   const bidReqUserPhone =
     ridePayload?.user_phone ??
@@ -5030,125 +5027,120 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
   const pendingDriverIds = [];
 
   candidatesToNotify.forEach((d) => {
-//     const bidRequestPayload = sanitizeRidePayloadForClient({
-//       ride_id: rideId,
-//       event_type: "driver_new_bid_request",
-//       ui_action: "show_bid_request",
-//       auto_open_running: false,
-//       is_running_ride: false,
+    const bidRequestPayload = sanitizeRidePayloadForClient({
+      ride_id: rideId,
+      event_type: "driver_new_bid_request",
+      ui_action: "show_bid_request",
+      auto_open_running: false,
+      is_running_ride: false,
 
-//       pickup_lat: lat,
-//       pickup_long: long,
-//       pickup_address: data.pickup_address ?? null,
+      pickup_lat: lat,
+      pickup_long: long,
+      pickup_address: data.pickup_address ?? null,
 
-//       destination_lat: toNumber(data.destination_lat),
-//       destination_long: toNumber(data.destination_long),
-//       destination_address: data.destination_address ?? null,
-//         additional_remarks: additionalRemarks,
-//         additional_remark: additionalRemarks,
-//         additional_request: additionalRemarks,
+      destination_lat: toNumber(data.destination_lat),
+      destination_long: toNumber(data.destination_long),
+      destination_address: data.destination_address ?? null,
+        additional_remarks: additionalRemarks,
+        additional_remark: additionalRemarks,
+        additional_request: additionalRemarks,
 
-//       radius: roadRadius,
-//       ...dispatchStagePayload,
-//       user_bid_price: dispatchBidPrice,
-//       min_fare_amount: legacyMinFareAmount,
-//       max_fare_amount: legacyMaxFareAmount,
-//       base_fare: priceBounds.base_fare,
-//       min_price: priceBounds.min_price,
-//       max_price: priceBounds.max_price,
-//       MIN_PRICE: priceBounds.min_price,
-//       MAX_PRICE: priceBounds.max_price,
-//       min_fare: priceBounds.min_price,
-//       max_fare: priceBounds.max_price,
+      radius: roadRadius,
+      ...dispatchStagePayload,
+      user_bid_price: dispatchBidPrice,
+      min_fare_amount: legacyMinFareAmount,
+      max_fare_amount: legacyMaxFareAmount,
+      base_fare: priceBounds.base_fare,
+      min_price: priceBounds.min_price,
+      max_price: priceBounds.max_price,
+      MIN_PRICE: priceBounds.min_price,
+      MAX_PRICE: priceBounds.max_price,
+      min_fare: priceBounds.min_price,
+      max_fare: priceBounds.max_price,
 
-//       user_id: bidReqUserId,
-//       user_name: bidReqUserName,
-//       user_gender: bidReqUserGender,
-//       user_image: bidReqUserImage,
-//       user_phone: bidReqUserPhone,
-//       user_country_code: bidReqUserCountryCode,
-//       user_phone_full: bidReqUserPhoneFull,
-//             customer_image: bidReqUserImage,
-// user_details: {
-//   user_id: bidReqUserId,
-//   user_name: bidReqUserName,
-//   user_gender: bidReqUserGender,
-//   user_image: bidReqUserImage,
-//   user_phone: bidReqUserPhone,
-//   user_country_code: bidReqUserCountryCode,
-//   user_phone_full: bidReqUserPhoneFull,
-// },
+      user_id: bidReqUserId,
+      user_name: bidReqUserName,
+      user_gender: bidReqUserGender,
+      user_image: bidReqUserImage,
+      user_phone: bidReqUserPhone,
+      user_country_code: bidReqUserCountryCode,
+      user_phone_full: bidReqUserPhoneFull,
 
-//       token: tokenTmp ?? null,
+      token: tokenTmp ?? null,
 
-//       ...(d.driver_to_pickup_distance_m != null
-//         ? { driver_to_pickup_distance_m: d.driver_to_pickup_distance_m }
-//         : {}),
-//       ...(d.driver_to_pickup_distance_km != null
-//         ? { driver_to_pickup_distance_km: d.driver_to_pickup_distance_km }
-//         : {}),
-//       ...(d.driver_to_pickup_duration_s != null
-//         ? { driver_to_pickup_duration_s: d.driver_to_pickup_duration_s }
-//         : {}),
-//       ...(d.driver_to_pickup_duration_min != null
-//         ? {
-//             driver_to_pickup_duration_min: d.driver_to_pickup_duration_min,
-//             estimated_arrival_min: d.driver_to_pickup_duration_min,
-//           }
-//         : {}),
+      ...(d.driver_to_pickup_distance_m != null
+        ? { driver_to_pickup_distance_m: d.driver_to_pickup_distance_m }
+        : {}),
+      ...(d.driver_to_pickup_distance_km != null
+        ? { driver_to_pickup_distance_km: d.driver_to_pickup_distance_km }
+        : {}),
+      ...(d.driver_to_pickup_duration_s != null
+        ? { driver_to_pickup_duration_s: d.driver_to_pickup_duration_s }
+        : {}),
+      ...(d.driver_to_pickup_duration_min != null
+        ? {
+            driver_to_pickup_duration_min: d.driver_to_pickup_duration_min,
+            estimated_arrival_min: d.driver_to_pickup_duration_min,
+          }
+        : {}),
 
-//       ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
-//       duration: finalRouteApiDurationMin,
-//       route_api_distance_km: finalRouteApiDistanceKm,
-//       ride_details: {
-//         ride_id: rideId,
-//         pickup_lat: lat,
-//         pickup_long: long,
-//         pickup_address: data.pickup_address ?? null,
-//         destination_lat: toNumber(data.destination_lat),
-//         destination_long: toNumber(data.destination_long),
-//         destination_address: data.destination_address ?? null,
-//         additional_remarks: additionalRemarks,
-//         additional_remark: additionalRemarks,
-//         additional_request: additionalRemarks,
-//         user_bid_price: dispatchBidPrice,
-//         min_fare_amount: legacyMinFareAmount,
-//         max_fare_amount: legacyMaxFareAmount,
-//         base_fare: priceBounds.base_fare,
-//         min_price: priceBounds.min_price,
-//         max_price: priceBounds.max_price,
-//         min_fare: priceBounds.min_price,
-//         max_fare: priceBounds.max_price,
-//         service_type_id: toNumber(data.service_type_id) ?? null,
-//         service_category_id: toNumber(data.service_category_id) ?? null,
-//         duration: finalRouteApiDurationMin,
-//         route_api_distance_km: finalRouteApiDistanceKm,
-//         ...(routeKm !== null ? { route: routeKm } : {}),
-//         ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
-//       },
+      ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
+      duration: finalRouteApiDurationMin,
+      route_api_distance_km: finalRouteApiDistanceKm,
+      ride_details: {
+        ride_id: rideId,
+        pickup_lat: lat,
+        pickup_long: long,
+        pickup_address: data.pickup_address ?? null,
+        destination_lat: toNumber(data.destination_lat),
+        destination_long: toNumber(data.destination_long),
+        destination_address: data.destination_address ?? null,
+        additional_remarks: additionalRemarks,
+        additional_remark: additionalRemarks,
+        additional_request: additionalRemarks,
+        user_bid_price: dispatchBidPrice,
+        min_fare_amount: legacyMinFareAmount,
+        max_fare_amount: legacyMaxFareAmount,
+        base_fare: priceBounds.base_fare,
+        min_price: priceBounds.min_price,
+        max_price: priceBounds.max_price,
+        min_fare: priceBounds.min_price,
+        max_fare: priceBounds.max_price,
+        service_type_id: toNumber(data.service_type_id) ?? null,
+        service_category_id: toNumber(data.service_category_id) ?? null,
+        duration: finalRouteApiDurationMin,
+        route_api_distance_km: finalRouteApiDistanceKm,
+        ...(routeKm !== null ? { route: routeKm } : {}),
+        ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
+      },
 
-//       ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
-//       ...(updatedPrice !== null ? { updatedPrice } : {}),
-//       ...(updatedAt !== null ? { updatedAt } : {}),
+      ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
+      ...(updatedPrice !== null ? { updatedPrice } : {}),
+      ...(updatedAt !== null ? { updatedAt } : {}),
 
-//       ...driverOfferTimer,
-//     });
-//     console.log("[ride:bidRequest] payload", {
-//       driver_id: d.driver_id,
-//       ride_id: bidRequestPayload?.ride_id ?? null,
-//       duration:
-//         bidRequestPayload?.ride_details?.duration ?? bidRequestPayload?.duration ?? null,
-//       route_api_distance_km: bidRequestPayload?.route_api_distance_km ?? null,
-//       min_price:
-//         bidRequestPayload?.min_price ?? bidRequestPayload?.ride_details?.min_price ?? null,
-//       max_price:
-//         bidRequestPayload?.max_price ?? bidRequestPayload?.ride_details?.max_price ?? null,
-//       min_fare:
-//         bidRequestPayload?.min_fare ?? bidRequestPayload?.ride_details?.min_fare ?? null,
-//       max_fare:
-//         bidRequestPayload?.max_fare ?? bidRequestPayload?.ride_details?.max_fare ?? null,
-//       additional_remarks: resolveAdditionalRemarks(bidRequestPayload),
-//     });
+      ...driverOfferTimer,
+    });
+    console.log("[ride:bidRequest] payload", {
+      driver_id: d.driver_id,
+      ride_id: bidRequestPayload?.ride_id ?? null,
+      user_image:
+        bidRequestPayload?.user_image ??
+        bidRequestPayload?.user_details?.user_image ??
+        bidRequestPayload?.customer_image ??
+        null,
+      duration:
+        bidRequestPayload?.ride_details?.duration ?? bidRequestPayload?.duration ?? null,
+      route_api_distance_km: bidRequestPayload?.route_api_distance_km ?? null,
+      min_price:
+        bidRequestPayload?.min_price ?? bidRequestPayload?.ride_details?.min_price ?? null,
+      max_price:
+        bidRequestPayload?.max_price ?? bidRequestPayload?.ride_details?.max_price ?? null,
+      min_fare:
+        bidRequestPayload?.min_fare ?? bidRequestPayload?.ride_details?.min_fare ?? null,
+      max_fare:
+        bidRequestPayload?.max_fare ?? bidRequestPayload?.ride_details?.max_fare ?? null,
+      additional_remarks: resolveAdditionalRemarks(bidRequestPayload),
+    });
 
     const ridePayloadForDriver = attachCustomerFields(
       {
@@ -5193,22 +5185,6 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       },
       ridePayload?.user_details ?? userDetails ?? null
     );
-
-
-        const bidRequestPayload = sanitizeRidePayloadForClient({
-  ...ridePayloadForDriver,
-  event_type: "driver_new_bid_request",
-  ui_action: "show_bid_request",
-  auto_open_running: false,
-  is_running_ride: false,
-});
-
-console.log("[ride:bidRequest] payload", {
-  driver_id: d.driver_id,
-  ride_id: bidRequestPayload?.ride_id ?? null,
-  customer_image: bidRequestPayload?.customer_image ?? null,
-  user_image: bidRequestPayload?.user_details?.user_image ?? null,
-});
 
     inboxUpsert(d.driver_id, rideId, ridePayloadForDriver);
     emitDispatchDeliverySummary(io, d.driver_id, ridePayloadForDriver);
@@ -5762,42 +5738,7 @@ function applyRouteOverrideToTrackedRide(io, rideId, routeOverride, options = {}
     emitDriverPatch(io, driverId, [{ op: "upsert", ride: updated }]);
 
     if (emit_bid_request) {
-      const safeRideId = toNumber(rideId);
-      const safeDriverId = toNumber(driverId);
-      const currentState =
-        safeRideId && safeDriverId
-          ? getRideDriverState(safeRideId, safeDriverId)
-          : null;
-
-      // Avoid re-opening the same bid request modal for drivers already notified.
-      if (currentState?.notified_at) {
-        console.log("[ride:updateRouteMetrics][skip-bidRequest-duplicate]", {
-          ride_id: safeRideId,
-          driver_id: safeDriverId,
-          source: "route-metrics",
-        });
-      } else {
-        const bidRequestPayload = sanitizeRidePayloadForClient(updated);
-        const emitResult = tryEmitBidRequestToDriver(io, {
-          rideId: safeRideId,
-          driverId: safeDriverId,
-          bidRequestPayload,
-          ridePayloadForDriver: updated,
-          source: "route-metrics",
-          attempt: 1,
-        });
-
-        if (!emitResult.delivered) {
-          scheduleBidRequestRetry(io, {
-            rideId: safeRideId,
-            driverId: safeDriverId,
-            bidRequestPayload,
-            ridePayloadForDriver: updated,
-            source: "route-metrics",
-            attempt: 1,
-          });
-        }
-      }
+      io.to(driverRoom(driverId)).emit("ride:bidRequest", sanitizeRidePayloadForClient(updated));
     }
   }
 }
