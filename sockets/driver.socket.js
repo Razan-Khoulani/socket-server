@@ -542,7 +542,6 @@ module.exports = (io, socket) => {
   socket.on("driver-online", async (payload = {}) => {
     const {
       driver_id,
-      provider_id,
       lat,
       long,
       lng,
@@ -562,7 +561,7 @@ module.exports = (io, socket) => {
       handicap,
     } = payload || {};
 
-    const driverId = toNumber(driver_id ?? provider_id);
+    const driverId = toNumber(driver_id);
     const la = toNumber(lat ?? current_lat ?? latitude);
     const lo = toNumber(long ?? lng ?? current_long ?? longitude);
     const hasInitialLocation = la !== null && lo !== null;
@@ -571,7 +570,12 @@ module.exports = (io, socket) => {
       payload?.accessToken ??
       payload?.token ??
       null;
-    if (!driverId) return;
+    if (!driverId) {
+      console.warn("[driver-online] Missing driver_id; ignoring payload", {
+        socket_id: socket.id,
+      });
+      return;
+    }
     if (!bindDriverOnce(driverId)) return;
 
     const payloadServiceTypeId = toNumber(
@@ -858,6 +862,25 @@ module.exports = (io, socket) => {
       driverServiceId: socket.driverServiceId ?? driver_service_id ?? null,
       forceRefresh: true,
     });
+    if (!hasInitialLocation) {
+      const fallbackLat = toNumber(
+        syncedWalletMeta?.current_lat ?? syncedWalletMeta?.lat ?? null
+      );
+      const fallbackLong = toNumber(
+        syncedWalletMeta?.current_long ??
+          syncedWalletMeta?.lng ??
+          syncedWalletMeta?.long ??
+          null
+      );
+      if (fallbackLat !== null && fallbackLong !== null) {
+        driverLocationService.updateMemory(driverId, fallbackLat, fallbackLong);
+        lastAcceptedLocationByDriver.set(driverId, {
+          lat: fallbackLat,
+          long: fallbackLong,
+          at: Date.now(),
+        });
+      }
+    }
     const onlineWalletState = applyDriverWalletState(driverId, syncedWalletMeta, {
       source: "driver-online",
       targetSocket: socket,
