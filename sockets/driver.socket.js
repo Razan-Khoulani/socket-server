@@ -34,6 +34,11 @@ const DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS = Number.isFinite(
 )
   ? Math.max(10_000, Number(process.env.DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS))
   : 30_000;
+const DRIVER_ONLINE_DEDUPE_WINDOW_MS = Number.isFinite(
+  Number(process.env.DRIVER_ONLINE_DEDUPE_WINDOW_MS)
+)
+  ? Math.max(500, Number(process.env.DRIVER_ONLINE_DEDUPE_WINDOW_MS))
+  : 3000;
 const extraDistanceSessions = new Map(); // rideId -> { driverId, acceptedAt, baselineRoutePointCount, baselineTotalDistanceKm, acceptedLat, acceptedLong, settled }
 const STATUS_DEDUPE_TTL_MS = Number.isFinite(
   Number(process.env.STATUS_DEDUPE_TTL_MS)
@@ -567,12 +572,41 @@ module.exports = (io, socket) => {
     if (!driverId || la === null || lo === null) return;
     if (!bindDriverOnce(driverId)) return;
 
+    const onlineNow = Date.now();
+    const normalizedDriverServiceId = toNumber(driver_service_id) ?? null;
+    const dedupeSignature = [
+      driverId,
+      normalizedDriverServiceId ?? "na",
+      Math.round(la * 1e6),
+      Math.round(lo * 1e6),
+      normalizedAccessToken ? 1 : 0,
+    ].join("|");
+    const lastOnlineDriverId = toNumber(socket.lastDriverOnlineDriverId);
+    const lastOnlineAt = toNumber(socket.lastDriverOnlineAt) ?? 0;
+    const lastOnlineSignature = socket.lastDriverOnlineSignature ?? null;
+    if (
+      lastOnlineDriverId === driverId &&
+      lastOnlineSignature === dedupeSignature &&
+      onlineNow - lastOnlineAt < DRIVER_ONLINE_DEDUPE_WINDOW_MS
+    ) {
+      console.log("[driver-online] duplicate ignored", {
+        driver_id: driverId,
+        socket_id: socket.id,
+        signature: dedupeSignature,
+        elapsed_ms: onlineNow - lastOnlineAt,
+      });
+      return;
+    }
+    socket.lastDriverOnlineDriverId = driverId;
+    socket.lastDriverOnlineAt = onlineNow;
+    socket.lastDriverOnlineSignature = dedupeSignature;
+
     const payloadServiceTypeId = toNumber(
       service_type_id ?? vehicle_type_id ?? payload?.service_type ?? null
     );
     const payloadServiceCategoryId = toNumber(service_category_id ?? null);
 
-    socket.driverServiceId = toNumber(driver_service_id) ?? null;
+    socket.driverServiceId = normalizedDriverServiceId;
     socket.driverDetailId = toNumber(payload?.driver_detail_id ?? null);
     socket.driverAccessToken = normalizedAccessToken ?? null;
     socket.driverServiceCategoryId = payloadServiceCategoryId ?? null;
@@ -581,7 +615,6 @@ module.exports = (io, socket) => {
     console.log("✅ driver joined room", driverRoom(driverId), "socket:", socket.id);
 
     // ✅ خزّن أولياً لوكيشن + online (بدون upsert)
-    const onlineNow = Date.now();
     driverLocationService.updateMemory(driverId, la, lo);
     lastAcceptedLocationByDriver.set(driverId, {
       lat: la,
