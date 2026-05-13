@@ -59,7 +59,7 @@ const SOCKET_BIND_PORT =
   Number(process.env.PORT || process.env.SOCKET_BIND_PORT) || 4000;
 const INVOICE_STATUSES = new Set([7, 8, 9]);
 const TRIP_SUMMARY_START_STATUSES = new Set([5]);
-const TRIP_SUMMARY_COMPLETE_STATUSES = new Set([7, 8, 11]);
+const TRIP_SUMMARY_COMPLETE_STATUSES = new Set([7, 8, 10, 11]);
 const SIMPLE_PASSED_DEST_DISTANCE_M = Number.isFinite(
   Number(process.env.SIMPLE_PASSED_DEST_DISTANCE_M)
 )
@@ -67,7 +67,7 @@ const SIMPLE_PASSED_DEST_DISTANCE_M = Number.isFinite(
   : 25;
 // ride statuses treated as terminal flow states.
 // Note: status 8 is handled as a transition state in terminal handling below.
-const FINAL_STATUSES = new Set([4, 6 ,7, 8, 9, 11]);
+const FINAL_STATUSES = new Set([4, 6, 7, 8, 9, 10, 11]);
 // const parseStatusSet = (raw, fallback = []) => {
 //   const source = String(raw ?? "")
 //     .split(",")
@@ -84,9 +84,9 @@ const FINAL_STATUSES = new Set([4, 6 ,7, 8, 9, 11]);
 //   process.env.QUEUE_ACTIVATE_TERMINAL_STATUSES,
 //   [4, 7, 9, 11]
 // );
-// Keep status 6 route cache until payment statuses (7/8/9) so trip summary/invoice
+// Keep status 6 route cache until payment statuses (7/8/9/10) so trip summary/invoice
 // can still read full distance even after destination reached.
-const ROUTE_CLEAR_STATUSES = new Set([4, 9, 11]);
+const ROUTE_CLEAR_STATUSES = new Set([4, 9, 10, 11]);
 const INVOICE_TTL_MS = 10 * 60 * 1000;
 const sentInvoiceForRide = new Set();
 const invoiceInFlight = new Set();
@@ -1813,15 +1813,17 @@ if (
     if (FINAL_STATUSES.has(status)) {
       const activeDriverIdBeforeClear =
         driverId ?? getActiveDriverByRide(rideId) ?? null;
-const isTransitionStatus = status === 7 || status === 8;
-const shouldActivateQueuedRide = status === 9;
+      const isTransitionStatus = status === 7 || status === 8;
+      const shouldActivateQueuedRide = status === 9 || status === 10;
 
       if (isTransitionStatus) {
         console.log("[ride-status][transition-status]", {
           ride_id: rideId,
           status,
           activeDriverIdBeforeClear,
-message: "skip clear/close; waiting for final completion status 9",        });
+          message:
+            "skip clear/close; waiting for final completion status (9/10)",
+        });
       } else if (shouldActivateQueuedRide) {
         clearActiveRideByRideId(rideId);
 
