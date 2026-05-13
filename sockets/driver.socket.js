@@ -1,11 +1,7 @@
 // sockets/driver100.socket.js 
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios");
-const {
-  getActiveRideByDriver,
-  clearActiveRideByDriver,
-  clearActiveRideByRideId,
-} = require("../store/activeRides.store");
+const { getActiveRideByDriver } = require("../store/activeRides.store");
 const { getUserDetails, getUserDetailsByToken } = require("../store/users.store");
 const {
   startRideRoute,
@@ -38,16 +34,6 @@ const DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS = Number.isFinite(
 )
   ? Math.max(10_000, Number(process.env.DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS))
   : 30_000;
-const DRIVER_ONLINE_DEDUPE_WINDOW_MS = Number.isFinite(
-  Number(process.env.DRIVER_ONLINE_DEDUPE_WINDOW_MS)
-)
-  ? Math.max(500, Number(process.env.DRIVER_ONLINE_DEDUPE_WINDOW_MS))
-  : 3000;
-const DRIVER_ONLINE_RECOVERY_REPLAY_DELAY_MS = Number.isFinite(
-  Number(process.env.DRIVER_ONLINE_RECOVERY_REPLAY_DELAY_MS)
-)
-  ? Math.max(500, Number(process.env.DRIVER_ONLINE_RECOVERY_REPLAY_DELAY_MS))
-  : 1500;
 const extraDistanceSessions = new Map(); // rideId -> { driverId, acceptedAt, baselineRoutePointCount, baselineTotalDistanceKm, acceptedLat, acceptedLong, settled }
 const STATUS_DEDUPE_TTL_MS = Number.isFinite(
   Number(process.env.STATUS_DEDUPE_TTL_MS)
@@ -406,109 +392,6 @@ module.exports = (io, socket) => {
 
   const driverRoom = (driverId) => `driver:${driverId}`;
 
-  const resolveDriverWalletState = (meta = {}) => {
-    const remainingBalance = toNumber(meta?.remaining_balance);
-    const warningLimitRaw = toNumber(meta?.wallet_warning_limit);
-    const blockLimitRaw = toNumber(meta?.wallet_block_limit);
-    const warningLimit = warningLimitRaw !== null ? warningLimitRaw : 0;
-    const blockLimit = blockLimitRaw !== null ? blockLimitRaw : null;
-
-    const blockedByFlag =
-      Number(meta?.not_valid_wallet_balance ?? meta?.wallet_is_blocked ?? 0) === 1;
-    const blockedByLimit =
-      remainingBalance !== null && blockLimit !== null
-        ? remainingBalance <= blockLimit
-        : false;
-    const isBlocked = blockedByFlag || blockedByLimit;
-
-    const warningByFlag = Number(meta?.wallet_is_warning ?? 0) === 1;
-    const warningByLimit =
-      !isBlocked && remainingBalance !== null ? remainingBalance <= warningLimit : false;
-    const isWarning = !isBlocked && (warningByFlag || warningByLimit);
-
-    const blockedMessageRaw = String(meta?.not_valid_wallet_balance_msg ?? "").trim();
-    const blockedMessage =
-      blockedMessageRaw || "رصيدك غير كافي، يرجى شحن الرصيد للعودة لاستقبال الرحلات";
-    const warningMessage =
-      "رصيدك منخفض. يرجى شحن الرصيد لتجنب إيقاف استقبال الرحلات";
-    const message = isBlocked ? blockedMessage : isWarning ? warningMessage : "";
-
-    return {
-      remainingBalance,
-      warningLimit,
-      blockLimit,
-      isBlocked,
-      isWarning,
-      canReceiveNewRequests: !isBlocked,
-      status: isBlocked ? "blocked" : isWarning ? "warning" : "ok",
-      message,
-    };
-  };
-
-  const applyDriverWalletState = (
-    driverId,
-    meta = {},
-    { source = "wallet-check", targetSocket = null, forceEmit = false } = {}
-  ) => {
-    const safeDriverId = toNumber(driverId);
-    if (!safeDriverId) {
-      return {
-        status: "ok",
-        canReceiveNewRequests: true,
-        isBlocked: false,
-        isWarning: false,
-        stateChanged: false,
-        previousStatus: "ok",
-      };
-    }
-
-    const currentMeta = driverLocationService.getMeta(safeDriverId) || {};
-    const mergedMeta = { ...currentMeta, ...(meta && typeof meta === "object" ? meta : {}) };
-    const walletState = resolveDriverWalletState(mergedMeta);
-    const previousStatus = String(currentMeta?.wallet_status_state ?? "ok");
-    const stateChanged = previousStatus !== walletState.status;
-
-    driverLocationService.updateMeta(safeDriverId, {
-      not_valid_wallet_balance: walletState.isBlocked ? 1 : 0,
-      not_valid_wallet_balance_msg: walletState.isBlocked ? walletState.message : "",
-      can_receive_new_requests: walletState.canReceiveNewRequests ? 1 : 0,
-      wallet_status_state: walletState.status,
-      wallet_status_message: walletState.message || "",
-      wallet_warning_limit: walletState.warningLimit,
-      wallet_block_limit: walletState.blockLimit,
-      ...(walletState.remainingBalance !== null
-        ? { remaining_balance: walletState.remainingBalance }
-        : {}),
-      updatedAt: Date.now(),
-    });
-
-    if (forceEmit || stateChanged) {
-      const walletPayload = {
-        driver_id: safeDriverId,
-        status: walletState.canReceiveNewRequests ? 1 : 0,
-        wallet_status: walletState.status,
-        can_receive_new_requests: walletState.canReceiveNewRequests ? 1 : 0,
-        remaining_balance: walletState.remainingBalance,
-        wallet_warning_limit: walletState.warningLimit,
-        wallet_block_limit: walletState.blockLimit,
-        message: walletState.message || null,
-        source,
-        at: Date.now(),
-      };
-
-      io.to(driverRoom(safeDriverId)).emit("driver:walletStatus", walletPayload);
-      if (targetSocket && typeof targetSocket.emit === "function") {
-        targetSocket.emit("driver:walletStatus", walletPayload);
-      }
-    }
-
-    return {
-      ...walletState,
-      stateChanged,
-      previousStatus,
-    };
-  };
-
   const bindDriverOnce = (newDriverId) => {
     if (!socket.driverId) {
       socket.driverId = newDriverId;
@@ -524,41 +407,6 @@ module.exports = (io, socket) => {
     ) {
       biddingSocket.emitCandidatesSummaryForDriverStateChange(io, driverId);
     }
-  };
-
-  const releaseDriverActiveRideLocally = (driverId, rideId, rideStatus = null) => {
-    const safeDriverId = toNumber(driverId);
-    const safeRideId = toNumber(rideId);
-    if (!safeDriverId || !safeRideId) return;
-
-    // Fallback release in socket layer in case Laravel->Node internal status event is delayed/missed.
-    clearActiveRideByDriver(safeDriverId);
-    clearActiveRideByRideId(safeRideId);
-    socket.activeRideId = null;
-    extraDistanceSessions.delete(safeRideId);
-
-    driverLocationService.updateMeta(safeDriverId, {
-      current_ride_id: null,
-      ...(rideStatus !== null ? { current_ride_status: rideStatus } : {}),
-      last_activity_at: Date.now(),
-      updatedAt: Date.now(),
-    });
-
-    emitCandidatesSummaryForDriver(safeDriverId);
-
-    if (typeof biddingSocket.recoverDriverPendingDispatch === "function") {
-      biddingSocket.recoverDriverPendingDispatch(
-        io,
-        safeDriverId,
-        "driver:terminal-local-release"
-      );
-    }
-
-    console.log("[ride-status][local-release] active ride cleared", {
-      driver_id: safeDriverId,
-      ride_id: safeRideId,
-      ride_status: rideStatus,
-    });
   };
 
   const logRooms = (label) => {
@@ -583,7 +431,6 @@ module.exports = (io, socket) => {
   // ─────────────────────────────
   socket.laravelLocationInterval = null;
   socket.activeRideId = null;
-  socket.driverRecoveryReplayTimer = null;
 
   // ─────────────────────────────
   // Events
@@ -617,41 +464,12 @@ module.exports = (io, socket) => {
     if (!driverId || la === null || lo === null) return;
     if (!bindDriverOnce(driverId)) return;
 
-    const onlineNow = Date.now();
-    const normalizedDriverServiceId = toNumber(driver_service_id) ?? null;
-    const dedupeSignature = [
-      driverId,
-      normalizedDriverServiceId ?? "na",
-      Math.round(la * 1e6),
-      Math.round(lo * 1e6),
-      normalizedAccessToken ? 1 : 0,
-    ].join("|");
-    const lastOnlineDriverId = toNumber(socket.lastDriverOnlineDriverId);
-    const lastOnlineAt = toNumber(socket.lastDriverOnlineAt) ?? 0;
-    const lastOnlineSignature = socket.lastDriverOnlineSignature ?? null;
-    if (
-      lastOnlineDriverId === driverId &&
-      lastOnlineSignature === dedupeSignature &&
-      onlineNow - lastOnlineAt < DRIVER_ONLINE_DEDUPE_WINDOW_MS
-    ) {
-      console.log("[driver-online] duplicate ignored", {
-        driver_id: driverId,
-        socket_id: socket.id,
-        signature: dedupeSignature,
-        elapsed_ms: onlineNow - lastOnlineAt,
-      });
-      return;
-    }
-    socket.lastDriverOnlineDriverId = driverId;
-    socket.lastDriverOnlineAt = onlineNow;
-    socket.lastDriverOnlineSignature = dedupeSignature;
-
     const payloadServiceTypeId = toNumber(
       service_type_id ?? vehicle_type_id ?? payload?.service_type ?? null
     );
     const payloadServiceCategoryId = toNumber(service_category_id ?? null);
 
-    socket.driverServiceId = normalizedDriverServiceId;
+    socket.driverServiceId = toNumber(driver_service_id) ?? null;
     socket.driverDetailId = toNumber(payload?.driver_detail_id ?? null);
     socket.driverAccessToken = normalizedAccessToken ?? null;
     socket.driverServiceCategoryId = payloadServiceCategoryId ?? null;
@@ -660,6 +478,7 @@ module.exports = (io, socket) => {
     console.log("✅ driver joined room", driverRoom(driverId), "socket:", socket.id);
 
     // ✅ خزّن أولياً لوكيشن + online (بدون upsert)
+    const onlineNow = Date.now();
     driverLocationService.updateMemory(driverId, la, lo);
     lastAcceptedLocationByDriver.set(driverId, {
       lat: la,
@@ -824,19 +643,11 @@ module.exports = (io, socket) => {
             d.wallet_blocked_message ??
             ""
         );
-        const walletWarningFlag = toNumber(d.wallet_is_warning ?? null) ?? 0;
-        const walletBlockedFlag = toNumber(d.wallet_is_blocked ?? null) ?? 0;
-        const walletWarningLimit = toNumber(d.wallet_warning_limit ?? null);
-        const walletBlockLimit = toNumber(d.wallet_block_limit ?? null);
-        const remainingBalance = toNumber(d.remaining_balance ?? null);
         const walletBlocked = Number(notValidWalletBalance) === 1;
         // Keep socket presence online even when wallet is blocked; dispatch layer
         // already excludes blocked wallets from receiving new requests.
-const roomSockets =
-  io?.sockets?.adapter?.rooms?.get(driverRoom(driverId))?.size ?? 0;
-
-const canBeOnlineByApi =
-  currentStatus === 1 || roomSockets > 0 || walletBlocked;
+        const canBeOnlineByApi =
+          currentStatus === 1 || walletBlocked;
 
         const metaUpdate = {
           // status/meta
@@ -845,11 +656,6 @@ const canBeOnlineByApi =
           not_valid_wallet_balance: walletBlocked ? 1 : 0,
           not_valid_wallet_balance_msg: notValidWalletBalanceMsg,
           can_receive_new_requests: walletBlocked ? 0 : 1,
-          wallet_is_warning: walletWarningFlag,
-          wallet_is_blocked: walletBlockedFlag,
-          ...(walletWarningLimit !== null ? { wallet_warning_limit: walletWarningLimit } : {}),
-          ...(walletBlockLimit !== null ? { wallet_block_limit: walletBlockLimit } : {}),
-          ...(remainingBalance !== null ? { remaining_balance: remainingBalance } : {}),
           updatedAt: Date.now(),
           ...(Number.isFinite(resolvedProviderId) ? { provider_id: resolvedProviderId } : {}),
           ...(Number.isFinite(resolvedDriverServiceId)
@@ -900,45 +706,13 @@ const canBeOnlineByApi =
     // ✅ ابعث المرشحين مباشرة عند أونلاين
     // Sync wallet/block flags from Laravel even when update-current-status
     // was skipped because access_token was missing in driver-online payload.
-    const syncedWalletMeta = await syncDriverAdminWalletMeta(driverId, {
+    await syncDriverAdminWalletMeta(driverId, {
       driverServiceId: socket.driverServiceId ?? driver_service_id ?? null,
       forceRefresh: true,
     });
-    const onlineWalletState = applyDriverWalletState(driverId, syncedWalletMeta, {
-      source: "driver-online",
-      targetSocket: socket,
-      forceEmit: true,
-    });
 
-    if (
-      onlineWalletState.canReceiveNewRequests &&
-      typeof biddingSocket.recoverDriverPendingDispatch === "function"
-    ) {
-      const recoveryReport = biddingSocket.recoverDriverPendingDispatch(
-        io,
-        driverId,
-        "driver-online"
-      );
-      if ((toNumber(recoveryReport?.attempted) ?? 0) > 0) {
-        if (socket.driverRecoveryReplayTimer) {
-          clearTimeout(socket.driverRecoveryReplayTimer);
-          socket.driverRecoveryReplayTimer = null;
-        }
-        console.log("[driver-online][recovery-replay] scheduled", {
-          driver_id: driverId,
-          delay_ms: DRIVER_ONLINE_RECOVERY_REPLAY_DELAY_MS,
-          attempted: toNumber(recoveryReport?.attempted) ?? 0,
-        });
-        socket.driverRecoveryReplayTimer = setTimeout(() => {
-          socket.driverRecoveryReplayTimer = null;
-          if (!socket.connected || socket.driverId !== driverId) return;
-          console.log("[driver-online][recovery-replay] executing", {
-            driver_id: driverId,
-            socket_id: socket.id,
-          });
-          biddingSocket.recoverDriverPendingDispatch(io, driverId, "driver-online");
-        }, DRIVER_ONLINE_RECOVERY_REPLAY_DELAY_MS);
-      }
+    if (typeof biddingSocket.recoverDriverPendingDispatch === "function") {
+      biddingSocket.recoverDriverPendingDispatch(io, driverId, "driver-online");
     }
 
     emitCandidatesSummaryForDriver(driverId);
@@ -948,12 +722,6 @@ const canBeOnlineByApi =
       provider_id: driverId,
       driver_service_id: socket.driverServiceId ?? null,
       driver_detail_id: socket.driverDetailId ?? null,
-      can_receive_new_requests: onlineWalletState.canReceiveNewRequests ? 1 : 0,
-      wallet_status: onlineWalletState.status,
-      wallet_message: onlineWalletState.message || null,
-      remaining_balance: onlineWalletState.remainingBalance,
-      wallet_warning_limit: onlineWalletState.warningLimit,
-      wallet_block_limit: onlineWalletState.blockLimit,
     });
   });
 
@@ -997,9 +765,6 @@ const canBeOnlineByApi =
     )
       .then((freshMeta) => {
         if (!freshMeta || typeof freshMeta !== "object") return;
-        const walletState = applyDriverWalletState(socket.driverId, freshMeta, {
-          source: "wallet-sync",
-        });
         const profileStatus = Number(
           freshMeta.current_status ??
             freshMeta.driver_current_status ??
@@ -1007,23 +772,13 @@ const canBeOnlineByApi =
             freshMeta.provider_current_status ??
             1
         );
+        const walletBlocked =
+          Number(freshMeta.not_valid_wallet_balance ?? 0) === 1;
         const driverRoomSockets =
           io?.sockets?.adapter?.rooms?.get(driverRoom(socket.driverId))?.size ?? 0;
         const hasActiveSocketRoom = driverRoomSockets > 0;
         const shouldStayOnline =
-          profileStatus === 1 ||
-          hasActiveSocketRoom ||
-          walletState.isBlocked ||
-          walletState.isWarning;
-
-        if (
-          walletState.stateChanged &&
-          walletState.canReceiveNewRequests &&
-          typeof biddingSocket.recoverDriverPendingDispatch === "function"
-        ) {
-          biddingSocket.recoverDriverPendingDispatch(io, socket.driverId, "wallet-recovered");
-        }
-
+          profileStatus === 1 || hasActiveSocketRoom || walletBlocked;
         if (!shouldStayOnline) {
           driverLocationService.updateMeta(socket.driverId, {
             is_online: false,
@@ -1045,21 +800,19 @@ const canBeOnlineByApi =
         currentMeta.provider_current_status ??
         1
     );
-    const currentWalletState = resolveDriverWalletState(currentMeta);
+    const walletBlockedNow =
+      Number(currentMeta.not_valid_wallet_balance ?? 0) === 1;
     const driverRoomSocketsNow =
       io?.sockets?.adapter?.rooms?.get(driverRoom(socket.driverId))?.size ?? 0;
     const hasActiveSocketRoomNow = driverRoomSocketsNow > 0;
     const shouldStayOnlineNow =
-      profileStatusNow === 1 ||
-      hasActiveSocketRoomNow ||
-      currentWalletState.isBlocked ||
-      currentWalletState.isWarning;
+      profileStatusNow === 1 || hasActiveSocketRoomNow || walletBlockedNow;
 
     driverLocationService.updateMeta(socket.driverId, {
       is_online: shouldStayOnlineNow,
       dashboard_is_online: shouldStayOnlineNow,
       socket_disconnected: !shouldStayOnlineNow,
-      can_receive_new_requests: currentWalletState.canReceiveNewRequests ? 1 : 0,
+      can_receive_new_requests: walletBlockedNow ? 0 : 1,
       updatedAt: now,
     });
 
@@ -1559,13 +1312,14 @@ const acceptExtraPayload = {
     }
 
     if (FINAL_RIDE_STATUSES.has(rideStatus)) {
-      releaseDriverActiveRideLocally(driverId, rideId, rideStatus);
+      socket.activeRideId = null;
+      extraDistanceSessions.delete(rideId);
 
       console.log("[ride-status][driver:updateRideStatus] terminal status acknowledged", {
         driver_id: driverId,
         ride_id: rideId,
         ride_status: rideStatus,
-        note: "local active-ride release applied; Laravel internal event still handles global cleanup/queue flow",
+        note: "cleanup/queue activation handled by /events/internal/ride-status-updated",
       });
     }
 
@@ -1780,11 +1534,6 @@ const acceptExtraPayload = {
     if (socket.laravelLocationInterval) {
       clearInterval(socket.laravelLocationInterval);
       socket.laravelLocationInterval = null;
-    }
-
-    if (socket.driverRecoveryReplayTimer) {
-      clearTimeout(socket.driverRecoveryReplayTimer);
-      socket.driverRecoveryReplayTimer = null;
     }
 
     if (socket.driverId) {
