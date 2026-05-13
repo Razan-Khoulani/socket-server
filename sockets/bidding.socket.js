@@ -3641,6 +3641,12 @@ function emitPendingBidRequestsForDriver(io, driverId, source = "driver:getRides
   let attempted = 0;
   let delivered = 0;
   let pending = 0;
+  const normalizedSource = String(source || "").trim().toLowerCase();
+  const isReconnectRecoverySource =
+    normalizedSource === "driver-online" ||
+    normalizedSource === "driver:getrideslist" ||
+    normalizedSource === "driver:recovery" ||
+    normalizedSource === "wallet-recovered";
 
   for (const [rideId, ride] of box.entries()) {
     const safeRideId = toNumber(rideId);
@@ -3663,8 +3669,17 @@ function emitPendingBidRequestsForDriver(io, driverId, source = "driver:getRides
       continue;
     }
 
-    if (state?.status === "notified" && state?.notified_at) {
+    if (state?.status === "notified" && state?.notified_at && !isReconnectRecoverySource) {
       continue;
+    }
+
+    if (state?.status === "notified" && state?.notified_at && isReconnectRecoverySource) {
+      console.log("[dispatch][recovery-replay-notified]", {
+        driver_id: safeDriverId,
+        ride_id: safeRideId,
+        source,
+        notified_at: state?.notified_at ?? null,
+      });
     }
 
     const bidRequestPayload = sanitizeRidePayloadForClient({
