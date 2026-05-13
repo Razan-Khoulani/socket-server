@@ -754,8 +754,11 @@ module.exports = (io, socket) => {
         const walletBlocked = Number(notValidWalletBalance) === 1;
         // Keep socket presence online even when wallet is blocked; dispatch layer
         // already excludes blocked wallets from receiving new requests.
-        const canBeOnlineByApi =
-          currentStatus === 1 || walletBlocked;
+const roomSockets =
+  io?.sockets?.adapter?.rooms?.get(driverRoom(driverId))?.size ?? 0;
+
+const canBeOnlineByApi =
+  currentStatus === 1 || roomSockets > 0 || walletBlocked;
 
         const metaUpdate = {
           // status/meta
