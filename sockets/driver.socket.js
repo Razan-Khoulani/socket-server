@@ -39,6 +39,11 @@ const DRIVER_ONLINE_DEDUPE_WINDOW_MS = Number.isFinite(
 )
   ? Math.max(500, Number(process.env.DRIVER_ONLINE_DEDUPE_WINDOW_MS))
   : 3000;
+const DRIVER_ONLINE_RECOVERY_REPLAY_DELAY_MS = Number.isFinite(
+  Number(process.env.DRIVER_ONLINE_RECOVERY_REPLAY_DELAY_MS)
+)
+  ? Math.max(500, Number(process.env.DRIVER_ONLINE_RECOVERY_REPLAY_DELAY_MS))
+  : 1500;
 const extraDistanceSessions = new Map(); // rideId -> { driverId, acceptedAt, baselineRoutePointCount, baselineTotalDistanceKm, acceptedLat, acceptedLong, settled }
 const STATUS_DEDUPE_TTL_MS = Number.isFinite(
   Number(process.env.STATUS_DEDUPE_TTL_MS)
@@ -539,6 +544,7 @@ module.exports = (io, socket) => {
   // ─────────────────────────────
   socket.laravelLocationInterval = null;
   socket.activeRideId = null;
+  socket.driverRecoveryReplayTimer = null;
 
   // ─────────────────────────────
   // Events
@@ -869,7 +875,22 @@ const canBeOnlineByApi =
       onlineWalletState.canReceiveNewRequests &&
       typeof biddingSocket.recoverDriverPendingDispatch === "function"
     ) {
-      biddingSocket.recoverDriverPendingDispatch(io, driverId, "driver-online");
+      const recoveryReport = biddingSocket.recoverDriverPendingDispatch(
+        io,
+        driverId,
+        "driver-online"
+      );
+      if ((toNumber(recoveryReport?.attempted) ?? 0) > 0) {
+        if (socket.driverRecoveryReplayTimer) {
+          clearTimeout(socket.driverRecoveryReplayTimer);
+          socket.driverRecoveryReplayTimer = null;
+        }
+        socket.driverRecoveryReplayTimer = setTimeout(() => {
+          socket.driverRecoveryReplayTimer = null;
+          if (!socket.connected || socket.driverId !== driverId) return;
+          biddingSocket.recoverDriverPendingDispatch(io, driverId, "driver-online");
+        }, DRIVER_ONLINE_RECOVERY_REPLAY_DELAY_MS);
+      }
     }
 
     emitCandidatesSummaryForDriver(driverId);
@@ -1712,6 +1733,11 @@ const acceptExtraPayload = {
     if (socket.laravelLocationInterval) {
       clearInterval(socket.laravelLocationInterval);
       socket.laravelLocationInterval = null;
+    }
+
+    if (socket.driverRecoveryReplayTimer) {
+      clearTimeout(socket.driverRecoveryReplayTimer);
+      socket.driverRecoveryReplayTimer = null;
     }
 
     if (socket.driverId) {
