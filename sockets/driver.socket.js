@@ -1,7 +1,11 @@
 // sockets/driver100.socket.js 
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios");
-const { getActiveRideByDriver } = require("../store/activeRides.store");
+const {
+  getActiveRideByDriver,
+  clearActiveRideByDriver,
+  clearActiveRideByRideId,
+} = require("../store/activeRides.store");
 const { getUserDetails, getUserDetailsByToken } = require("../store/users.store");
 const {
   startRideRoute,
@@ -520,6 +524,41 @@ module.exports = (io, socket) => {
     ) {
       biddingSocket.emitCandidatesSummaryForDriverStateChange(io, driverId);
     }
+  };
+
+  const releaseDriverActiveRideLocally = (driverId, rideId, rideStatus = null) => {
+    const safeDriverId = toNumber(driverId);
+    const safeRideId = toNumber(rideId);
+    if (!safeDriverId || !safeRideId) return;
+
+    // Fallback release in socket layer in case Laravel->Node internal status event is delayed/missed.
+    clearActiveRideByDriver(safeDriverId);
+    clearActiveRideByRideId(safeRideId);
+    socket.activeRideId = null;
+    extraDistanceSessions.delete(safeRideId);
+
+    driverLocationService.updateMeta(safeDriverId, {
+      current_ride_id: null,
+      ...(rideStatus !== null ? { current_ride_status: rideStatus } : {}),
+      last_activity_at: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    emitCandidatesSummaryForDriver(safeDriverId);
+
+    if (typeof biddingSocket.recoverDriverPendingDispatch === "function") {
+      biddingSocket.recoverDriverPendingDispatch(
+        io,
+        safeDriverId,
+        "driver:terminal-local-release"
+      );
+    }
+
+    console.log("[ride-status][local-release] active ride cleared", {
+      driver_id: safeDriverId,
+      ride_id: safeRideId,
+      ride_status: rideStatus,
+    });
   };
 
   const logRooms = (label) => {
@@ -1520,14 +1559,13 @@ const acceptExtraPayload = {
     }
 
     if (FINAL_RIDE_STATUSES.has(rideStatus)) {
-      socket.activeRideId = null;
-      extraDistanceSessions.delete(rideId);
+      releaseDriverActiveRideLocally(driverId, rideId, rideStatus);
 
       console.log("[ride-status][driver:updateRideStatus] terminal status acknowledged", {
         driver_id: driverId,
         ride_id: rideId,
         ride_status: rideStatus,
-        note: "cleanup/queue activation handled by /events/internal/ride-status-updated",
+        note: "local active-ride release applied; Laravel internal event still handles global cleanup/queue flow",
       });
     }
 
