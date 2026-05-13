@@ -3,13 +3,13 @@ name: Deploy Socket Server
 on:
   push:
     branches:
-      - develop
+      - dev
       - main
   workflow_dispatch:
 
 jobs:
   deploy_dev:
-    if: github.ref_name == 'develop'
+    if: github.ref_name == 'dev'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,7 +37,7 @@ jobs:
           SSH_USER: ${{ secrets.DEV_SSH_USER }}
           SERVER_APP_DIR: ${{ secrets.DEV_SERVER_APP_DIR }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
-          TARGET_BRANCH: develop
+          TARGET_BRANCH: dev
         run: |
           PORT="${SSH_PORT:-22}"
           ssh -p "${PORT}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${SSH_HOST}" << EOF
