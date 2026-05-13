@@ -885,9 +885,18 @@ const canBeOnlineByApi =
           clearTimeout(socket.driverRecoveryReplayTimer);
           socket.driverRecoveryReplayTimer = null;
         }
+        console.log("[driver-online][recovery-replay] scheduled", {
+          driver_id: driverId,
+          delay_ms: DRIVER_ONLINE_RECOVERY_REPLAY_DELAY_MS,
+          attempted: toNumber(recoveryReport?.attempted) ?? 0,
+        });
         socket.driverRecoveryReplayTimer = setTimeout(() => {
           socket.driverRecoveryReplayTimer = null;
           if (!socket.connected || socket.driverId !== driverId) return;
+          console.log("[driver-online][recovery-replay] executing", {
+            driver_id: driverId,
+            socket_id: socket.id,
+          });
           biddingSocket.recoverDriverPendingDispatch(io, driverId, "driver-online");
         }, DRIVER_ONLINE_RECOVERY_REPLAY_DELAY_MS);
       }
