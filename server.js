@@ -65,8 +65,9 @@ const SIMPLE_PASSED_DEST_DISTANCE_M = Number.isFinite(
 )
   ? Number(process.env.SIMPLE_PASSED_DEST_DISTANCE_M)
   : 25;
-// ride statuses treated as terminal flow states.
-// Note: status 8 is handled as a transition state in terminal handling below.
+// ride statuses treated as terminal flow states for active-ride lifecycle.
+// Keep 7/8 terminal here to avoid leaving driver busy when downstream payment
+// statuses (9/10) are delayed or not emitted.
 const FINAL_STATUSES = new Set([4, 6, 7, 8, 9, 10, 11]);
 // const parseStatusSet = (raw, fallback = []) => {
 //   const source = String(raw ?? "")
@@ -1562,8 +1563,8 @@ const rating = payload?.rating ?? null; // إذا كان التقييم موجو
       driverId ?? getActiveDriverByRide(rideId) ?? adminDriverIdFromSnapshot ?? null;
 
     if (adminDriverId) {
-const shouldReleaseRideRef =
-  FINAL_STATUSES.has(status) && status !== 8;    const storedDriverPoint = driverLocationService.getDriver(adminDriverId) || {};
+      const shouldReleaseRideRef = FINAL_STATUSES.has(status);
+      const storedDriverPoint = driverLocationService.getDriver(adminDriverId) || {};
       const refreshLat =
         la != null ? la : toFiniteNumber(storedDriverPoint?.lat);
       const refreshLong =
@@ -1809,57 +1810,39 @@ if (
       });
     }
 
-    // ✅ If ride reached a terminal status, handle active mapping + notify
+    // ✅ If ride reached a terminal status, release active mapping + notify
     if (FINAL_STATUSES.has(status)) {
       const activeDriverIdBeforeClear =
         driverId ?? getActiveDriverByRide(rideId) ?? null;
-      const isTransitionStatus = status === 7 || status === 8;
-      const shouldActivateQueuedRide = status === 9 || status === 10;
+      const shouldActivateQueuedRide = status === 7 || status === 8 || status === 9 || status === 10 || status === 11;
+      clearActiveRideByRideId(rideId);
 
-      if (isTransitionStatus) {
-        console.log("[ride-status][transition-status]", {
+      const activated =
+        shouldActivateQueuedRide &&
+        activeDriverIdBeforeClear &&
+        typeof biddingSocket.activateQueuedRideForDriver === "function"
+          ? biddingSocket.activateQueuedRideForDriver(io, activeDriverIdBeforeClear)
+          : false;
+
+      if (shouldActivateQueuedRide) {
+        console.log("[ride-status][queue-activation-after-terminal]", {
           ride_id: rideId,
           status,
           activeDriverIdBeforeClear,
-          message:
-            "skip clear/close; waiting for final completion status (9/10)",
-        });
-      } else if (shouldActivateQueuedRide) {
-        clearActiveRideByRideId(rideId);
-
-        const activated =
-          activeDriverIdBeforeClear &&
-          typeof biddingSocket.activateQueuedRideForDriver === "function"
-            ? biddingSocket.activateQueuedRideForDriver(io, activeDriverIdBeforeClear)
-            : false;
-
-          console.log("[ride-status][queue-activation-after-terminal]", {
-            ride_id: rideId,
-            status,
-            activeDriverIdBeforeClear,
-            activated,
-          });
-
-        if (!activated && typeof biddingSocket.closeRideBidding === "function") {
-          biddingSocket.closeRideBidding(io, rideId);
-          console.log("[ride-status][queue-activation-fallback-close]", {
-            ride_id: rideId,
-            status,
-          });
-        }
-      } else {
-        clearActiveRideByRideId(rideId);
-
-        if (status !== 4 && typeof biddingSocket.closeRideBidding === "function") {
-          biddingSocket.closeRideBidding(io, rideId);
-        }
-
-        console.log("[ride-status][terminal-close]", {
-          ride_id: rideId,
-          status,
-          activeDriverIdBeforeClear,
+          activated,
         });
       }
+
+      if (status !== 4 && typeof biddingSocket.closeRideBidding === "function") {
+        biddingSocket.closeRideBidding(io, rideId);
+      }
+
+      console.log("[ride-status][terminal-close]", {
+        ride_id: rideId,
+        status,
+        activeDriverIdBeforeClear,
+        activated,
+      });
 
       if (ROUTE_CLEAR_STATUSES.has(status)) {
         clearRideRoute(rideId);
@@ -1876,25 +1859,19 @@ if (
         updated_at: Date.now(),
         source: "ride-ended",
       });
-const shouldEmitEndedEvent = !isTransitionStatus;      if (shouldEmitEndedEvent) {
-        const isDupEnded = shouldSkipDedupe(
-          endedDedupe,
-          rideId,
-          ENDED_DEDUPE_TTL_MS
-        );
-        if (!isDupEnded) {
-          io.to(`ride:${rideId}`).emit("ride:ended", endEvt);
-          const emitDriverId = driverId ?? activeDriverIdBeforeClear ?? null;
-          if (emitDriverId) {
-            io.to(`driver:${emitDriverId}`).emit("ride:ended", endEvt);
-          }
-        } else {
-          console.log(`[status][dedupe] skip ride:ended ride:${rideId}`);
+      const isDupEnded = shouldSkipDedupe(
+        endedDedupe,
+        rideId,
+        ENDED_DEDUPE_TTL_MS
+      );
+      if (!isDupEnded) {
+        io.to(`ride:${rideId}`).emit("ride:ended", endEvt);
+        const emitDriverId = driverId ?? activeDriverIdBeforeClear ?? null;
+        if (emitDriverId) {
+          io.to(`driver:${emitDriverId}`).emit("ride:ended", endEvt);
         }
       } else {
-        console.log(
-          `[status][skip] ride:ended ride:${rideId} status:${status} (transition status)`
-        );
+        console.log(`[status][dedupe] skip ride:ended ride:${rideId}`);
       }
     }
 
@@ -2007,8 +1984,23 @@ app.post("/ride/stop-tracking", (req, res) => {
 
     const rideId = Number(ride_id);
     const stopped = rideTracking.stopTracking(io, rideId);
-    // Do not clear active ride mapping here.
-    // Terminal status handling (especially 8 -> 9 transition) owns this lifecycle.
+    const activeDriverIdBeforeClear = getActiveDriverByRide(rideId);
+    // Fallback release: if terminal status callback is delayed/missed, do not keep
+    // the driver stuck as busy after tracking is stopped.
+    clearActiveRideByRideId(rideId);
+    const activatedFromStopTracking =
+      activeDriverIdBeforeClear &&
+      typeof biddingSocket.activateQueuedRideForDriver === "function"
+        ? biddingSocket.activateQueuedRideForDriver(io, activeDriverIdBeforeClear)
+        : false;
+    if (typeof biddingSocket.closeRideBidding === "function") {
+      biddingSocket.closeRideBidding(io, rideId);
+    }
+    console.log("[ride-status][stop-tracking-release]", {
+      ride_id: rideId,
+      activeDriverIdBeforeClear,
+      activatedFromStopTracking,
+    });
 
     console.log(`[tracking][stop] ride ${rideId} stopped`);
 

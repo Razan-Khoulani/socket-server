@@ -2749,7 +2749,7 @@ function canDriverReceiveNewRideRequests(driverId) {
   const walletBlocked = Number(meta?.not_valid_wallet_balance ?? 0) === 1;
   if (walletBlocked) return false;
 
-  const activeRideId = getActiveRideByDriver(driverId);
+  let activeRideId = getActiveRideByDriver(driverId);
   if (!activeRideId) return true;
 
   const activeRideSnapshot =
@@ -2763,6 +2763,28 @@ function canDriverReceiveNewRideRequests(driverId) {
     toNumber(activeRideSnapshot?.status) ??
     toNumber(getRideStatusSnapshot(activeRideId)?.ride_status) ??
     null;
+  const metaRideStatus =
+    toNumber(meta?.current_ride_status) ??
+    toNumber(meta?.latest_ride_status) ??
+    null;
+
+  if (
+    isTerminalRideStatus(activeRideStatus) ||
+    (activeRideStatus == null && isTerminalRideStatus(metaRideStatus))
+  ) {
+    clearActiveRideByRideId(activeRideId);
+    const refreshedActiveRideId = getActiveRideByDriver(driverId);
+    if (!refreshedActiveRideId) {
+      console.log("[dispatch][self-heal] cleared stale active ride mapping", {
+        driver_id: driverId,
+        ride_id: activeRideId,
+        ride_status: activeRideStatus ?? metaRideStatus,
+      });
+      activeRideId = null;
+    }
+  }
+
+  if (!activeRideId) return true;
 
   // إذا الرحلة الحالية لساتها accepted / arrived / started
   // لا تبعتلو أي رحلة ثانية نهائياً
