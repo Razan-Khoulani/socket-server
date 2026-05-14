@@ -1544,20 +1544,22 @@ function isRideOfferExpired(ride) {
 }
 
 function isDriverOfferStillActive(driverId, rideId) {
-  const box = driverRideInbox.get(driverId);
-  const ride = box?.get(rideId);
+  const safeDriverId = toNumber(driverId);
+  const safeRideId = toNumber(rideId);
+  if (!safeDriverId || !safeRideId) return false;
+
+  const state = getRideDriverState(safeRideId, safeDriverId);
+  if (isTerminalDriverRideState(state?.status)) return false;
+
+  const box = driverRideInbox.get(safeDriverId);
+  const ride = box?.get(safeRideId);
 
   if (ride && typeof ride === "object") {
     if (isRideOfferExpired(ride)) return false;
     return true;
   }
 
-  const safeDriverId = toNumber(driverId);
-  const safeRideId = toNumber(rideId);
-  if (!safeDriverId || !safeRideId) return false;
-
   const candidateSet = rideCandidates.get(safeRideId);
-  const state = getRideDriverState(safeRideId, safeDriverId);
 
   if (!candidateSet?.has(safeDriverId)) return false;
 
@@ -1934,7 +1936,7 @@ function scheduleBidRequestRetry(
 }
 
 function isTerminalDriverRideState(status) {
-  return status === "declined"  || status === "expired";
+  return status === "accepted" || status === "declined" || status === "expired";
 }
 
 function isTerminalRideStatus(status) {
@@ -2578,6 +2580,7 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
 
 // ✅ rides cancelled (block dispatch)
 const cancelledRides = new Set(); // rideId
+const cancelledRideCleanupTimers = new Map(); // rideId -> timeout
 
 // ─────────────────────────────
 // Inbox helpers
@@ -2618,6 +2621,35 @@ function setDriverQueuedRide(driverId, payload) {
 function clearDriverQueuedRide(driverId) {
   if (!driverId) return;
   driverQueuedRide.delete(driverId);
+}
+
+function markRideCancelled(io, rideId, options = {}) {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return false;
+
+  const { activateQueued = true } = options || {};
+  const activeDriverIdBeforeCancel = getActiveDriverByRide(safeRideId);
+
+  cancelledRides.add(safeRideId);
+  const existingCleanupTimer = cancelledRideCleanupTimers.get(safeRideId);
+  if (existingCleanupTimer) {
+    clearTimeout(existingCleanupTimer);
+  }
+  const cleanupTimer = setTimeout(() => {
+    cancelledRides.delete(safeRideId);
+    cancelledRideCleanupTimers.delete(safeRideId);
+  }, CANCELLED_RIDE_TTL_MS);
+  cancelledRideCleanupTimers.set(safeRideId, cleanupTimer);
+
+  removeRideFromAllInboxes(io, safeRideId);
+  rideCandidates.delete(safeRideId);
+  clearActiveRideByRideId(safeRideId);
+
+  if (activateQueued && activeDriverIdBeforeCancel) {
+    activateQueuedRideForDriver(io, activeDriverIdBeforeCancel);
+  }
+
+  return true;
 }
 
 function getActiveRideSnapshotByDriver(driverId) {
@@ -4070,14 +4102,27 @@ function shouldKeepExistingCandidateForRide(rideId, driverId) {
   // لا تعتمد على inbox هنا
   // لأننا عم نحذف الرحلة من inbox بعد submit/accept
   const state = getRideDriverState(rideId, safeDriverId);
-  if (state?.status === "declined" || state?.status === "expired") return false;
+  if (isTerminalDriverRideState(state?.status)) return false;
 
   return true;
 }
 
 async function dispatchToNearbyDrivers(io, data) {
-  const rideId = toNumber(data?.ride_id ?? data?.id);
+  const inputPayload = data && typeof data === "object" ? data : {};
+  const rideId = toNumber(inputPayload?.ride_id ?? inputPayload?.id);
   if (!rideId) return false;
+  data = inputPayload;
+
+  // Re-broadcast decision must rely on explicit input only, not merged snapshot fields.
+  const inputDispatchExpandReason =
+    toTrimmedText(inputPayload?.dispatch_expand_reason)?.toLowerCase() ?? null;
+  const hasExplicitPriceUpdateSignal =
+    inputPayload?.isPriceUpdated === true ||
+    inputPayload?.isPriceUpdated === 1 ||
+    inputPayload?.isPriceUpdated === "1" ||
+    toNumber(inputPayload?.updatedPrice ?? null) !== null;
+  const forcedRebroadcastFromInput =
+    toBinaryFlag(inputPayload?.force_rebroadcast ?? inputPayload?.rebroadcast_all ?? null) === 1;
 
   // ✅ fallback: if dispatch payload missing user info, try snapshot memory by rideId
   const snap0 = getRideDetails(rideId);
@@ -4408,6 +4453,10 @@ const existingCandidateSet = rideCandidates.get(rideId) ?? new Set();
 const eligibleForDispatch = roadFiltered.filter((driver) => {
   const driverId = toNumber(driver?.driver_id);
   if (!driverId) return false;
+  const state = getRideDriverState(rideId, driverId);
+
+  // Drivers that already accepted/declined/expired this ride must not be re-dispatched.
+  if (isTerminalDriverRideState(state?.status)) return false;
 
   // إذا كان مرشحًا أصلًا، خليه eligible دائمًا
   if (existingCandidateSet.has(driverId)) return true;
@@ -4551,13 +4600,12 @@ const candidateSync = syncRideCandidates(
 
 // افتراضياً: dispatch يكون فقط للجدد حتى لا نكرر bidRequest على نفس السائق.
 // إعادة البث للجميع تكون فقط للحالات المقصودة (تحديث سعر/تفاعل مستخدم/طلب صريح).
-const forcedRebroadcast =
-  toBinaryFlag(data?.force_rebroadcast ?? data?.rebroadcast_all ?? null) === 1;
+const rebroadcastForPriceUpdateWithoutExpansion =
+  inputDispatchExpandReason === null && hasExplicitPriceUpdateSignal;
 const shouldRebroadcastBidRequest =
-  forcedRebroadcast ||
-  data?.isPriceUpdated === true ||
-  toNumber(data?.updatedPrice) !== null ||
-  data?.dispatch_expand_reason === "user_response";
+  forcedRebroadcastFromInput ||
+  inputDispatchExpandReason === "user_response" ||
+  rebroadcastForPriceUpdateWithoutExpansion;
 
 const notifyDriverIdSet = new Set(
   shouldRebroadcastBidRequest
@@ -6163,20 +6211,7 @@ socket.emit("ride:candidatesSummary", {
     debugLog("ride:cancel", { ride_id, user_id, reason }, socket.id);
     const rideId = toNumber(ride_id);
     if (!rideId) return;
-    const activeDriverIdBeforeCancel = getActiveDriverByRide(rideId);
-
-    cancelledRides.add(rideId);
-
-    setTimeout(() => {
-      cancelledRides.delete(rideId);
-    }, CANCELLED_RIDE_TTL_MS);
-
-    removeRideFromAllInboxes(io, rideId);
-    rideCandidates.delete(rideId);
-    clearActiveRideByRideId(rideId);
-    if (activeDriverIdBeforeCancel) {
-      activateQueuedRideForDriver(io, activeDriverIdBeforeCancel);
-    }
+    if (!markRideCancelled(io, rideId, { activateQueued: true })) return;
 
     io.to(rideRoom(rideId)).emit("ride:cancelled", {
       ride_id: rideId,
@@ -6321,6 +6356,7 @@ socket.emit("ride:candidatesSummary", {
 const removed = inboxRemove(driverId, rideId);
 if (removed) {
   clearDriverBidStatus(driverId, rideId);
+  removeDriverFromRideCandidates(io, rideId, driverId, { emitSummary: false });
   emitDriverPatch(io, driverId, [{ op: "remove", ride_id: rideId }]);
 
   console.log(`🧹 Removed ride ${rideId} from driver ${driverId} inbox after acceptOffer`);
@@ -8107,6 +8143,7 @@ module.exports.getUserIdForRide = getUserIdForRide;
 module.exports.getActiveRideIdForUser = getActiveRideIdForUser;
 module.exports.touchUserActiveRide = touchUserActiveRide;
 module.exports.finalizeAcceptedRide = finalizeAcceptedRide;
+module.exports.markRideCancelled = markRideCancelled;
 module.exports.removeRideFromAllInboxes = removeRideFromAllInboxes;
 module.exports.upsertRideRouteMetrics = upsertRideRouteMetrics;
 module.exports.emitCandidatesSummaryForDriverStateChange = emitCandidatesSummaryForDriverStateChange;
