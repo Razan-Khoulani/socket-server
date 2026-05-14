@@ -1099,6 +1099,14 @@ const normalizeLegacyRideNewPayload = (incoming = {}) => {
         .map((value) => Number(value))
         .filter((value) => Number.isFinite(value) && value > 0)
     : [];
+  const normalizedAdditionalRemarks =
+    payload.additional_remarks ??
+    payload.additional_remark ??
+    payload.additional_request ??
+    payload.remarks ??
+    payload.note ??
+    payload.note_for_driver ??
+    null;
 
   const normalized = {
     ...payload,
@@ -1140,6 +1148,9 @@ const normalizeLegacyRideNewPayload = (incoming = {}) => {
       payload.max_fare_amount ??
       payload.max_fare ??
       null,
+    additional_remarks: normalizedAdditionalRemarks,
+    additional_remark: normalizedAdditionalRemarks,
+    additional_request: normalizedAdditionalRemarks,
     dispatch_timeout_s: payload.dispatch_timeout_s ?? payload.request_timeout ?? null,
     force_new_search_window: 1,
   };

@@ -34,6 +34,11 @@ const toBinaryFlag = (value) => {
   return null;
 };
 
+const toRequiredNeedFlag = (value) => {
+  const parsed = toBinaryFlag(value);
+  return parsed === 1 ? 1 : null;
+};
+
 const toGenderFilter = (value) => {
   if (value === null || value === undefined || value === "") return null;
 
@@ -160,7 +165,7 @@ exports.getNearbyDriversFromMemory = (lat, long, radius = 5000, opts = null) => 
       opts?.gender ??
       null
   );
-  const childSeatFilter = toBinaryFlag(
+  const childSeatFilter = toRequiredNeedFlag(
     opts?.need_child_seat ??
       opts?.child_seat ??
       opts?.require_child_seat ??
@@ -168,7 +173,7 @@ exports.getNearbyDriversFromMemory = (lat, long, radius = 5000, opts = null) => 
       opts?.need_smoking ??
       null
   );
-  const handicapFilter = toBinaryFlag(
+  const handicapFilter = toRequiredNeedFlag(
     opts?.need_handicap ??
       opts?.handicap ??
       opts?.require_handicap ??
@@ -211,8 +216,8 @@ exports.getNearbyDriversFromMemory = (lat, long, radius = 5000, opts = null) => 
       if (driverGender !== requiredGender) continue;
     }
 
-    // Child-seat/smoking filter (exact 0/1 when requested)
-    if (childSeatFilter === 0 || childSeatFilter === 1) {
+    // Child-seat/smoking filter (apply only when explicitly required=1)
+    if (childSeatFilter === 1) {
       const driverChildSeat = toBinaryFlag(
         data.child_seat ??
           data.child_seat_accessibility ??
@@ -223,8 +228,8 @@ exports.getNearbyDriversFromMemory = (lat, long, radius = 5000, opts = null) => 
       if (driverChildSeat !== childSeatFilter) continue;
     }
 
-    // Handicap/special-needs filter (exact 0/1 when requested)
-    if (handicapFilter === 0 || handicapFilter === 1) {
+    // Handicap/special-needs filter (apply only when explicitly required=1)
+    if (handicapFilter === 1) {
       const driverHandicap = toBinaryFlag(
         data.handicap ?? data.handicap_accessibility ?? data.special_needs ?? null
       );
