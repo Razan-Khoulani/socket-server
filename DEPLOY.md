@@ -2,7 +2,7 @@
 
 Auto deploy is configured in `.github/workflows/deploy.yml`:
 
-- push to `develop` => deploys to DEV target
+- push to `develop` => runs stage checks then deploys to DEV target
 - push to `main` => deploys to PROD target
 
 ## 1) GitHub Secrets
@@ -50,5 +50,5 @@ pm2 save
 
 ## 3) Deploy flow
 
-- push `develop` => GitHub Action deploys to DEV
+- push `develop` => GitHub Action runs stage job then deploys to DEV
 - push `main` => GitHub Action deploys to PROD

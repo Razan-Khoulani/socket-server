@@ -24,7 +24,72 @@ jobs:
         run: npm ci --omit=dev
 
       - name: Develop stage status
-        run: echo "Develop stage passed. Deployment is disabled for develop."
+        run: echo "Develop stage passed. Starting DEV deployment."
+
+  deploy_dev:
+    if: github.ref_name == 'develop'
+    needs: stage_develop
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+
+      - name: Trust server host key
+        env:
+          SSH_HOST: ${{ secrets.DEV_SSH_HOST }}
+          SSH_PORT: ${{ secrets.DEV_SSH_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          PORT="${SSH_PORT:-22}"
+          echo "Scanning host key for ${SSH_HOST}:${PORT}"
+          ssh-keyscan -T 10 -p "${PORT}" -H "${SSH_HOST}" >> ~/.ssh/known_hosts || true
+
+      - name: Deploy DEV via SSH
+        env:
+          SSH_HOST: ${{ secrets.DEV_SSH_HOST }}
+          SSH_PORT: ${{ secrets.DEV_SSH_PORT }}
+          SSH_USER: ${{ secrets.DEV_SSH_USER }}
+          SERVER_APP_DIR: ${{ secrets.DEV_SERVER_APP_DIR }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          TARGET_BRANCH: develop
+        run: |
+          PORT="${SSH_PORT:-22}"
+          ssh -p "${PORT}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${SSH_HOST}" << EOF
+            set -e
+            mkdir -p "${SERVER_APP_DIR}"
+            cd "${SERVER_APP_DIR}"
+
+            if [ ! -d .git ]; then
+              git clone "${REPO_URL}" .
+            fi
+
+            git fetch origin "${TARGET_BRANCH}"
+            if git show-ref --verify --quiet "refs/heads/${TARGET_BRANCH}"; then
+              git checkout "${TARGET_BRANCH}"
+            else
+              git checkout -b "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
+            fi
+            git reset --hard "origin/${TARGET_BRANCH}"
+            git clean -fd -e .env -e ".env.*"
+
+            if [ -x "\$HOME/.nodenv/versions/22/bin/node" ]; then
+              export PATH="\$HOME/.nodenv/versions/22/bin:\$PATH"
+            elif [ -x "\$HOME/.nodenv/versions/24/bin/node" ]; then
+              export PATH="\$HOME/.nodenv/versions/24/bin:\$PATH"
+            fi
+
+            node -v
+            npm -v
+
+            npm ci --omit=dev
+            npx pm2 startOrReload ecosystem.config.cjs --env production --update-env
+            npx pm2 save
+          EOF
 
   deploy_prod:
     if: github.ref_name == 'main'
