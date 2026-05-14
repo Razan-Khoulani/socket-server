@@ -1354,10 +1354,13 @@ const acceptExtraPayload = {
       payload: optimisticEvt,
     });
     io.to(`ride:${rideId}`).emit("ride:statusUpdated", optimisticEvt);
-    io.to(driverRoom(driverId)).emit("ride:statusUpdated", optimisticEvt);
+    if (rideStatus !== 4) {
+      io.to(driverRoom(driverId)).emit("ride:statusUpdated", optimisticEvt);
+    }
     console.log("[ride-status][driver:updateRideStatus] optimistic emit", {
       ride_id: rideId,
       ride_status: rideStatus,
+      driver_room_suppressed: rideStatus === 4 ? 1 : 0,
     });
   } catch (e) {
     console.error("[ride-status][driver:updateRideStatus] api failed", {

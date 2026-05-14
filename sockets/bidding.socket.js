@@ -4176,30 +4176,30 @@ async function dispatchToNearbyDrivers(io, data) {
     getRideSnapshotForRedispatch(rideId) ??
     null;
   const persistedBaseFare = pickFirstValue(
-    toNumber(data?.base_fare),
     toNumber(previousRideSnapshot?.base_fare),
     toNumber(previousRideSnapshot?.ride_details?.base_fare),
-    toNumber(previousRideSnapshot?.meta?.base_fare)
+    toNumber(previousRideSnapshot?.meta?.base_fare),
+    toNumber(data?.base_fare)
   );
   const persistedMinPrice = pickFirstValue(
-    toNumber(data?.min_price),
-    toNumber(data?.min_fare),
-    toNumber(data?.MIN_PRICE),
     toNumber(previousRideSnapshot?.min_price),
     toNumber(previousRideSnapshot?.ride_details?.min_price),
     toNumber(previousRideSnapshot?.ride_details?.min_fare),
     toNumber(previousRideSnapshot?.meta?.min_price),
-    toNumber(previousRideSnapshot?.meta?.min_fare)
+    toNumber(previousRideSnapshot?.meta?.min_fare),
+    toNumber(data?.min_price),
+    toNumber(data?.min_fare),
+    toNumber(data?.MIN_PRICE)
   );
   const persistedMaxPrice = pickFirstValue(
-    toNumber(data?.max_price),
-    toNumber(data?.max_fare),
-    toNumber(data?.MAX_PRICE),
     toNumber(previousRideSnapshot?.max_price),
     toNumber(previousRideSnapshot?.ride_details?.max_price),
     toNumber(previousRideSnapshot?.ride_details?.max_fare),
     toNumber(previousRideSnapshot?.meta?.max_price),
-    toNumber(previousRideSnapshot?.meta?.max_fare)
+    toNumber(previousRideSnapshot?.meta?.max_fare),
+    toNumber(data?.max_price),
+    toNumber(data?.max_fare),
+    toNumber(data?.MAX_PRICE)
   );
   const base =
     toNumber(data?.user_bid_price) ??

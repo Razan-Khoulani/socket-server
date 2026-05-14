@@ -1512,6 +1512,44 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       typeof payload?.cancel_by === "string" && payload.cancel_by.trim() !== ""
         ? payload.cancel_by.trim()
         : null;
+    const cancelByActor = (() => {
+      if (typeof cancelBy !== "string") return null;
+      const normalized = cancelBy.trim().toLowerCase();
+      if (!normalized) return null;
+      if (
+        normalized === "driver" ||
+        normalized === "captain" ||
+        normalized === "provider"
+      ) {
+        return "driver";
+      }
+      if (
+        normalized === "user" ||
+        normalized === "customer" ||
+        normalized === "rider" ||
+        normalized === "passenger"
+      ) {
+        return "user";
+      }
+      if (normalized === "admin") return "admin";
+      if (
+        normalized.includes("driver") ||
+        normalized.includes("captain") ||
+        normalized.includes("provider")
+      ) {
+        return "driver";
+      }
+      if (
+        normalized.includes("user") ||
+        normalized.includes("customer") ||
+        normalized.includes("rider")
+      ) {
+        return "user";
+      }
+      if (normalized.includes("admin")) return "admin";
+      return null;
+    })();
+    const suppressDriverSelfCancelEvents = status === 4 && cancelByActor === "driver";
     const cancelReasonId = Number.isFinite(Number(payload?.cancel_reason_id))
       ? Number(payload.cancel_reason_id)
       : Number.isFinite(Number(payload?.reason_id))
@@ -1766,7 +1804,7 @@ if (
           source: "ride-cancelled",
         });
         io.to(`ride:${rideId}`).emit("ride:cancelled", cancelledEvt);
-        if (driverId) {
+        if (driverId && !suppressDriverSelfCancelEvents) {
           io.to(`driver:${driverId}`).emit("ride:cancelled", cancelledEvt);
         }
       }
@@ -1783,12 +1821,18 @@ if (
     }
     if (driverId) {
       if (!isDupStatus) {
-        io.to(`driver:${driverId}`).emit("ride:statusUpdated", evt);
-        const droom = io.sockets.adapter.rooms.get(`driver:${driverId}`);
-        const dcount = droom ? droom.size : 0;
-        console.log(
-          `[status][emit] ride:${rideId} status:${status} -> room:driver:${driverId} (sockets:${dcount})`
-        );
+        if (!suppressDriverSelfCancelEvents) {
+          io.to(`driver:${driverId}`).emit("ride:statusUpdated", evt);
+          const droom = io.sockets.adapter.rooms.get(`driver:${driverId}`);
+          const dcount = droom ? droom.size : 0;
+          console.log(
+            `[status][emit] ride:${rideId} status:${status} -> room:driver:${driverId} (sockets:${dcount})`
+          );
+        } else {
+          console.log(
+            `[status][skip] driver self-cancel echo suppressed ride:${rideId} driver:${driverId}`
+          );
+        }
       }
       void tryEmitDriverInvoice({
         rideId,
@@ -1872,7 +1916,7 @@ const shouldEmitEndedEvent = !isTransitionStatus;      if (shouldEmitEndedEvent)
         if (!isDupEnded) {
           io.to(`ride:${rideId}`).emit("ride:ended", endEvt);
           const emitDriverId = driverId ?? activeDriverIdBeforeClear ?? null;
-          if (emitDriverId) {
+          if (emitDriverId && !suppressDriverSelfCancelEvents) {
             io.to(`driver:${emitDriverId}`).emit("ride:ended", endEvt);
           }
         } else {
@@ -2118,6 +2162,23 @@ app.post("/webhooks/ride-cancelled", (req, res) => {
     const body = req.body || {};
     const { ride_id, user_id, reason_id, driver_id } = body;
 
+    const normalizeCancelBy = (value) => {
+      if (typeof value !== "string") return null;
+      const normalized = value.trim().toLowerCase();
+      if (!normalized) return null;
+      if (
+        normalized === "customer" ||
+        normalized === "rider" ||
+        normalized === "passenger"
+      ) {
+        return "user";
+      }
+      if (normalized === "captain" || normalized === "provider") {
+        return "driver";
+      }
+      return normalized;
+    };
+
     if (ride_id == null) {
       return res.status(400).json({ status: 0, message: "ride_id required" });
     }
@@ -2132,11 +2193,25 @@ app.post("/webhooks/ride-cancelled", (req, res) => {
       : getActiveDriverByRide(rideId) ?? null;
     const userId = Number.isFinite(Number(user_id)) ? Number(user_id) : null;
     const reasonId = Number.isFinite(Number(reason_id)) ? Number(reason_id) : null;
+    const latestStatusSnapshot = getRideStatusSnapshot(rideId);
+    const cancelBy =
+      normalizeCancelBy(body?.cancel_by) ??
+      normalizeCancelBy(body?.canceled_by) ??
+      normalizeCancelBy(body?.cancelled_by) ??
+      normalizeCancelBy(body?.payload?.cancel_by) ??
+      normalizeCancelBy(body?.payload?.canceled_by) ??
+      normalizeCancelBy(body?.payload?.cancelled_by) ??
+      normalizeCancelBy(latestStatusSnapshot?.cancel_by) ??
+      (driverId && !userId ? "driver" : null) ??
+      (userId ? "user" : null) ??
+      "user";
+    const suppressDriverSelfCancelEvents = cancelBy === "driver";
     const at = Date.now();
 
     const statusEvt = {
       ride_id: rideId,
       ride_status: 4,
+      ...(cancelBy ? { cancel_by: cancelBy } : {}),
     };
     const cancelledEvt = {
       ride_id: rideId,
@@ -2144,7 +2219,7 @@ app.post("/webhooks/ride-cancelled", (req, res) => {
       user_id: userId,
       driver_id: driverId,
       reason_id: reasonId,
-      cancel_by: "user",
+      cancel_by: cancelBy,
       ended: true,
       at,
     };
@@ -2170,7 +2245,7 @@ app.post("/webhooks/ride-cancelled", (req, res) => {
     io.to(`ride:${rideId}`).emit("ride:cancelled", cancelledEvt);
     io.to(`ride:${rideId}`).emit("ride:ended", cancelledEvt);
 
-    if (driverId) {
+    if (driverId && !suppressDriverSelfCancelEvents) {
       io.to(`driver:${driverId}`).emit("ride:statusUpdated", statusEvt);
       io.to(`driver:${driverId}`).emit("ride:cancelled", cancelledEvt);
       io.to(`driver:${driverId}`).emit("ride:ended", cancelledEvt);
