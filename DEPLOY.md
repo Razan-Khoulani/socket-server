@@ -1,13 +1,20 @@
-# Stage + Deploy Setup (GitHub Actions + PM2 on Plesk)
+# Deploy Setup (GitHub Actions + PM2)
 
 Auto deploy is configured in `.github/workflows/deploy.yml`:
 
-- push to `develop` => runs STAGE checks only (no deploy)
+- push to `develop` => deploys to DEV target
 - push to `main` => deploys to PROD target
 
 ## 1) GitHub Secrets
 
 Set these repository secrets.
+
+DEV:
+- `DEV_SSH_HOST`
+- `DEV_SSH_PORT` (optional, default `22`)
+- `DEV_SSH_USER`
+- `DEV_SSH_PRIVATE_KEY`
+- `DEV_SERVER_APP_DIR`
 
 PROD:
 - `PROD_SSH_HOST`
@@ -16,17 +23,7 @@ PROD:
 - `PROD_SSH_PRIVATE_KEY`
 - `PROD_SERVER_APP_DIR`
 
-## 2) Plesk mapping (required)
-
-For PROD deploy, use these values from Plesk:
-
-- `*_SSH_HOST`: server IP or hostname
-- `*_SSH_PORT`: usually `22`
-- `*_SSH_USER`: subscription system user in Plesk (with SSH enabled)
-- `*_SERVER_APP_DIR`: app folder for that subscription
-- `*_SSH_PRIVATE_KEY`: private key matching the public key authorized for that system user
-
-## 3) First-time server setup (once per target server)
+## 2) First-time server setup (once per target server)
 
 ```bash
 sudo apt update
@@ -51,7 +48,7 @@ pm2 start ecosystem.config.cjs --env production
 pm2 save
 ```
 
-## 4) Deploy flow
+## 3) Deploy flow
 
-- push `develop` => GitHub Action runs stage only (no deploy)
+- push `develop` => GitHub Action deploys to DEV
 - push `main` => GitHub Action deploys to PROD

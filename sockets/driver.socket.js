@@ -397,109 +397,6 @@ module.exports = (io, socket) => {
 
   const driverRoom = (driverId) => `driver:${driverId}`;
 
-  const resolveDriverWalletState = (meta = {}) => {
-    const remainingBalance = toNumber(meta?.remaining_balance);
-    const warningLimitRaw = toNumber(meta?.wallet_warning_limit);
-    const blockLimitRaw = toNumber(meta?.wallet_block_limit);
-    const warningLimit = warningLimitRaw !== null ? warningLimitRaw : 0;
-    const blockLimit = blockLimitRaw !== null ? blockLimitRaw : null;
-
-    const blockedByFlag =
-      Number(meta?.not_valid_wallet_balance ?? meta?.wallet_is_blocked ?? 0) === 1;
-    const blockedByLimit =
-      remainingBalance !== null && blockLimit !== null
-        ? remainingBalance <= blockLimit
-        : false;
-    const isBlocked = blockedByFlag || blockedByLimit;
-
-    const warningByFlag = Number(meta?.wallet_is_warning ?? 0) === 1;
-    const warningByLimit =
-      !isBlocked && remainingBalance !== null ? remainingBalance <= warningLimit : false;
-    const isWarning = !isBlocked && (warningByFlag || warningByLimit);
-
-    const blockedMessageRaw = String(meta?.not_valid_wallet_balance_msg ?? "").trim();
-    const blockedMessage =
-      blockedMessageRaw || "رصيدك غير كافي، يرجى شحن الرصيد للعودة لاستقبال الرحلات";
-    const warningMessage =
-      "رصيدك منخفض. يرجى شحن الرصيد لتجنب إيقاف استقبال الرحلات";
-    const message = isBlocked ? blockedMessage : isWarning ? warningMessage : "";
-
-    return {
-      remainingBalance,
-      warningLimit,
-      blockLimit,
-      isBlocked,
-      isWarning,
-      canReceiveNewRequests: !isBlocked,
-      status: isBlocked ? "blocked" : isWarning ? "warning" : "ok",
-      message,
-    };
-  };
-
-  const applyDriverWalletState = (
-    driverId,
-    meta = {},
-    { source = "wallet-check", targetSocket = null, forceEmit = false } = {}
-  ) => {
-    const safeDriverId = toNumber(driverId);
-    if (!safeDriverId) {
-      return {
-        status: "ok",
-        canReceiveNewRequests: true,
-        isBlocked: false,
-        isWarning: false,
-        stateChanged: false,
-        previousStatus: "ok",
-      };
-    }
-
-    const currentMeta = driverLocationService.getMeta(safeDriverId) || {};
-    const mergedMeta = { ...currentMeta, ...(meta && typeof meta === "object" ? meta : {}) };
-    const walletState = resolveDriverWalletState(mergedMeta);
-    const previousStatus = String(currentMeta?.wallet_status_state ?? "ok");
-    const stateChanged = previousStatus !== walletState.status;
-
-    driverLocationService.updateMeta(safeDriverId, {
-      not_valid_wallet_balance: walletState.isBlocked ? 1 : 0,
-      not_valid_wallet_balance_msg: walletState.isBlocked ? walletState.message : "",
-      can_receive_new_requests: walletState.canReceiveNewRequests ? 1 : 0,
-      wallet_status_state: walletState.status,
-      wallet_status_message: walletState.message || "",
-      wallet_warning_limit: walletState.warningLimit,
-      wallet_block_limit: walletState.blockLimit,
-      ...(walletState.remainingBalance !== null
-        ? { remaining_balance: walletState.remainingBalance }
-        : {}),
-      updatedAt: Date.now(),
-    });
-
-    if (forceEmit || stateChanged) {
-      const walletPayload = {
-        driver_id: safeDriverId,
-        status: walletState.canReceiveNewRequests ? 1 : 0,
-        wallet_status: walletState.status,
-        can_receive_new_requests: walletState.canReceiveNewRequests ? 1 : 0,
-        remaining_balance: walletState.remainingBalance,
-        wallet_warning_limit: walletState.warningLimit,
-        wallet_block_limit: walletState.blockLimit,
-        message: walletState.message || null,
-        source,
-        at: Date.now(),
-      };
-
-      io.to(driverRoom(safeDriverId)).emit("driver:walletStatus", walletPayload);
-      if (targetSocket && typeof targetSocket.emit === "function") {
-        targetSocket.emit("driver:walletStatus", walletPayload);
-      }
-    }
-
-    return {
-      ...walletState,
-      stateChanged,
-      previousStatus,
-    };
-  };
-
   const bindDriverOnce = (newDriverId) => {
     if (!socket.driverId) {
       socket.driverId = newDriverId;
@@ -779,11 +676,6 @@ module.exports = (io, socket) => {
             d.wallet_blocked_message ??
             ""
         );
-        const walletWarningFlag = toNumber(d.wallet_is_warning ?? null) ?? 0;
-        const walletBlockedFlag = toNumber(d.wallet_is_blocked ?? null) ?? 0;
-        const walletWarningLimit = toNumber(d.wallet_warning_limit ?? null);
-        const walletBlockLimit = toNumber(d.wallet_block_limit ?? null);
-        const remainingBalance = toNumber(d.remaining_balance ?? null);
         const walletBlocked = Number(notValidWalletBalance) === 1;
         // Keep socket presence online even when wallet is blocked; dispatch layer
         // already excludes blocked wallets from receiving new requests.
@@ -800,11 +692,6 @@ const canBeOnlineByApi =
           not_valid_wallet_balance: walletBlocked ? 1 : 0,
           not_valid_wallet_balance_msg: notValidWalletBalanceMsg,
           can_receive_new_requests: walletBlocked ? 0 : 1,
-          wallet_is_warning: walletWarningFlag,
-          wallet_is_blocked: walletBlockedFlag,
-          ...(walletWarningLimit !== null ? { wallet_warning_limit: walletWarningLimit } : {}),
-          ...(walletBlockLimit !== null ? { wallet_block_limit: walletBlockLimit } : {}),
-          ...(remainingBalance !== null ? { remaining_balance: remainingBalance } : {}),
           updatedAt: Date.now(),
           ...(Number.isFinite(resolvedProviderId) ? { provider_id: resolvedProviderId } : {}),
           ...(Number.isFinite(resolvedDriverServiceId)
@@ -855,20 +742,12 @@ const canBeOnlineByApi =
     // ✅ ابعث المرشحين مباشرة عند أونلاين
     // Sync wallet/block flags from Laravel even when update-current-status
     // was skipped because access_token was missing in driver-online payload.
-    const syncedWalletMeta = await syncDriverAdminWalletMeta(driverId, {
+    await syncDriverAdminWalletMeta(driverId, {
       driverServiceId: socket.driverServiceId ?? driver_service_id ?? null,
       forceRefresh: true,
     });
-    const onlineWalletState = applyDriverWalletState(driverId, syncedWalletMeta, {
-      source: "driver-online",
-      targetSocket: socket,
-      forceEmit: true,
-    });
 
-    if (
-      onlineWalletState.canReceiveNewRequests &&
-      typeof biddingSocket.recoverDriverPendingDispatch === "function"
-    ) {
+    if (typeof biddingSocket.recoverDriverPendingDispatch === "function") {
       biddingSocket.recoverDriverPendingDispatch(io, driverId, "driver-online");
     }
 
@@ -879,12 +758,6 @@ const canBeOnlineByApi =
       provider_id: driverId,
       driver_service_id: socket.driverServiceId ?? null,
       driver_detail_id: socket.driverDetailId ?? null,
-      can_receive_new_requests: onlineWalletState.canReceiveNewRequests ? 1 : 0,
-      wallet_status: onlineWalletState.status,
-      wallet_message: onlineWalletState.message || null,
-      remaining_balance: onlineWalletState.remainingBalance,
-      wallet_warning_limit: onlineWalletState.warningLimit,
-      wallet_block_limit: onlineWalletState.blockLimit,
     });
   });
 
@@ -928,9 +801,6 @@ const canBeOnlineByApi =
     )
       .then((freshMeta) => {
         if (!freshMeta || typeof freshMeta !== "object") return;
-        const walletState = applyDriverWalletState(socket.driverId, freshMeta, {
-          source: "wallet-sync",
-        });
         const profileStatus = Number(
           freshMeta.current_status ??
             freshMeta.driver_current_status ??
@@ -938,23 +808,13 @@ const canBeOnlineByApi =
             freshMeta.provider_current_status ??
             1
         );
+        const walletBlocked =
+          Number(freshMeta.not_valid_wallet_balance ?? 0) === 1;
         const driverRoomSockets =
           io?.sockets?.adapter?.rooms?.get(driverRoom(socket.driverId))?.size ?? 0;
         const hasActiveSocketRoom = driverRoomSockets > 0;
         const shouldStayOnline =
-          profileStatus === 1 ||
-          hasActiveSocketRoom ||
-          walletState.isBlocked ||
-          walletState.isWarning;
-
-        if (
-          walletState.stateChanged &&
-          walletState.canReceiveNewRequests &&
-          typeof biddingSocket.recoverDriverPendingDispatch === "function"
-        ) {
-          biddingSocket.recoverDriverPendingDispatch(io, socket.driverId, "wallet-recovered");
-        }
-
+          profileStatus === 1 || hasActiveSocketRoom || walletBlocked;
         if (!shouldStayOnline) {
           driverLocationService.updateMeta(socket.driverId, {
             is_online: false,
@@ -976,21 +836,19 @@ const canBeOnlineByApi =
         currentMeta.provider_current_status ??
         1
     );
-    const currentWalletState = resolveDriverWalletState(currentMeta);
+    const walletBlockedNow =
+      Number(currentMeta.not_valid_wallet_balance ?? 0) === 1;
     const driverRoomSocketsNow =
       io?.sockets?.adapter?.rooms?.get(driverRoom(socket.driverId))?.size ?? 0;
     const hasActiveSocketRoomNow = driverRoomSocketsNow > 0;
     const shouldStayOnlineNow =
-      profileStatusNow === 1 ||
-      hasActiveSocketRoomNow ||
-      currentWalletState.isBlocked ||
-      currentWalletState.isWarning;
+      profileStatusNow === 1 || hasActiveSocketRoomNow || walletBlockedNow;
 
     driverLocationService.updateMeta(socket.driverId, {
       is_online: shouldStayOnlineNow,
       dashboard_is_online: shouldStayOnlineNow,
       socket_disconnected: !shouldStayOnlineNow,
-      can_receive_new_requests: currentWalletState.canReceiveNewRequests ? 1 : 0,
+      can_receive_new_requests: walletBlockedNow ? 0 : 1,
       updatedAt: now,
     });
 

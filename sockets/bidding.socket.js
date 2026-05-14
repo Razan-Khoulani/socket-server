@@ -83,41 +83,6 @@ const toGenderFilter = (v) => {
 
   return null;
 };
-const toRequiredNeedFlag = (v) => {
-  const parsed = toBinaryFlag(v);
-  return parsed === 1 ? 1 : null;
-};
-const matchesDispatchPreference = (driver = null, requiredGender = null, needChildSeat = null, needHandicap = null) => {
-  if (!driver || typeof driver !== "object") return false;
-
-  if (requiredGender === 1 || requiredGender === 2) {
-    const driverGender = toGenderFilter(driver?.driver_gender ?? driver?.gender ?? null);
-    if (driverGender !== requiredGender) return false;
-  }
-
-  if (needChildSeat === 1) {
-    const driverChildSeat = toBinaryFlag(
-      driver?.child_seat ??
-        driver?.child_seat_accessibility ??
-        driver?.smoking ??
-        driver?.smoking_value ??
-        null
-    );
-    if (driverChildSeat !== 1) return false;
-  }
-
-  if (needHandicap === 1) {
-    const driverHandicap = toBinaryFlag(
-      driver?.handicap ??
-        driver?.handicap_accessibility ??
-        driver?.special_needs ??
-        null
-    );
-    if (driverHandicap !== 1) return false;
-  }
-
-  return true;
-};
 const toTrimmedText = (v) => {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
@@ -358,6 +323,160 @@ const extractDriverIdentity = (...sources) => {
   };
 };
 
+const resolveLocalizedVehicleFields = (...sources) => {
+  const scopes = sources.filter((source) => source && typeof source === "object");
+  if (scopes.length === 0) return {};
+
+  const pickLocalizedText = (keys = []) => {
+    const values = [];
+    for (const scope of scopes) {
+      for (const key of keys) {
+        values.push(scope?.[key]);
+      }
+    }
+    return toTrimmedText(pickFirstValue(...values));
+  };
+
+  const vehicleTypeDefault = pickLocalizedText([
+    "vehicle_type",
+    "vehicle_type_name",
+    "vehicleType",
+    "service_type",
+    "service_type_name",
+  ]);
+  const vehicleTypeEn =
+    pickLocalizedText([
+      "vehicle_type_name_en",
+      "vehicle_type_en",
+      "service_type_name_en",
+      "service_type_en",
+      "vehicleTypeNameEn",
+      "vehicleTypeEn",
+    ]) ?? vehicleTypeDefault;
+  const vehicleTypeAr =
+    pickLocalizedText([
+      "vehicle_type_name_ar",
+      "vehicle_type_ar",
+      "service_type_name_ar",
+      "service_type_ar",
+      "vehicleTypeNameAr",
+      "vehicleTypeAr",
+    ]) ?? vehicleTypeDefault;
+
+  const vehicleCompanyDefault = pickLocalizedText([
+    "vehicle_company",
+    "vehicle_manufacturer",
+    "manufacturer_name",
+    "company",
+    "brand",
+    "make",
+    "manufacture_name",
+  ]);
+  const vehicleCompanyEn =
+    pickLocalizedText([
+      "vehicle_company_en",
+      "vehicle_manufacturer_en",
+      "manufacturer_name_en",
+      "company_en",
+      "brand_en",
+      "make_en",
+      "manufacture_name_en",
+    ]) ?? vehicleCompanyDefault;
+  const vehicleCompanyAr =
+    pickLocalizedText([
+      "vehicle_company_ar",
+      "vehicle_manufacturer_ar",
+      "manufacturer_name_ar",
+      "company_ar",
+      "brand_ar",
+      "make_ar",
+      "manufacture_name_ar",
+    ]) ?? vehicleCompanyDefault;
+
+  const modelNameDefault = pickLocalizedText([
+    "model_name",
+    "vehicle_model_name",
+    "vehicle_model",
+    "model",
+  ]);
+  const modelNameEn =
+    pickLocalizedText([
+      "model_name_en",
+      "vehicle_model_name_en",
+      "vehicle_model_en",
+      "model_en",
+    ]) ?? modelNameDefault;
+  const modelNameAr =
+    pickLocalizedText([
+      "model_name_ar",
+      "vehicle_model_name_ar",
+      "vehicle_model_ar",
+      "model_ar",
+    ]) ?? modelNameDefault;
+
+  const directVehicleNameDefault = pickLocalizedText(["vehicle_name", "car_name"]);
+  const directVehicleNameEn = pickLocalizedText(["vehicle_name_en", "car_name_en"]);
+  const directVehicleNameAr = pickLocalizedText(["vehicle_name_ar", "car_name_ar"]);
+
+  const buildVehicleName = (company, model, directName) => {
+    if (directName) return directName;
+    const parts = [toTrimmedText(company), toTrimmedText(model)].filter(Boolean);
+    return parts.length ? parts.join(" ") : null;
+  };
+
+  const vehicleNameDefault = buildVehicleName(
+    vehicleCompanyDefault,
+    modelNameDefault,
+    directVehicleNameDefault
+  );
+  const vehicleNameEn =
+    buildVehicleName(vehicleCompanyEn, modelNameEn, directVehicleNameEn) ??
+    vehicleNameDefault;
+  const vehicleNameAr =
+    buildVehicleName(vehicleCompanyAr, modelNameAr, directVehicleNameAr) ??
+    vehicleNameDefault;
+
+  return {
+    ...(vehicleTypeEn
+      ? {
+          vehicle_type_name_en: vehicleTypeEn,
+          vehicle_type_en: vehicleTypeEn,
+        }
+      : {}),
+    ...(vehicleTypeAr
+      ? {
+          vehicle_type_name_ar: vehicleTypeAr,
+          vehicle_type_ar: vehicleTypeAr,
+        }
+      : {}),
+    ...(vehicleCompanyEn ? { vehicle_company_en: vehicleCompanyEn } : {}),
+    ...(vehicleCompanyAr ? { vehicle_company_ar: vehicleCompanyAr } : {}),
+    ...(modelNameEn ? { model_name_en: modelNameEn } : {}),
+    ...(modelNameAr ? { model_name_ar: modelNameAr } : {}),
+    ...(vehicleNameEn ? { vehicle_name_en: vehicleNameEn } : {}),
+    ...(vehicleNameAr ? { vehicle_name_ar: vehicleNameAr } : {}),
+  };
+};
+
+const applyLocalizedVehicleFields = (payload = null, ...sources) => {
+  if (!payload || typeof payload !== "object") return payload;
+
+  const localizedFields = resolveLocalizedVehicleFields(payload, ...sources);
+  if (!localizedFields || Object.keys(localizedFields).length === 0) return payload;
+
+  let changed = false;
+  const next = { ...payload };
+  for (const [key, value] of Object.entries(localizedFields)) {
+    if (!value) continue;
+    if (toTrimmedText(next?.[key]) == null) {
+      next[key] = value;
+      changed = true;
+    }
+  }
+
+  return changed ? next : payload;
+};
+
 const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
   const src = details && typeof details === "object" ? details : {};
   const meta = fallbackMeta && typeof fallbackMeta === "object" ? fallbackMeta : {};
@@ -458,6 +577,13 @@ const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
       )
     )
   );
+  const localizedVehicleFields = resolveLocalizedVehicleFields(src, meta, {
+    vehicle_type: vehicleType,
+    vehicle_type_name: vehicleType,
+    vehicle_company: vehicleCompany,
+    model_name: modelName,
+    vehicle_name: [vehicleCompany, modelName].filter((v) => toTrimmedText(v)).join(" "),
+  });
 
   return {
     driver_name: driverName,
@@ -470,6 +596,7 @@ const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
     vehicle_manufacturer: vehicleManufacturer,
     rating,
     driver_image: driverImage,
+    ...localizedVehicleFields,
 
     // aliases for frontend flexibility
     vehicle_type_name: vehicleType,
@@ -600,78 +727,133 @@ const withDriverImage = (payload = {}, explicitDriverId = null) => {
   if (!payload || typeof payload !== "object") return payload;
 
   const resolvedImage = resolveDriverImageFromPayload(payload, explicitDriverId);
-  if (!resolvedImage) return payload;
 
   let patched = payload;
   let changed = false;
 
-  if (!toTrimmedText(patched?.driver_image)) {
-    patched = { ...patched, driver_image: resolvedImage };
-    changed = true;
+  if (resolvedImage) {
+    if (!toTrimmedText(patched?.driver_image)) {
+      patched = { ...patched, driver_image: resolvedImage };
+      changed = true;
+    }
+    if (!toTrimmedText(patched?.driver_image_url)) {
+      patched = { ...patched, driver_image_url: resolvedImage };
+      changed = true;
+    }
+    if (!toTrimmedText(patched?.profile_image)) {
+      patched = { ...patched, profile_image: resolvedImage };
+      changed = true;
+    }
+    if (!toTrimmedText(patched?.driver_profile_image)) {
+      patched = { ...patched, driver_profile_image: resolvedImage };
+      changed = true;
+    }
+    if (!toTrimmedText(patched?.provider_image)) {
+      patched = { ...patched, provider_image: resolvedImage };
+      changed = true;
+    }
+
+    if (patched?.driver_details && typeof patched.driver_details === "object") {
+      const existingDetails = patched.driver_details;
+      const nextDetails = {
+        ...existingDetails,
+        ...(toTrimmedText(existingDetails?.driver_image)
+          ? {}
+          : { driver_image: resolvedImage }),
+        ...(toTrimmedText(existingDetails?.driver_image_url)
+          ? {}
+          : { driver_image_url: resolvedImage }),
+        ...(toTrimmedText(existingDetails?.profile_image)
+          ? {}
+          : { profile_image: resolvedImage }),
+        ...(toTrimmedText(existingDetails?.driver_profile_image)
+          ? {}
+          : { driver_profile_image: resolvedImage }),
+        ...(toTrimmedText(existingDetails?.provider_image)
+          ? {}
+          : { provider_image: resolvedImage }),
+      };
+      patched = { ...patched, driver_details: nextDetails };
+      changed = true;
+    }
+
+    if (patched?.ride_details && typeof patched.ride_details === "object") {
+      const existingRideDetails = patched.ride_details;
+      const nextRideDetails = {
+        ...existingRideDetails,
+        ...(toTrimmedText(existingRideDetails?.driver_image)
+          ? {}
+          : { driver_image: resolvedImage }),
+        ...(toTrimmedText(existingRideDetails?.driver_image_url)
+          ? {}
+          : { driver_image_url: resolvedImage }),
+        ...(toTrimmedText(existingRideDetails?.profile_image)
+          ? {}
+          : { profile_image: resolvedImage }),
+        ...(toTrimmedText(existingRideDetails?.driver_profile_image)
+          ? {}
+          : { driver_profile_image: resolvedImage }),
+        ...(toTrimmedText(existingRideDetails?.provider_image)
+          ? {}
+          : { provider_image: resolvedImage }),
+      };
+      patched = { ...patched, ride_details: nextRideDetails };
+      changed = true;
+    }
   }
-  if (!toTrimmedText(patched?.driver_image_url)) {
-    patched = { ...patched, driver_image_url: resolvedImage };
-    changed = true;
-  }
-  if (!toTrimmedText(patched?.profile_image)) {
-    patched = { ...patched, profile_image: resolvedImage };
-    changed = true;
-  }
-  if (!toTrimmedText(patched?.driver_profile_image)) {
-    patched = { ...patched, driver_profile_image: resolvedImage };
-    changed = true;
-  }
-  if (!toTrimmedText(patched?.provider_image)) {
-    patched = { ...patched, provider_image: resolvedImage };
+
+  const localizedRootPayload = applyLocalizedVehicleFields(
+    patched,
+    patched?.driver_details,
+    patched?.ride_details,
+    patched?.ride_details?.driver_details,
+    patched?.meta
+  );
+  if (localizedRootPayload !== patched) {
+    patched = localizedRootPayload;
     changed = true;
   }
 
   if (patched?.driver_details && typeof patched.driver_details === "object") {
-    const existingDetails = patched.driver_details;
-    const nextDetails = {
-      ...existingDetails,
-      ...(toTrimmedText(existingDetails?.driver_image)
-        ? {}
-        : { driver_image: resolvedImage }),
-      ...(toTrimmedText(existingDetails?.driver_image_url)
-        ? {}
-        : { driver_image_url: resolvedImage }),
-      ...(toTrimmedText(existingDetails?.profile_image)
-        ? {}
-        : { profile_image: resolvedImage }),
-      ...(toTrimmedText(existingDetails?.driver_profile_image)
-        ? {}
-        : { driver_profile_image: resolvedImage }),
-      ...(toTrimmedText(existingDetails?.provider_image)
-        ? {}
-        : { provider_image: resolvedImage }),
-    };
-    patched = { ...patched, driver_details: nextDetails };
-    changed = true;
+    const localizedDriverDetails = applyLocalizedVehicleFields(
+      patched.driver_details,
+      patched,
+      patched?.meta,
+      patched?.ride_details,
+      patched?.ride_details?.driver_details
+    );
+    if (localizedDriverDetails !== patched.driver_details) {
+      patched = { ...patched, driver_details: localizedDriverDetails };
+      changed = true;
+    }
   }
 
   if (patched?.ride_details && typeof patched.ride_details === "object") {
     const existingRideDetails = patched.ride_details;
-    const nextRideDetails = {
-      ...existingRideDetails,
-      ...(toTrimmedText(existingRideDetails?.driver_image)
-        ? {}
-        : { driver_image: resolvedImage }),
-      ...(toTrimmedText(existingRideDetails?.driver_image_url)
-        ? {}
-        : { driver_image_url: resolvedImage }),
-      ...(toTrimmedText(existingRideDetails?.profile_image)
-        ? {}
-        : { profile_image: resolvedImage }),
-      ...(toTrimmedText(existingRideDetails?.driver_profile_image)
-        ? {}
-        : { driver_profile_image: resolvedImage }),
-      ...(toTrimmedText(existingRideDetails?.provider_image)
-        ? {}
-        : { provider_image: resolvedImage }),
-    };
-    patched = { ...patched, ride_details: nextRideDetails };
-    changed = true;
+    const localizedRideDetails = applyLocalizedVehicleFields(
+      existingRideDetails,
+      patched,
+      patched?.meta,
+      existingRideDetails?.driver_details
+    );
+
+    let nextRideDetails = localizedRideDetails;
+    if (nextRideDetails?.driver_details && typeof nextRideDetails.driver_details === "object") {
+      const localizedRideDriverDetails = applyLocalizedVehicleFields(
+        nextRideDetails.driver_details,
+        nextRideDetails,
+        patched,
+        patched?.meta
+      );
+      if (localizedRideDriverDetails !== nextRideDetails.driver_details) {
+        nextRideDetails = { ...nextRideDetails, driver_details: localizedRideDriverDetails };
+      }
+    }
+
+    if (nextRideDetails !== existingRideDetails) {
+      patched = { ...patched, ride_details: nextRideDetails };
+      changed = true;
+    }
   }
 
   return changed ? patched : payload;
@@ -2138,6 +2320,7 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
     const vehicleManufacturer = normalizedDetails.vehicle_manufacturer;
     const rating = normalizedDetails.rating;
     const driverImage = normalizedDetails.driver_image;
+    const localizedVehicleFields = resolveLocalizedVehicleFields(d, normalizedDetails);
     const childSeatFromApi = toBinaryFlag(
       d?.child_seat_accessibility ?? d?.child_seat ?? d?.smoking ?? d?.smoking_value ?? null
     );
@@ -2164,6 +2347,7 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
       ...(vehicleManufacturer ? { vehicle_manufacturer: vehicleManufacturer } : {}),
       ...(rating != null ? { rating } : {}),
       ...(driverImage ? { driver_image: driverImage } : {}),
+      ...localizedVehicleFields,
       ...(childSeatFromApi === 0 || childSeatFromApi === 1
         ? { child_seat: childSeatFromApi }
         : {}),
@@ -2193,6 +2377,7 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
       vehicle_manufacturer: vehicleManufacturer,
       rating,
       driver_image: driverImage,
+      ...localizedVehicleFields,
       child_seat: childSeatFromApi,
       handicap: handicapFromApi,
       driver_gender: driverGenderFromApi,
@@ -2369,8 +2554,6 @@ const buildUserDetails = (data) => {
     src?.avatar ??
     data?.profile_image ??
     data?.user_image ??
-    data?.image ??
-    data?.avatar ??
     data?.customer_image ??
     null;
 
@@ -2393,16 +2576,7 @@ const buildUserDetails = (data) => {
         ? `${countryCode}${contactNumber}`
         : stored?.user_phone_full ?? storedByToken?.user_phone_full ?? null,
     user_image: normalizeCustomerImageUrl(
-      userImage ??
-        stored?.user_image ??
-        stored?.profile_image ??
-        stored?.image ??
-        stored?.avatar ??
-        storedByToken?.user_image ??
-        storedByToken?.profile_image ??
-        storedByToken?.image ??
-        storedByToken?.avatar ??
-        null
+      userImage ?? stored?.user_image ?? storedByToken?.user_image ?? null
     ),
 
     // ✅ NEW: keep token in user_details snapshot (helps later merges on retry)
@@ -2482,13 +2656,9 @@ const buildCustomerPayload = (payload = {}, userDetails = null) => {
 
   const customerImage =
     details?.user_image ??
-    details?.profile_image ??
-    details?.image ??
-    details?.avatar ??
     payload?.user_image ??
     payload?.customer_image ??
     payload?.profile_image ??
-    payload?.image ??
     payload?.avatar ??
     null;
 
@@ -2590,7 +2760,6 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
 
   const builtCustomer = buildCustomerPayload(payload, user_details ?? customer_details ?? customer ?? null);
   const safeCustomer = sanitizeCustomerForClient(builtCustomer);
-  const normalizedAdditionalRemarks = resolveAdditionalRemarks(payload);
 
   const sanitized = {
     ...stripTokenFields(rest),
@@ -2601,24 +2770,6 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
   }
 
   if (safeCustomer) {
-    sanitized.user_id = safeCustomer.user_id ?? sanitized.user_id ?? null;
-    sanitized.user_name = safeCustomer.user_name ?? sanitized.user_name ?? null;
-    sanitized.user_gender = safeCustomer.user_gender ?? sanitized.user_gender ?? null;
-    sanitized.user_country_code =
-      safeCustomer.user_country_code ?? sanitized.user_country_code ?? null;
-    sanitized.user_phone = safeCustomer.user_phone ?? sanitized.user_phone ?? null;
-    sanitized.user_phone_full = safeCustomer.user_phone_full ?? sanitized.user_phone_full ?? null;
-    sanitized.user_image = safeCustomer.user_image ?? sanitized.user_image ?? null;
-    if (!toTrimmedText(sanitized.profile_image) && toTrimmedText(safeCustomer.user_image)) {
-      sanitized.profile_image = safeCustomer.user_image;
-    }
-    if (!toTrimmedText(sanitized.avatar) && toTrimmedText(safeCustomer.user_image)) {
-      sanitized.avatar = safeCustomer.user_image;
-    }
-    if (!toTrimmedText(sanitized.image) && toTrimmedText(safeCustomer.user_image)) {
-      sanitized.image = safeCustomer.user_image;
-    }
-
     sanitized.user_details = safeCustomer;
     sanitized.customer = safeCustomer;
     sanitized.customer_details = safeCustomer;
@@ -2630,7 +2781,6 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
     sanitized.customer_phone_full = safeCustomer.user_phone_full ?? null;
     sanitized.customer_image = safeCustomer.user_image ?? null;
   } else {
-    sanitized.user_image = sanitized.user_image ?? null;
     sanitized.user_details = null;
     sanitized.customer = null;
     sanitized.customer_details = null;
@@ -2641,29 +2791,6 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
     sanitized.customer_phone = null;
     sanitized.customer_phone_full = null;
     sanitized.customer_image = null;
-  }
-
-  if (normalizedAdditionalRemarks !== null) {
-    sanitized.additional_remarks = normalizedAdditionalRemarks;
-    sanitized.additional_remark = normalizedAdditionalRemarks;
-    sanitized.additional_request = normalizedAdditionalRemarks;
-  }
-
-  if (
-    sanitized?.ride_details &&
-    typeof sanitized.ride_details === "object" &&
-    !Array.isArray(sanitized.ride_details)
-  ) {
-    sanitized.ride_details = {
-      ...sanitized.ride_details,
-      ...(normalizedAdditionalRemarks !== null
-        ? {
-            additional_remarks: normalizedAdditionalRemarks,
-            additional_remark: normalizedAdditionalRemarks,
-            additional_request: normalizedAdditionalRemarks,
-          }
-        : {}),
-    };
   }
 
   return withDriverImage(sanitized);
@@ -4307,6 +4434,7 @@ async function dispatchToNearbyDrivers(io, data) {
     "required_driver_gender",
     "required_gender",
     "driver_gender",
+    "gender",
     "requiredDriverGender",
     "driverGender",
   ]);
@@ -4329,19 +4457,20 @@ async function dispatchToNearbyDrivers(io, data) {
     "can_receive_special_needs",
   ]);
   const requiredGender = toGenderFilter(requiredGenderRaw);
-  const needChildSeat = toRequiredNeedFlag(needChildSeatRaw);
-  const needHandicap = toRequiredNeedFlag(needHandicapRaw);
+  const needChildSeat = toBinaryFlag(needChildSeatRaw);
+  const needHandicap = toBinaryFlag(needHandicapRaw);
   const dispatchPreferencePayload = {
-    ...(requiredGender === 1 || requiredGender === 2
+    ...(requiredGender === 1 || requiredGender === 2 || requiredGender === 0
       ? {
           required_driver_gender: requiredGender,
           required_gender: requiredGender,
           driver_gender: requiredGender,
+          gender: requiredGender,
         }
       : {}),
-    ...(needChildSeat === 1
+    ...(needChildSeat === 0 || needChildSeat === 1
       ? {
-        need_child_seat: needChildSeat,
+          need_child_seat: needChildSeat,
           child_seat: needChildSeat,
           require_child_seat: needChildSeat,
           smoking: needChildSeat,
@@ -4350,7 +4479,7 @@ async function dispatchToNearbyDrivers(io, data) {
           child_seat_accessibility: needChildSeat,
         }
       : {}),
-    ...(needHandicap === 1
+    ...(needHandicap === 0 || needHandicap === 1
       ? {
           need_handicap: needHandicap,
           handicap: needHandicap,
@@ -4495,8 +4624,6 @@ async function dispatchToNearbyDrivers(io, data) {
       : roadFilteredRaw;
 
 const existingCandidateSet = rideCandidates.get(rideId) ?? new Set();
-const forceNewSearchWindow =
-  toNumber(data?.force_new_search_window ?? data?.reset_search_window ?? null) === 1;
 
 const eligibleForDispatch = roadFiltered.filter((driver) => {
   const driverId = toNumber(driver?.driver_id);
@@ -4548,22 +4675,9 @@ const candidateDriversRaw =
 // - ما عندهم رحلة ثانية
 // - ما عندهم queued ride ثانية
 // - العرض لسا صالح
-const retainedExistingIds = forceNewSearchWindow
-  ? []
-  : Array.from(existingCandidateSet).filter((driverId) => {
-      if (!shouldKeepExistingCandidateForRide(rideId, driverId)) return false;
-      const live = driverLocationService.getDriver(driverId);
-      const meta = driverLocationService.getMeta(driverId) || {};
-      return matchesDispatchPreference(
-        {
-          ...(meta && typeof meta === "object" ? meta : {}),
-          ...(live && typeof live === "object" ? live : {}),
-        },
-        requiredGender,
-        needChildSeat,
-        needHandicap
-      );
-    });
+const retainedExistingIds = Array.from(existingCandidateSet).filter((driverId) =>
+  shouldKeepExistingCandidateForRide(rideId, driverId)
+);
 
 // السائقين الجدد من الفلترة الحالية
 const newCandidateIds = candidateDriversRaw
@@ -4610,7 +4724,6 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
     !!(!strictTargetDispatch && targetDriverIdSet && targetDriverIdSet.size > 0),
   target_driver_strict_mode: strictTargetDispatch,
   target_driver_ids_count: targetDriverIdSet ? targetDriverIdSet.size : 0,
-  force_new_search_window: forceNewSearchWindow,
   nearby_air: nearbyAir.length,
   available_air: availableAir.length,
   road_filtered_raw: roadFilteredRaw.length,
@@ -4627,13 +4740,13 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   final_candidates: nextCandidateIds.length,
   required_gender: requiredGender ?? null,
   need_child_seat: needChildSeat ?? null,
-  need_child_seat_filter_applied: needChildSeat === 1,
+  need_child_seat_filter_applied: needChildSeat === 0 || needChildSeat === 1,
   raw_required_gender: requiredGenderRaw ?? null,
   raw_smoking: needChildSeatRaw ?? null,
   raw_child_seat: needChildSeatRaw ?? null,
   raw_need_child_seat: needChildSeatRaw ?? null,
   need_handicap: needHandicap ?? null,
-  need_handicap_filter_applied: needHandicap === 1,
+  need_handicap_filter_applied: needHandicap === 0 || needHandicap === 1,
   raw_handicap: needHandicapRaw ?? null,
   raw_need_handicap: needHandicapRaw ?? null,
   raw_require_handicap: needHandicapRaw ?? null,
@@ -4977,27 +5090,10 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     null;
   const bidReqUserImage =
     ridePayload?.user_image ??
-    ridePayload?.customer_image ??
-    ridePayload?.profile_image ??
-    ridePayload?.image ??
-    ridePayload?.avatar ??
     data?.user_image ??
-    data?.customer_image ??
-    data?.profile_image ??
-    data?.image ??
-    data?.avatar ??
     userDetails?.user_image ??
-    userDetails?.profile_image ??
-    userDetails?.image ??
-    userDetails?.avatar ??
     bidReqStoredUser?.user_image ??
-    bidReqStoredUser?.profile_image ??
-    bidReqStoredUser?.image ??
-    bidReqStoredUser?.avatar ??
     bidReqStoredByToken?.user_image ??
-    bidReqStoredByToken?.profile_image ??
-    bidReqStoredByToken?.image ??
-    bidReqStoredByToken?.avatar ??
     null;
   const bidReqUserPhone =
     ridePayload?.user_phone ??
@@ -5123,11 +5219,6 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     console.log("[ride:bidRequest] payload", {
       driver_id: d.driver_id,
       ride_id: bidRequestPayload?.ride_id ?? null,
-      user_image:
-        bidRequestPayload?.user_image ??
-        bidRequestPayload?.user_details?.user_image ??
-        bidRequestPayload?.customer_image ??
-        null,
       duration:
         bidRequestPayload?.ride_details?.duration ?? bidRequestPayload?.duration ?? null,
       route_api_distance_km: bidRequestPayload?.route_api_distance_km ?? null,
@@ -7179,10 +7270,44 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       driver_rating: driverDetails?.rating ?? null,
       vehicle_type: driverDetails?.vehicle_type ?? null,
       vehicle_type_name: driverDetails?.vehicle_type_name ?? driverDetails?.vehicle_type ?? null,
+      vehicle_type_name_en:
+        driverDetails?.vehicle_type_name_en ??
+        driverDetails?.vehicle_type_en ??
+        driverDetails?.vehicle_type_name ??
+        driverDetails?.vehicle_type ??
+        null,
+      vehicle_type_name_ar:
+        driverDetails?.vehicle_type_name_ar ??
+        driverDetails?.vehicle_type_ar ??
+        driverDetails?.vehicle_type_name ??
+        driverDetails?.vehicle_type ??
+        null,
       vehicle_company: driverDetails?.vehicle_company ?? null,
+      vehicle_company_en:
+        driverDetails?.vehicle_company_en ?? driverDetails?.vehicle_company ?? null,
+      vehicle_company_ar:
+        driverDetails?.vehicle_company_ar ?? driverDetails?.vehicle_company ?? null,
       vehicle_manufacturer:
         driverDetails?.vehicle_manufacturer ?? driverDetails?.manufacturer_name ?? null,
       model_name: driverDetails?.model_name ?? null,
+      model_name_en: driverDetails?.model_name_en ?? driverDetails?.model_name ?? null,
+      model_name_ar: driverDetails?.model_name_ar ?? driverDetails?.model_name ?? null,
+      vehicle_name_en:
+        driverDetails?.vehicle_name_en ??
+        toTrimmedText(
+          [driverDetails?.vehicle_company_en ?? driverDetails?.vehicle_company, driverDetails?.model_name_en ?? driverDetails?.model_name]
+            .filter((v) => toTrimmedText(v))
+            .join(" ")
+        ) ??
+        null,
+      vehicle_name_ar:
+        driverDetails?.vehicle_name_ar ??
+        toTrimmedText(
+          [driverDetails?.vehicle_company_ar ?? driverDetails?.vehicle_company, driverDetails?.model_name_ar ?? driverDetails?.model_name]
+            .filter((v) => toTrimmedText(v))
+            .join(" ")
+        ) ??
+        null,
       model_year: driverDetails?.model_year ?? null,
       vehicle_color: driverDetails?.vehicle_color ?? null,
       vehicle_number: driverDetails?.vehicle_number ?? null,

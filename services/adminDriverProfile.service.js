@@ -118,11 +118,6 @@ const setCachedProfile = (profile = {}) => {
     current_lat: toNumber(profile.current_lat ?? profile.lat),
     current_long: toNumber(profile.current_long ?? profile.lng ?? profile.long),
     remaining_balance: toNumber(profile.remaining_balance),
-    wallet_is_warning: toNumber(profile.wallet_is_warning) ?? 0,
-    wallet_is_blocked: toNumber(profile.wallet_is_blocked) ?? 0,
-    wallet_warning_limit: toNumber(profile.wallet_warning_limit),
-    wallet_block_limit: toNumber(profile.wallet_block_limit),
-    wallet_policy_mode: String(profile.wallet_policy_mode ?? "").trim(),
     not_valid_wallet_balance: toNumber(profile.not_valid_wallet_balance) ?? 0,
     not_valid_wallet_balance_msg: String(
       profile.not_valid_wallet_balance_msg ?? ""
