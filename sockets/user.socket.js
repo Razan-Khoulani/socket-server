@@ -1,6 +1,7 @@
 // sockets/user.socket.js
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios");
+const { getDistanceMeters } = require("../utils/geo.util");
 const {
   setUserDetails,
   getUserDetailsByToken,
@@ -21,8 +22,14 @@ const debugLog = (event, payload, socketId) => {
 const userRoom = (userId) => `user:${userId}`;
 
 const DEFAULT_NEARBY_RADIUS_METERS = 5000;
+const NEARBY_DISPATCH_RADIUS_STEPS_KM = Object.freeze([1, 2, 3, 5, 7, 10, 15, 20]);
 const NEARBY_EVERY_MS = 3000;
 const MAX_DRIVER_LOCATION_AGE_MS = 2 * 60 * 1000;
+const NEARBY_CENTER_RESET_THRESHOLD_M = Number.isFinite(
+  Number(process.env.NEARBY_CENTER_RESET_THRESHOLD_M)
+)
+  ? Math.max(0, Number(process.env.NEARBY_CENTER_RESET_THRESHOLD_M))
+  : 75;
 const KNOWN_SERVICE_CATEGORY_IDS = new Set([1, 2, 3, 4, 5, 6, 7, 31, 32]);
 
 // ? NEW: road-based filtering
@@ -68,6 +75,11 @@ const DRIVER_IMAGE_RELATIVE_DIR = "assets/images/profile-images/provider";
 
 // ? NEW: keep timer unit aligned with bidding.socket (SECONDS)
 const RIDE_TIMEOUT_S = 90;
+const NEARBY_DISPATCH_TIMEOUT_S = Number.isFinite(
+  Number(process.env.NEARBY_DISPATCH_TIMEOUT_S)
+)
+  ? Math.max(1, Math.floor(Number(process.env.NEARBY_DISPATCH_TIMEOUT_S)))
+  : 5;
 
 const toNumber = (v) => {
   if (v === null || v === undefined || v === "") return null;
@@ -86,6 +98,23 @@ const normalizeToken = (value) => {
   if (value === null || value === undefined) return null;
   const token = String(value).trim();
   return token.length ? token : null;
+};
+const getNearbyCenterShiftMeters = (previousCenter, nextCenter) => {
+  const prevLat = toNumber(previousCenter?.lat);
+  const prevLong = toNumber(previousCenter?.long);
+  const nextLat = toNumber(nextCenter?.lat);
+  const nextLong = toNumber(nextCenter?.long);
+  if (
+    prevLat === null ||
+    prevLong === null ||
+    nextLat === null ||
+    nextLong === null
+  ) {
+    return null;
+  }
+
+  const distance = getDistanceMeters(prevLat, prevLong, nextLat, nextLong);
+  return Number.isFinite(distance) ? distance : null;
 };
 
 const getFirstNumber = (...values) => {
@@ -202,6 +231,21 @@ const normalizeNearbyRadiusMeters = (
   const parsed = toNumber(value);
   if (parsed === null) return fallback;
   return Math.max(200, Math.round(parsed));
+};
+
+const buildDefaultNearbyDispatchStagesMeters = (initialRadiusMeters) => {
+  const initial = normalizeNearbyRadiusMeters(initialRadiusMeters);
+  const initialKm = Math.round((initial / 1000) * 100) / 100;
+  const stageKm = uniqueSortedNumbers([
+    ...NEARBY_DISPATCH_RADIUS_STEPS_KM,
+    initialKm,
+  ]).filter((km) => km >= initialKm);
+
+  const stageMeters = uniqueSortedNumbers(
+    stageKm.map((km) => normalizeNearbyRadiusMeters(Math.round(km * 1000), initial))
+  );
+
+  return stageMeters.length > 0 ? stageMeters : [initial];
 };
 
 const resolveNearbyRadiusFromPayload = (payload = {}) => {
@@ -454,12 +498,15 @@ const fetchServiceSearchRadiusFromApi = async (serviceCategoryId) => {
     const radiusMeters = resolveNearbyRadiusFromPayload(data);
     if (radiusMeters === null) return null;
 
+    const explicitDispatchStages =
+      extractDispatchRadiusStagesMetersFromPayload(data, radiusMeters) ?? null;
     const dispatchRadiusStagesMeters =
-      extractDispatchRadiusStagesMetersFromPayload(data, radiusMeters) ??
-      normalizeNearbyDispatchStagesMeters(radiusMeters, []);
+      Array.isArray(explicitDispatchStages) && explicitDispatchStages.length > 1
+        ? normalizeNearbyDispatchStagesMeters(radiusMeters, explicitDispatchStages)
+        : buildDefaultNearbyDispatchStagesMeters(radiusMeters);
     const dispatchTimeoutSeconds = extractDispatchTimeoutSecondsFromPayload(
       data,
-      RIDE_TIMEOUT_S
+      NEARBY_DISPATCH_TIMEOUT_S
     );
     const normalizedConfig = {
       radius_m: normalizeNearbyRadiusMeters(radiusMeters),
@@ -995,6 +1042,17 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
   const lo1 = toNumber(driverLong);
   const la2 = toNumber(pickupLat);
   const lo2 = toNumber(pickupLong);
+  const airDistanceM = getDistanceMeters(la1, lo1, la2, lo2);
+  const safeAirDistanceM =
+    Number.isFinite(airDistanceM) && airDistanceM >= 0 ? Math.round(airDistanceM) : null;
+  const fallbackSpeedKmph = 28;
+  const safeAirDurationS =
+    safeAirDistanceM !== null
+      ? Math.max(
+          1,
+          Math.round((safeAirDistanceM / 1000 / Math.max(1, fallbackSpeedKmph)) * 3600)
+        )
+      : null;
 
   if (la1 === null || lo1 === null || la2 === null || lo2 === null) {
     return {
@@ -1002,6 +1060,7 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
       road_duration_s: null,
       road_duration_min: null,
       raw: null,
+      source: "invalid-input",
     };
   }
 
@@ -1021,20 +1080,30 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
     const roadDistanceM = extractRoadDistanceMeters(data);
     const durationMin = toNumber(data?.duration ?? null);
     const durationS = durationMin !== null ? Math.round(durationMin * 60) : null;
+    const resolvedDistanceM = roadDistanceM ?? safeAirDistanceM;
+    const resolvedDurationS = durationS ?? safeAirDurationS;
+    const resolvedDurationMin =
+      resolvedDurationS !== null
+        ? roundMoney(resolvedDurationS / 60)
+        : durationMin !== null
+        ? roundMoney(durationMin)
+        : null;
 
     return {
-      road_distance_m: roadDistanceM,
-      road_duration_s: durationS,
-      road_duration_min: durationMin !== null ? roundMoney(durationMin) : null,
+      road_distance_m: resolvedDistanceM,
+      road_duration_s: resolvedDurationS,
+      road_duration_min: resolvedDurationMin,
       raw: data,
+      source: roadDistanceM !== null ? "road-api" : "air-fallback-empty-route",
     };
   } catch (e) {
     console.warn("[driverToPickupRoadMetrics] failed:", e?.response?.data || e?.message || e);
     return {
-      road_distance_m: null,
-      road_duration_s: null,
-      road_duration_min: null,
+      road_distance_m: safeAirDistanceM,
+      road_duration_s: safeAirDurationS,
+      road_duration_min: safeAirDurationS !== null ? roundMoney(safeAirDurationS / 60) : null,
       raw: null,
+      source: safeAirDistanceM !== null ? "air-fallback-error" : "error",
     };
   }
 };
@@ -1071,6 +1140,31 @@ const filterDriversByRoadRadius = async (drivers, pickupLat, pickupLong, roadRad
   );
 
   return results.filter(Boolean);
+};
+
+const buildAirFallbackCandidates = (drivers = []) => {
+  const fallbackSpeedKmph = 28;
+  return (Array.isArray(drivers) ? drivers : []).map((d) => {
+    const airDistanceM = toNumber(d?.distance);
+    const airDurationS =
+      airDistanceM !== null
+        ? Math.max(
+            1,
+            Math.round((airDistanceM / 1000 / Math.max(1, fallbackSpeedKmph)) * 3600)
+          )
+        : null;
+
+    return {
+      ...d,
+      driver_to_pickup_distance_m: airDistanceM,
+      driver_to_pickup_distance_km:
+        airDistanceM !== null ? roundMoney(airDistanceM / 1000) : null,
+      driver_to_pickup_duration_s: airDurationS,
+      driver_to_pickup_duration_min:
+        airDurationS !== null ? roundMoney(airDurationS / 60) : null,
+      distance_source: "air-fallback",
+    };
+  });
 };
 
 const extractRouteDistanceKm = (payload) => {
@@ -1329,7 +1423,7 @@ module.exports = (io, socket) => {
   socket.nearbyVehicleTypesInterval = null;
   socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
   socket.nearbyDispatchStagesMeters = [DEFAULT_NEARBY_RADIUS_METERS];
-  socket.nearbyDispatchTimeoutS = RIDE_TIMEOUT_S;
+  socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
   socket.nearbyDriversSearchStartedAt = null;
   socket.nearbyVehicleTypesSearchStartedAt = null;
 
@@ -1565,13 +1659,17 @@ const syncNearbyRadius = async (payload = {}) => {
     nextRadius,
     socket.nearbyRadius ?? DEFAULT_NEARBY_RADIUS_METERS
   );
+  const dispatchStagesSeed =
+    Array.isArray(nextDispatchStagesMeters) && nextDispatchStagesMeters.length > 1
+      ? nextDispatchStagesMeters
+      : buildDefaultNearbyDispatchStagesMeters(normalizedRadius);
   const normalizedDispatchStages = normalizeNearbyDispatchStagesMeters(
     normalizedRadius,
-    nextDispatchStagesMeters ?? socket.nearbyDispatchStagesMeters ?? [normalizedRadius]
+    dispatchStagesSeed
   );
   const normalizedDispatchTimeoutSeconds = normalizeNearbyDispatchTimeoutSeconds(
-    nextDispatchTimeoutSeconds ?? socket.nearbyDispatchTimeoutS ?? RIDE_TIMEOUT_S,
-    RIDE_TIMEOUT_S
+    NEARBY_DISPATCH_TIMEOUT_S,
+    NEARBY_DISPATCH_TIMEOUT_S
   );
 
   const radiusChanged = socket.nearbyRadius !== normalizedRadius;
@@ -1779,7 +1877,7 @@ const syncNearbyRadius = async (payload = {}) => {
     socket.nearbyNeedHandicap = null;
     socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
     socket.nearbyDispatchStagesMeters = [DEFAULT_NEARBY_RADIUS_METERS];
-    socket.nearbyDispatchTimeoutS = RIDE_TIMEOUT_S;
+    socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
     socket.nearbyDriversSearchStartedAt = null;
     socket.nearbyVehicleTypesSearchStartedAt = null;
     socket.nearbyFareCache.clear();
@@ -2238,6 +2336,8 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       long,
       roadRadius
     );
+    const nearbyForTypes =
+      nearbyDrivers.length > 0 ? nearbyDrivers : buildAirFallbackCandidates(nearbyAvailable);
 
     console.log("[nearbyVehicleTypes] candidates", {
       socket_id: socket.id,
@@ -2249,11 +2349,12 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       available_candidates: nearbyAvailable.length,
       road_filtered_candidates: nearbyDrivers.length,
       next_radius_m: radiusPlan.nextRadiusMeters,
+      using_air_fallback: nearbyDrivers.length === 0 && nearbyAvailable.length > 0,
     });
 
     const typesMap = new Map();
 
-    for (const d of nearbyDrivers) {
+    for (const d of nearbyForTypes) {
       const typeId = toNumber(d.service_type_id);
       if (!typeId) continue;
 
@@ -2683,8 +2784,10 @@ item.max_price = priceBounds.max_price;
       long,
       roadRadius
     );
+    const nearbyForEmit =
+      nearby.length > 0 ? nearby : buildAirFallbackCandidates(nearbyAvailable);
 
-    const nearbyWithNormalizedIcons = nearby.map((d) => ({
+    const nearbyWithNormalizedIcons = nearbyForEmit.map((d) => ({
       ...d,
       vehicle_type_icon: normalizeVehicleTypeIconUrl(d?.vehicle_type_icon),
       driver_image: normalizeDriverImageUrl(d?.driver_image),
@@ -2704,6 +2807,8 @@ item.max_price = priceBounds.max_price;
       preference_filtered_candidates: nearbyPreferenceMatched.length,
       available_candidates: nearbyAvailable.length,
       road_filtered_candidates: nearby.length,
+      emitted_candidates: nearbyWithNormalizedIcons.length,
+      using_air_fallback: nearby.length === 0 && nearbyAvailable.length > 0,
     });
   };
 
@@ -2744,7 +2849,7 @@ item.max_price = priceBounds.max_price;
 
     socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
     socket.nearbyDispatchStagesMeters = [DEFAULT_NEARBY_RADIUS_METERS];
-    socket.nearbyDispatchTimeoutS = RIDE_TIMEOUT_S;
+    socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
     socket.nearbyDriversSearchStartedAt = Date.now();
 
     const la = toNumber(lat);
@@ -2796,11 +2901,13 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   const la = toNumber(lat);
   const lo = toNumber(long);
   if (la === null || lo === null) return;
+  const nextCenter = { lat: la, long: lo };
   const previousCenter = socket.nearbyCenter;
+  const centerShiftMeters = getNearbyCenterShiftMeters(previousCenter, nextCenter);
   const centerChanged =
-    !previousCenter ||
-    toNumber(previousCenter?.lat) !== la ||
-    toNumber(previousCenter?.long) !== lo;
+    previousCenter == null ||
+    centerShiftMeters === null ||
+    centerShiftMeters > NEARBY_CENTER_RESET_THRESHOLD_M;
 
   applyNearbyFiltersFromPayload(payload, { resetMissing: false });
   syncRideContextFromPayload(payload, "user:getNearbyVehicleTypes");
@@ -2869,13 +2976,17 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   }
 
   if (centerChanged || socket.nearbyVehicleTypesSearchStartedAt === null) {
-    socket.nearbyVehicleTypesSearchStartedAt = Date.now();
+    const now = Date.now();
+    socket.nearbyVehicleTypesSearchStartedAt = now;
+    if (centerChanged || socket.nearbyDriversSearchStartedAt === null) {
+      socket.nearbyDriversSearchStartedAt = now;
+    }
   }
 
   if (centerChanged) {
     socket.lastVehicleTypesSig = null;
   }
-  socket.nearbyCenter = { lat: la, long: lo };
+  socket.nearbyCenter = nextCenter;
 
   const resolvedServiceCategoryId =
     normalizeServiceCategoryId(socket.nearbyServiceCategoryId) ??
@@ -2884,12 +2995,15 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     socket_id: socket.id,
     service_category_id: resolvedServiceCategoryId ?? null,
     center_changed: centerChanged,
+    center_shift_m: centerShiftMeters,
+    center_reset_threshold_m: NEARBY_CENTER_RESET_THRESHOLD_M,
     dispatch_stages_m: socket.nearbyDispatchStagesMeters,
     dispatch_timeout_s: socket.nearbyDispatchTimeoutS,
     base_radius_m: socket.nearbyRadius,
   });
 
   await emitNearbyVehicleTypes();
+  await sendNearby("user:nearbyDrivers:update");
 
   stopNearbyVehicleTypesLoop();
   socket.nearbyVehicleTypesInterval = setInterval(() => {
@@ -2901,6 +3015,18 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     dispatch_timeout_s: socket.nearbyDispatchTimeoutS,
     dispatch_stages_m: socket.nearbyDispatchStagesMeters,
   });
+
+  if (!socket.nearbyDriversInterval) {
+    socket.nearbyDriversInterval = setInterval(() => {
+      void sendNearby("user:nearbyDrivers:update");
+    }, NEARBY_EVERY_MS);
+    console.log("[nearbyDrivers] loop started via vehicle-types", {
+      socket_id: socket.id,
+      every_ms: NEARBY_EVERY_MS,
+      dispatch_timeout_s: socket.nearbyDispatchTimeoutS,
+      dispatch_stages_m: socket.nearbyDispatchStagesMeters,
+    });
+  }
 
   console.log(`?? Nearby vehicle types requested (socket:${socket.id})`);
 };
@@ -2917,12 +3043,26 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     const la = toNumber(lat);
     const lo = toNumber(long);
     if (la === null || lo === null) return;
+    const nextCenter = { lat: la, long: lo };
+    const centerShiftMeters = getNearbyCenterShiftMeters(socket.nearbyCenter, nextCenter);
+    const centerChanged =
+      centerShiftMeters === null ||
+      centerShiftMeters > NEARBY_CENTER_RESET_THRESHOLD_M;
     applyNearbyFiltersFromPayload(payload, { resetMissing: false });
     syncRideContextFromPayload(payload, "user:updateNearbyCenter");
 
-    socket.nearbyCenter = { lat: la, long: lo };
-    socket.nearbyDriversSearchStartedAt = Date.now();
-    socket.nearbyVehicleTypesSearchStartedAt = Date.now();
+    socket.nearbyCenter = nextCenter;
+    if (centerChanged) {
+      socket.nearbyDriversSearchStartedAt = Date.now();
+      socket.nearbyVehicleTypesSearchStartedAt = Date.now();
+      socket.lastVehicleTypesSig = null;
+    }
+    console.log("[nearby-center] update", {
+      socket_id: socket.id,
+      center_changed: centerChanged,
+      center_shift_m: centerShiftMeters,
+      center_reset_threshold_m: NEARBY_CENTER_RESET_THRESHOLD_M,
+    });
 
     const sc = extractServiceCategoryIdFromPayload(payload);
     if (sc !== null) setNearbyServiceCategoryId(sc, "user:updateNearbyCenter");
@@ -2952,7 +3092,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
 
     socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
     socket.nearbyDispatchStagesMeters = [DEFAULT_NEARBY_RADIUS_METERS];
-    socket.nearbyDispatchTimeoutS = RIDE_TIMEOUT_S;
+    socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
     socket.nearbyDriversSearchStartedAt = Date.now();
     socket.nearbyVehicleTypesSearchStartedAt = Date.now();
     socket.lastVehicleTypesSig = null;
@@ -2989,7 +3129,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     socket.nearbyNeedHandicap = null;
     socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
     socket.nearbyDispatchStagesMeters = [DEFAULT_NEARBY_RADIUS_METERS];
-    socket.nearbyDispatchTimeoutS = RIDE_TIMEOUT_S;
+    socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
     socket.nearbyVehicleTypesSearchStartedAt = null;
     socket.nearbyFareCache.clear();
     socket.lastVehicleTypesSig = null;
