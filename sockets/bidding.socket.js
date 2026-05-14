@@ -83,41 +83,6 @@ const toGenderFilter = (v) => {
 
   return null;
 };
-const toRequiredNeedFlag = (v) => {
-  const parsed = toBinaryFlag(v);
-  return parsed === 1 ? 1 : null;
-};
-const matchesDispatchPreference = (driver = null, requiredGender = null, needChildSeat = null, needHandicap = null) => {
-  if (!driver || typeof driver !== "object") return false;
-
-  if (requiredGender === 1 || requiredGender === 2) {
-    const driverGender = toGenderFilter(driver?.driver_gender ?? driver?.gender ?? null);
-    if (driverGender !== requiredGender) return false;
-  }
-
-  if (needChildSeat === 1) {
-    const driverChildSeat = toBinaryFlag(
-      driver?.child_seat ??
-        driver?.child_seat_accessibility ??
-        driver?.smoking ??
-        driver?.smoking_value ??
-        null
-    );
-    if (driverChildSeat !== 1) return false;
-  }
-
-  if (needHandicap === 1) {
-    const driverHandicap = toBinaryFlag(
-      driver?.handicap ??
-        driver?.handicap_accessibility ??
-        driver?.special_needs ??
-        null
-    );
-    if (driverHandicap !== 1) return false;
-  }
-
-  return true;
-};
 const toTrimmedText = (v) => {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
@@ -2369,8 +2334,6 @@ const buildUserDetails = (data) => {
     src?.avatar ??
     data?.profile_image ??
     data?.user_image ??
-    data?.image ??
-    data?.avatar ??
     data?.customer_image ??
     null;
 
@@ -2393,16 +2356,7 @@ const buildUserDetails = (data) => {
         ? `${countryCode}${contactNumber}`
         : stored?.user_phone_full ?? storedByToken?.user_phone_full ?? null,
     user_image: normalizeCustomerImageUrl(
-      userImage ??
-        stored?.user_image ??
-        stored?.profile_image ??
-        stored?.image ??
-        stored?.avatar ??
-        storedByToken?.user_image ??
-        storedByToken?.profile_image ??
-        storedByToken?.image ??
-        storedByToken?.avatar ??
-        null
+      userImage ?? stored?.user_image ?? storedByToken?.user_image ?? null
     ),
 
     // ✅ NEW: keep token in user_details snapshot (helps later merges on retry)
@@ -2482,13 +2436,9 @@ const buildCustomerPayload = (payload = {}, userDetails = null) => {
 
   const customerImage =
     details?.user_image ??
-    details?.profile_image ??
-    details?.image ??
-    details?.avatar ??
     payload?.user_image ??
     payload?.customer_image ??
     payload?.profile_image ??
-    payload?.image ??
     payload?.avatar ??
     null;
 
@@ -2590,7 +2540,6 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
 
   const builtCustomer = buildCustomerPayload(payload, user_details ?? customer_details ?? customer ?? null);
   const safeCustomer = sanitizeCustomerForClient(builtCustomer);
-  const normalizedAdditionalRemarks = resolveAdditionalRemarks(payload);
 
   const sanitized = {
     ...stripTokenFields(rest),
@@ -2601,24 +2550,6 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
   }
 
   if (safeCustomer) {
-    sanitized.user_id = safeCustomer.user_id ?? sanitized.user_id ?? null;
-    sanitized.user_name = safeCustomer.user_name ?? sanitized.user_name ?? null;
-    sanitized.user_gender = safeCustomer.user_gender ?? sanitized.user_gender ?? null;
-    sanitized.user_country_code =
-      safeCustomer.user_country_code ?? sanitized.user_country_code ?? null;
-    sanitized.user_phone = safeCustomer.user_phone ?? sanitized.user_phone ?? null;
-    sanitized.user_phone_full = safeCustomer.user_phone_full ?? sanitized.user_phone_full ?? null;
-    sanitized.user_image = safeCustomer.user_image ?? sanitized.user_image ?? null;
-    if (!toTrimmedText(sanitized.profile_image) && toTrimmedText(safeCustomer.user_image)) {
-      sanitized.profile_image = safeCustomer.user_image;
-    }
-    if (!toTrimmedText(sanitized.avatar) && toTrimmedText(safeCustomer.user_image)) {
-      sanitized.avatar = safeCustomer.user_image;
-    }
-    if (!toTrimmedText(sanitized.image) && toTrimmedText(safeCustomer.user_image)) {
-      sanitized.image = safeCustomer.user_image;
-    }
-
     sanitized.user_details = safeCustomer;
     sanitized.customer = safeCustomer;
     sanitized.customer_details = safeCustomer;
@@ -2630,7 +2561,6 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
     sanitized.customer_phone_full = safeCustomer.user_phone_full ?? null;
     sanitized.customer_image = safeCustomer.user_image ?? null;
   } else {
-    sanitized.user_image = sanitized.user_image ?? null;
     sanitized.user_details = null;
     sanitized.customer = null;
     sanitized.customer_details = null;
@@ -2641,29 +2571,6 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
     sanitized.customer_phone = null;
     sanitized.customer_phone_full = null;
     sanitized.customer_image = null;
-  }
-
-  if (normalizedAdditionalRemarks !== null) {
-    sanitized.additional_remarks = normalizedAdditionalRemarks;
-    sanitized.additional_remark = normalizedAdditionalRemarks;
-    sanitized.additional_request = normalizedAdditionalRemarks;
-  }
-
-  if (
-    sanitized?.ride_details &&
-    typeof sanitized.ride_details === "object" &&
-    !Array.isArray(sanitized.ride_details)
-  ) {
-    sanitized.ride_details = {
-      ...sanitized.ride_details,
-      ...(normalizedAdditionalRemarks !== null
-        ? {
-            additional_remarks: normalizedAdditionalRemarks,
-            additional_remark: normalizedAdditionalRemarks,
-            additional_request: normalizedAdditionalRemarks,
-          }
-        : {}),
-    };
   }
 
   return withDriverImage(sanitized);
@@ -4307,6 +4214,7 @@ async function dispatchToNearbyDrivers(io, data) {
     "required_driver_gender",
     "required_gender",
     "driver_gender",
+    "gender",
     "requiredDriverGender",
     "driverGender",
   ]);
@@ -4329,19 +4237,20 @@ async function dispatchToNearbyDrivers(io, data) {
     "can_receive_special_needs",
   ]);
   const requiredGender = toGenderFilter(requiredGenderRaw);
-  const needChildSeat = toRequiredNeedFlag(needChildSeatRaw);
-  const needHandicap = toRequiredNeedFlag(needHandicapRaw);
+  const needChildSeat = toBinaryFlag(needChildSeatRaw);
+  const needHandicap = toBinaryFlag(needHandicapRaw);
   const dispatchPreferencePayload = {
-    ...(requiredGender === 1 || requiredGender === 2
+    ...(requiredGender === 1 || requiredGender === 2 || requiredGender === 0
       ? {
           required_driver_gender: requiredGender,
           required_gender: requiredGender,
           driver_gender: requiredGender,
+          gender: requiredGender,
         }
       : {}),
-    ...(needChildSeat === 1
+    ...(needChildSeat === 0 || needChildSeat === 1
       ? {
-        need_child_seat: needChildSeat,
+          need_child_seat: needChildSeat,
           child_seat: needChildSeat,
           require_child_seat: needChildSeat,
           smoking: needChildSeat,
@@ -4350,7 +4259,7 @@ async function dispatchToNearbyDrivers(io, data) {
           child_seat_accessibility: needChildSeat,
         }
       : {}),
-    ...(needHandicap === 1
+    ...(needHandicap === 0 || needHandicap === 1
       ? {
           need_handicap: needHandicap,
           handicap: needHandicap,
@@ -4495,8 +4404,6 @@ async function dispatchToNearbyDrivers(io, data) {
       : roadFilteredRaw;
 
 const existingCandidateSet = rideCandidates.get(rideId) ?? new Set();
-const forceNewSearchWindow =
-  toNumber(data?.force_new_search_window ?? data?.reset_search_window ?? null) === 1;
 
 const eligibleForDispatch = roadFiltered.filter((driver) => {
   const driverId = toNumber(driver?.driver_id);
@@ -4548,22 +4455,9 @@ const candidateDriversRaw =
 // - ما عندهم رحلة ثانية
 // - ما عندهم queued ride ثانية
 // - العرض لسا صالح
-const retainedExistingIds = forceNewSearchWindow
-  ? []
-  : Array.from(existingCandidateSet).filter((driverId) => {
-      if (!shouldKeepExistingCandidateForRide(rideId, driverId)) return false;
-      const live = driverLocationService.getDriver(driverId);
-      const meta = driverLocationService.getMeta(driverId) || {};
-      return matchesDispatchPreference(
-        {
-          ...(meta && typeof meta === "object" ? meta : {}),
-          ...(live && typeof live === "object" ? live : {}),
-        },
-        requiredGender,
-        needChildSeat,
-        needHandicap
-      );
-    });
+const retainedExistingIds = Array.from(existingCandidateSet).filter((driverId) =>
+  shouldKeepExistingCandidateForRide(rideId, driverId)
+);
 
 // السائقين الجدد من الفلترة الحالية
 const newCandidateIds = candidateDriversRaw
@@ -4610,7 +4504,6 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
     !!(!strictTargetDispatch && targetDriverIdSet && targetDriverIdSet.size > 0),
   target_driver_strict_mode: strictTargetDispatch,
   target_driver_ids_count: targetDriverIdSet ? targetDriverIdSet.size : 0,
-  force_new_search_window: forceNewSearchWindow,
   nearby_air: nearbyAir.length,
   available_air: availableAir.length,
   road_filtered_raw: roadFilteredRaw.length,
@@ -4627,13 +4520,13 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   final_candidates: nextCandidateIds.length,
   required_gender: requiredGender ?? null,
   need_child_seat: needChildSeat ?? null,
-  need_child_seat_filter_applied: needChildSeat === 1,
+  need_child_seat_filter_applied: needChildSeat === 0 || needChildSeat === 1,
   raw_required_gender: requiredGenderRaw ?? null,
   raw_smoking: needChildSeatRaw ?? null,
   raw_child_seat: needChildSeatRaw ?? null,
   raw_need_child_seat: needChildSeatRaw ?? null,
   need_handicap: needHandicap ?? null,
-  need_handicap_filter_applied: needHandicap === 1,
+  need_handicap_filter_applied: needHandicap === 0 || needHandicap === 1,
   raw_handicap: needHandicapRaw ?? null,
   raw_need_handicap: needHandicapRaw ?? null,
   raw_require_handicap: needHandicapRaw ?? null,
@@ -4977,27 +4870,10 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     null;
   const bidReqUserImage =
     ridePayload?.user_image ??
-    ridePayload?.customer_image ??
-    ridePayload?.profile_image ??
-    ridePayload?.image ??
-    ridePayload?.avatar ??
     data?.user_image ??
-    data?.customer_image ??
-    data?.profile_image ??
-    data?.image ??
-    data?.avatar ??
     userDetails?.user_image ??
-    userDetails?.profile_image ??
-    userDetails?.image ??
-    userDetails?.avatar ??
     bidReqStoredUser?.user_image ??
-    bidReqStoredUser?.profile_image ??
-    bidReqStoredUser?.image ??
-    bidReqStoredUser?.avatar ??
     bidReqStoredByToken?.user_image ??
-    bidReqStoredByToken?.profile_image ??
-    bidReqStoredByToken?.image ??
-    bidReqStoredByToken?.avatar ??
     null;
   const bidReqUserPhone =
     ridePayload?.user_phone ??
@@ -5123,11 +4999,6 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     console.log("[ride:bidRequest] payload", {
       driver_id: d.driver_id,
       ride_id: bidRequestPayload?.ride_id ?? null,
-      user_image:
-        bidRequestPayload?.user_image ??
-        bidRequestPayload?.user_details?.user_image ??
-        bidRequestPayload?.customer_image ??
-        null,
       duration:
         bidRequestPayload?.ride_details?.duration ?? bidRequestPayload?.duration ?? null,
       route_api_distance_km: bidRequestPayload?.route_api_distance_km ?? null,
