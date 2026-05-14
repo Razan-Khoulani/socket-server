@@ -4171,6 +4171,36 @@ async function dispatchToNearbyDrivers(io, data) {
   const long = toNumber(data?.pickup_long);
 
   const serviceTypeId = toNumber(data?.service_type_id) ?? null;
+  const previousRideSnapshot =
+    getRideDetails(rideId) ??
+    getRideSnapshotForRedispatch(rideId) ??
+    null;
+  const persistedBaseFare = pickFirstValue(
+    toNumber(data?.base_fare),
+    toNumber(previousRideSnapshot?.base_fare),
+    toNumber(previousRideSnapshot?.ride_details?.base_fare),
+    toNumber(previousRideSnapshot?.meta?.base_fare)
+  );
+  const persistedMinPrice = pickFirstValue(
+    toNumber(data?.min_price),
+    toNumber(data?.min_fare),
+    toNumber(data?.MIN_PRICE),
+    toNumber(previousRideSnapshot?.min_price),
+    toNumber(previousRideSnapshot?.ride_details?.min_price),
+    toNumber(previousRideSnapshot?.ride_details?.min_fare),
+    toNumber(previousRideSnapshot?.meta?.min_price),
+    toNumber(previousRideSnapshot?.meta?.min_fare)
+  );
+  const persistedMaxPrice = pickFirstValue(
+    toNumber(data?.max_price),
+    toNumber(data?.max_fare),
+    toNumber(data?.MAX_PRICE),
+    toNumber(previousRideSnapshot?.max_price),
+    toNumber(previousRideSnapshot?.ride_details?.max_price),
+    toNumber(previousRideSnapshot?.ride_details?.max_fare),
+    toNumber(previousRideSnapshot?.meta?.max_price),
+    toNumber(previousRideSnapshot?.meta?.max_fare)
+  );
   const base =
     toNumber(data?.user_bid_price) ??
     toNumber(data?.price) ??
@@ -4181,7 +4211,12 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(data?.min_price) ??
     toNumber(data?.min_fare) ??
     null;
-  const priceBounds = getRidePriceBounds(data);
+  const priceBounds = getRidePriceBounds({
+    ...data,
+    ...(persistedBaseFare !== null ? { base_fare: persistedBaseFare } : {}),
+    ...(persistedMinPrice !== null ? { min_price: persistedMinPrice } : {}),
+    ...(persistedMaxPrice !== null ? { max_price: persistedMaxPrice } : {}),
+  });
   const minBound = toNumber(priceBounds?.min_price);
   const maxBound = toNumber(priceBounds?.max_price);
   let dispatchBidPrice = base;
@@ -7026,16 +7061,22 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
         toNumber(rideSnapshot?.min_fare_amount) ??
         null,
       base_fare:
-        toNumber(payload?.base_fare) ??
         toNumber(rideSnapshot?.base_fare) ??
+        toNumber(rideSnapshot?.ride_details?.base_fare) ??
+        toNumber(rideSnapshot?.meta?.base_fare) ??
+        toNumber(payload?.base_fare) ??
         ridePriceBounds.base_fare,
       min_price:
-        toNumber(payload?.min_price) ??
         toNumber(rideSnapshot?.min_price) ??
+        toNumber(rideSnapshot?.ride_details?.min_price) ??
+        toNumber(rideSnapshot?.meta?.min_price) ??
+        toNumber(payload?.min_price) ??
         ridePriceBounds.min_price,
       max_price:
-        toNumber(payload?.max_price) ??
         toNumber(rideSnapshot?.max_price) ??
+        toNumber(rideSnapshot?.ride_details?.max_price) ??
+        toNumber(rideSnapshot?.meta?.max_price) ??
+        toNumber(payload?.max_price) ??
         ridePriceBounds.max_price,
       service_type_id: toNumber(payload.service_type_id) ?? null,
       service_category_id: toNumber(payload.service_category_id) ?? null,
