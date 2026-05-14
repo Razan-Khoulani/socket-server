@@ -323,6 +323,160 @@ const extractDriverIdentity = (...sources) => {
   };
 };
 
+const resolveLocalizedVehicleFields = (...sources) => {
+  const scopes = sources.filter((source) => source && typeof source === "object");
+  if (scopes.length === 0) return {};
+
+  const pickLocalizedText = (keys = []) => {
+    const values = [];
+    for (const scope of scopes) {
+      for (const key of keys) {
+        values.push(scope?.[key]);
+      }
+    }
+    return toTrimmedText(pickFirstValue(...values));
+  };
+
+  const vehicleTypeDefault = pickLocalizedText([
+    "vehicle_type",
+    "vehicle_type_name",
+    "vehicleType",
+    "service_type",
+    "service_type_name",
+  ]);
+  const vehicleTypeEn =
+    pickLocalizedText([
+      "vehicle_type_name_en",
+      "vehicle_type_en",
+      "service_type_name_en",
+      "service_type_en",
+      "vehicleTypeNameEn",
+      "vehicleTypeEn",
+    ]) ?? vehicleTypeDefault;
+  const vehicleTypeAr =
+    pickLocalizedText([
+      "vehicle_type_name_ar",
+      "vehicle_type_ar",
+      "service_type_name_ar",
+      "service_type_ar",
+      "vehicleTypeNameAr",
+      "vehicleTypeAr",
+    ]) ?? vehicleTypeDefault;
+
+  const vehicleCompanyDefault = pickLocalizedText([
+    "vehicle_company",
+    "vehicle_manufacturer",
+    "manufacturer_name",
+    "company",
+    "brand",
+    "make",
+    "manufacture_name",
+  ]);
+  const vehicleCompanyEn =
+    pickLocalizedText([
+      "vehicle_company_en",
+      "vehicle_manufacturer_en",
+      "manufacturer_name_en",
+      "company_en",
+      "brand_en",
+      "make_en",
+      "manufacture_name_en",
+    ]) ?? vehicleCompanyDefault;
+  const vehicleCompanyAr =
+    pickLocalizedText([
+      "vehicle_company_ar",
+      "vehicle_manufacturer_ar",
+      "manufacturer_name_ar",
+      "company_ar",
+      "brand_ar",
+      "make_ar",
+      "manufacture_name_ar",
+    ]) ?? vehicleCompanyDefault;
+
+  const modelNameDefault = pickLocalizedText([
+    "model_name",
+    "vehicle_model_name",
+    "vehicle_model",
+    "model",
+  ]);
+  const modelNameEn =
+    pickLocalizedText([
+      "model_name_en",
+      "vehicle_model_name_en",
+      "vehicle_model_en",
+      "model_en",
+    ]) ?? modelNameDefault;
+  const modelNameAr =
+    pickLocalizedText([
+      "model_name_ar",
+      "vehicle_model_name_ar",
+      "vehicle_model_ar",
+      "model_ar",
+    ]) ?? modelNameDefault;
+
+  const directVehicleNameDefault = pickLocalizedText(["vehicle_name", "car_name"]);
+  const directVehicleNameEn = pickLocalizedText(["vehicle_name_en", "car_name_en"]);
+  const directVehicleNameAr = pickLocalizedText(["vehicle_name_ar", "car_name_ar"]);
+
+  const buildVehicleName = (company, model, directName) => {
+    if (directName) return directName;
+    const parts = [toTrimmedText(company), toTrimmedText(model)].filter(Boolean);
+    return parts.length ? parts.join(" ") : null;
+  };
+
+  const vehicleNameDefault = buildVehicleName(
+    vehicleCompanyDefault,
+    modelNameDefault,
+    directVehicleNameDefault
+  );
+  const vehicleNameEn =
+    buildVehicleName(vehicleCompanyEn, modelNameEn, directVehicleNameEn) ??
+    vehicleNameDefault;
+  const vehicleNameAr =
+    buildVehicleName(vehicleCompanyAr, modelNameAr, directVehicleNameAr) ??
+    vehicleNameDefault;
+
+  return {
+    ...(vehicleTypeEn
+      ? {
+          vehicle_type_name_en: vehicleTypeEn,
+          vehicle_type_en: vehicleTypeEn,
+        }
+      : {}),
+    ...(vehicleTypeAr
+      ? {
+          vehicle_type_name_ar: vehicleTypeAr,
+          vehicle_type_ar: vehicleTypeAr,
+        }
+      : {}),
+    ...(vehicleCompanyEn ? { vehicle_company_en: vehicleCompanyEn } : {}),
+    ...(vehicleCompanyAr ? { vehicle_company_ar: vehicleCompanyAr } : {}),
+    ...(modelNameEn ? { model_name_en: modelNameEn } : {}),
+    ...(modelNameAr ? { model_name_ar: modelNameAr } : {}),
+    ...(vehicleNameEn ? { vehicle_name_en: vehicleNameEn } : {}),
+    ...(vehicleNameAr ? { vehicle_name_ar: vehicleNameAr } : {}),
+  };
+};
+
+const applyLocalizedVehicleFields = (payload = null, ...sources) => {
+  if (!payload || typeof payload !== "object") return payload;
+
+  const localizedFields = resolveLocalizedVehicleFields(payload, ...sources);
+  if (!localizedFields || Object.keys(localizedFields).length === 0) return payload;
+
+  let changed = false;
+  const next = { ...payload };
+  for (const [key, value] of Object.entries(localizedFields)) {
+    if (!value) continue;
+    if (toTrimmedText(next?.[key]) == null) {
+      next[key] = value;
+      changed = true;
+    }
+  }
+
+  return changed ? next : payload;
+};
+
 const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
   const src = details && typeof details === "object" ? details : {};
   const meta = fallbackMeta && typeof fallbackMeta === "object" ? fallbackMeta : {};
@@ -423,6 +577,13 @@ const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
       )
     )
   );
+  const localizedVehicleFields = resolveLocalizedVehicleFields(src, meta, {
+    vehicle_type: vehicleType,
+    vehicle_type_name: vehicleType,
+    vehicle_company: vehicleCompany,
+    model_name: modelName,
+    vehicle_name: [vehicleCompany, modelName].filter((v) => toTrimmedText(v)).join(" "),
+  });
 
   return {
     driver_name: driverName,
@@ -435,6 +596,7 @@ const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
     vehicle_manufacturer: vehicleManufacturer,
     rating,
     driver_image: driverImage,
+    ...localizedVehicleFields,
 
     // aliases for frontend flexibility
     vehicle_type_name: vehicleType,
@@ -565,78 +727,133 @@ const withDriverImage = (payload = {}, explicitDriverId = null) => {
   if (!payload || typeof payload !== "object") return payload;
 
   const resolvedImage = resolveDriverImageFromPayload(payload, explicitDriverId);
-  if (!resolvedImage) return payload;
 
   let patched = payload;
   let changed = false;
 
-  if (!toTrimmedText(patched?.driver_image)) {
-    patched = { ...patched, driver_image: resolvedImage };
-    changed = true;
+  if (resolvedImage) {
+    if (!toTrimmedText(patched?.driver_image)) {
+      patched = { ...patched, driver_image: resolvedImage };
+      changed = true;
+    }
+    if (!toTrimmedText(patched?.driver_image_url)) {
+      patched = { ...patched, driver_image_url: resolvedImage };
+      changed = true;
+    }
+    if (!toTrimmedText(patched?.profile_image)) {
+      patched = { ...patched, profile_image: resolvedImage };
+      changed = true;
+    }
+    if (!toTrimmedText(patched?.driver_profile_image)) {
+      patched = { ...patched, driver_profile_image: resolvedImage };
+      changed = true;
+    }
+    if (!toTrimmedText(patched?.provider_image)) {
+      patched = { ...patched, provider_image: resolvedImage };
+      changed = true;
+    }
+
+    if (patched?.driver_details && typeof patched.driver_details === "object") {
+      const existingDetails = patched.driver_details;
+      const nextDetails = {
+        ...existingDetails,
+        ...(toTrimmedText(existingDetails?.driver_image)
+          ? {}
+          : { driver_image: resolvedImage }),
+        ...(toTrimmedText(existingDetails?.driver_image_url)
+          ? {}
+          : { driver_image_url: resolvedImage }),
+        ...(toTrimmedText(existingDetails?.profile_image)
+          ? {}
+          : { profile_image: resolvedImage }),
+        ...(toTrimmedText(existingDetails?.driver_profile_image)
+          ? {}
+          : { driver_profile_image: resolvedImage }),
+        ...(toTrimmedText(existingDetails?.provider_image)
+          ? {}
+          : { provider_image: resolvedImage }),
+      };
+      patched = { ...patched, driver_details: nextDetails };
+      changed = true;
+    }
+
+    if (patched?.ride_details && typeof patched.ride_details === "object") {
+      const existingRideDetails = patched.ride_details;
+      const nextRideDetails = {
+        ...existingRideDetails,
+        ...(toTrimmedText(existingRideDetails?.driver_image)
+          ? {}
+          : { driver_image: resolvedImage }),
+        ...(toTrimmedText(existingRideDetails?.driver_image_url)
+          ? {}
+          : { driver_image_url: resolvedImage }),
+        ...(toTrimmedText(existingRideDetails?.profile_image)
+          ? {}
+          : { profile_image: resolvedImage }),
+        ...(toTrimmedText(existingRideDetails?.driver_profile_image)
+          ? {}
+          : { driver_profile_image: resolvedImage }),
+        ...(toTrimmedText(existingRideDetails?.provider_image)
+          ? {}
+          : { provider_image: resolvedImage }),
+      };
+      patched = { ...patched, ride_details: nextRideDetails };
+      changed = true;
+    }
   }
-  if (!toTrimmedText(patched?.driver_image_url)) {
-    patched = { ...patched, driver_image_url: resolvedImage };
-    changed = true;
-  }
-  if (!toTrimmedText(patched?.profile_image)) {
-    patched = { ...patched, profile_image: resolvedImage };
-    changed = true;
-  }
-  if (!toTrimmedText(patched?.driver_profile_image)) {
-    patched = { ...patched, driver_profile_image: resolvedImage };
-    changed = true;
-  }
-  if (!toTrimmedText(patched?.provider_image)) {
-    patched = { ...patched, provider_image: resolvedImage };
+
+  const localizedRootPayload = applyLocalizedVehicleFields(
+    patched,
+    patched?.driver_details,
+    patched?.ride_details,
+    patched?.ride_details?.driver_details,
+    patched?.meta
+  );
+  if (localizedRootPayload !== patched) {
+    patched = localizedRootPayload;
     changed = true;
   }
 
   if (patched?.driver_details && typeof patched.driver_details === "object") {
-    const existingDetails = patched.driver_details;
-    const nextDetails = {
-      ...existingDetails,
-      ...(toTrimmedText(existingDetails?.driver_image)
-        ? {}
-        : { driver_image: resolvedImage }),
-      ...(toTrimmedText(existingDetails?.driver_image_url)
-        ? {}
-        : { driver_image_url: resolvedImage }),
-      ...(toTrimmedText(existingDetails?.profile_image)
-        ? {}
-        : { profile_image: resolvedImage }),
-      ...(toTrimmedText(existingDetails?.driver_profile_image)
-        ? {}
-        : { driver_profile_image: resolvedImage }),
-      ...(toTrimmedText(existingDetails?.provider_image)
-        ? {}
-        : { provider_image: resolvedImage }),
-    };
-    patched = { ...patched, driver_details: nextDetails };
-    changed = true;
+    const localizedDriverDetails = applyLocalizedVehicleFields(
+      patched.driver_details,
+      patched,
+      patched?.meta,
+      patched?.ride_details,
+      patched?.ride_details?.driver_details
+    );
+    if (localizedDriverDetails !== patched.driver_details) {
+      patched = { ...patched, driver_details: localizedDriverDetails };
+      changed = true;
+    }
   }
 
   if (patched?.ride_details && typeof patched.ride_details === "object") {
     const existingRideDetails = patched.ride_details;
-    const nextRideDetails = {
-      ...existingRideDetails,
-      ...(toTrimmedText(existingRideDetails?.driver_image)
-        ? {}
-        : { driver_image: resolvedImage }),
-      ...(toTrimmedText(existingRideDetails?.driver_image_url)
-        ? {}
-        : { driver_image_url: resolvedImage }),
-      ...(toTrimmedText(existingRideDetails?.profile_image)
-        ? {}
-        : { profile_image: resolvedImage }),
-      ...(toTrimmedText(existingRideDetails?.driver_profile_image)
-        ? {}
-        : { driver_profile_image: resolvedImage }),
-      ...(toTrimmedText(existingRideDetails?.provider_image)
-        ? {}
-        : { provider_image: resolvedImage }),
-    };
-    patched = { ...patched, ride_details: nextRideDetails };
-    changed = true;
+    const localizedRideDetails = applyLocalizedVehicleFields(
+      existingRideDetails,
+      patched,
+      patched?.meta,
+      existingRideDetails?.driver_details
+    );
+
+    let nextRideDetails = localizedRideDetails;
+    if (nextRideDetails?.driver_details && typeof nextRideDetails.driver_details === "object") {
+      const localizedRideDriverDetails = applyLocalizedVehicleFields(
+        nextRideDetails.driver_details,
+        nextRideDetails,
+        patched,
+        patched?.meta
+      );
+      if (localizedRideDriverDetails !== nextRideDetails.driver_details) {
+        nextRideDetails = { ...nextRideDetails, driver_details: localizedRideDriverDetails };
+      }
+    }
+
+    if (nextRideDetails !== existingRideDetails) {
+      patched = { ...patched, ride_details: nextRideDetails };
+      changed = true;
+    }
   }
 
   return changed ? patched : payload;
@@ -2103,6 +2320,7 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
     const vehicleManufacturer = normalizedDetails.vehicle_manufacturer;
     const rating = normalizedDetails.rating;
     const driverImage = normalizedDetails.driver_image;
+    const localizedVehicleFields = resolveLocalizedVehicleFields(d, normalizedDetails);
     const childSeatFromApi = toBinaryFlag(
       d?.child_seat_accessibility ?? d?.child_seat ?? d?.smoking ?? d?.smoking_value ?? null
     );
@@ -2129,6 +2347,7 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
       ...(vehicleManufacturer ? { vehicle_manufacturer: vehicleManufacturer } : {}),
       ...(rating != null ? { rating } : {}),
       ...(driverImage ? { driver_image: driverImage } : {}),
+      ...localizedVehicleFields,
       ...(childSeatFromApi === 0 || childSeatFromApi === 1
         ? { child_seat: childSeatFromApi }
         : {}),
@@ -2158,6 +2377,7 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
       vehicle_manufacturer: vehicleManufacturer,
       rating,
       driver_image: driverImage,
+      ...localizedVehicleFields,
       child_seat: childSeatFromApi,
       handicap: handicapFromApi,
       driver_gender: driverGenderFromApi,
@@ -7050,10 +7270,44 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       driver_rating: driverDetails?.rating ?? null,
       vehicle_type: driverDetails?.vehicle_type ?? null,
       vehicle_type_name: driverDetails?.vehicle_type_name ?? driverDetails?.vehicle_type ?? null,
+      vehicle_type_name_en:
+        driverDetails?.vehicle_type_name_en ??
+        driverDetails?.vehicle_type_en ??
+        driverDetails?.vehicle_type_name ??
+        driverDetails?.vehicle_type ??
+        null,
+      vehicle_type_name_ar:
+        driverDetails?.vehicle_type_name_ar ??
+        driverDetails?.vehicle_type_ar ??
+        driverDetails?.vehicle_type_name ??
+        driverDetails?.vehicle_type ??
+        null,
       vehicle_company: driverDetails?.vehicle_company ?? null,
+      vehicle_company_en:
+        driverDetails?.vehicle_company_en ?? driverDetails?.vehicle_company ?? null,
+      vehicle_company_ar:
+        driverDetails?.vehicle_company_ar ?? driverDetails?.vehicle_company ?? null,
       vehicle_manufacturer:
         driverDetails?.vehicle_manufacturer ?? driverDetails?.manufacturer_name ?? null,
       model_name: driverDetails?.model_name ?? null,
+      model_name_en: driverDetails?.model_name_en ?? driverDetails?.model_name ?? null,
+      model_name_ar: driverDetails?.model_name_ar ?? driverDetails?.model_name ?? null,
+      vehicle_name_en:
+        driverDetails?.vehicle_name_en ??
+        toTrimmedText(
+          [driverDetails?.vehicle_company_en ?? driverDetails?.vehicle_company, driverDetails?.model_name_en ?? driverDetails?.model_name]
+            .filter((v) => toTrimmedText(v))
+            .join(" ")
+        ) ??
+        null,
+      vehicle_name_ar:
+        driverDetails?.vehicle_name_ar ??
+        toTrimmedText(
+          [driverDetails?.vehicle_company_ar ?? driverDetails?.vehicle_company, driverDetails?.model_name_ar ?? driverDetails?.model_name]
+            .filter((v) => toTrimmedText(v))
+            .join(" ")
+        ) ??
+        null,
       model_year: driverDetails?.model_year ?? null,
       vehicle_color: driverDetails?.vehicle_color ?? null,
       vehicle_number: driverDetails?.vehicle_number ?? null,
