@@ -4410,10 +4410,15 @@ const eligibleForDispatch = roadFiltered.filter((driver) => {
   if (!driverId) return false;
 
   // إذا كان مرشحًا أصلًا، خليه eligible دائمًا
-  if (existingCandidateSet.has(driverId)) return true;
+ const incrementalExpansion =
+  data?.dispatch_expand_reason === "timeout" ||
+  toNumber(data?.dispatch_incremental_only) === 1;
 
-  // السائق الجديد فقط: لا تعيده إذا سبق وتم إشعاره قبل
-  return !hasRideDriverBeenNotified(rideId, driverId);
+if (incrementalExpansion && existingCandidateSet.has(driverId)) {
+  return false;
+}
+
+return !hasRideDriverBeenNotified(rideId, driverId);
 });
 
 const nearbySmokingReady = nearbyAir.filter(
