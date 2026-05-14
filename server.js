@@ -1549,13 +1549,23 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       if (normalized.includes("admin")) return "admin";
       return null;
     })();
-    const suppressDriverSelfCancelEvents = status === 4 && cancelByActor === "driver";
+    const suppressDriverSelfCancelEventsFromActor =
+      status === 4 && cancelByActor === "driver";
     const cancelReasonId = Number.isFinite(Number(payload?.cancel_reason_id))
       ? Number(payload.cancel_reason_id)
       : Number.isFinite(Number(payload?.reason_id))
       ? Number(payload.reason_id)
       : null;
-const rating = payload?.rating ?? null; // إذا كان التقييم موجودًا في payload
+    const payloadRideCancelledStatus = Number.isFinite(
+      Number(payload?.ride_cancelled_status)
+    )
+      ? Number(payload.ride_cancelled_status)
+      : null;
+    const isDriverSelfCancelByFlag =
+      status === 4 && payloadRideCancelledStatus === 0;
+    const suppressDriverSelfCancelEvents =
+      suppressDriverSelfCancelEventsFromActor || isDriverSelfCancelByFlag;
+    const rating = payload?.rating ?? null;
     const evt = {
       ride_id: rideId,
       ride_status: status,
