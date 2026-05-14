@@ -4178,29 +4178,35 @@ async function dispatchToNearbyDrivers(io, data) {
   const persistedBaseFare = pickFirstValue(
     toNumber(previousRideSnapshot?.base_fare),
     toNumber(previousRideSnapshot?.ride_details?.base_fare),
-    toNumber(previousRideSnapshot?.meta?.base_fare),
-    toNumber(data?.base_fare)
+    toNumber(previousRideSnapshot?.meta?.base_fare)
   );
   const persistedMinPrice = pickFirstValue(
     toNumber(previousRideSnapshot?.min_price),
     toNumber(previousRideSnapshot?.ride_details?.min_price),
     toNumber(previousRideSnapshot?.ride_details?.min_fare),
     toNumber(previousRideSnapshot?.meta?.min_price),
-    toNumber(previousRideSnapshot?.meta?.min_fare),
-    toNumber(data?.min_price),
-    toNumber(data?.min_fare),
-    toNumber(data?.MIN_PRICE)
+    toNumber(previousRideSnapshot?.meta?.min_fare)
   );
   const persistedMaxPrice = pickFirstValue(
     toNumber(previousRideSnapshot?.max_price),
     toNumber(previousRideSnapshot?.ride_details?.max_price),
     toNumber(previousRideSnapshot?.ride_details?.max_fare),
     toNumber(previousRideSnapshot?.meta?.max_price),
-    toNumber(previousRideSnapshot?.meta?.max_fare),
-    toNumber(data?.max_price),
-    toNumber(data?.max_fare),
-    toNumber(data?.MAX_PRICE)
+    toNumber(previousRideSnapshot?.meta?.max_fare)
   );
+  const snapshotBounds = normalizePriceBoundsPair(persistedMinPrice, persistedMaxPrice);
+  const incomingSystemBaseFare = pickFirstValue(
+    toNumber(data?.base_fare),
+    toNumber(data?.ride_details?.base_fare),
+    toNumber(data?.meta?.base_fare),
+    toNumber(data?.estimated_fare),
+    toNumber(data?.ride_details?.estimated_fare),
+    toNumber(data?.meta?.estimated_fare),
+    toNumber(data?.user_bid_price),
+    toNumber(data?.price),
+    toNumber(data?.offered_price)
+  );
+  const resolvedBaseFare = pickFirstValue(persistedBaseFare, incomingSystemBaseFare);
   const base =
     toNumber(data?.user_bid_price) ??
     toNumber(data?.price) ??
@@ -4211,12 +4217,18 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(data?.min_price) ??
     toNumber(data?.min_fare) ??
     null;
-  const priceBounds = getRidePriceBounds({
-    ...data,
-    ...(persistedBaseFare !== null ? { base_fare: persistedBaseFare } : {}),
-    ...(persistedMinPrice !== null ? { min_price: persistedMinPrice } : {}),
-    ...(persistedMaxPrice !== null ? { max_price: persistedMaxPrice } : {}),
-  });
+  let priceBounds = null;
+  if (resolvedBaseFare !== null) {
+    priceBounds = buildPriceBounds(resolvedBaseFare);
+  } else if (snapshotBounds.min_price !== null && snapshotBounds.max_price !== null) {
+    priceBounds = {
+      base_fare: null,
+      min_price: snapshotBounds.min_price,
+      max_price: snapshotBounds.max_price,
+    };
+  } else {
+    priceBounds = getRidePriceBounds(data);
+  }
   const minBound = toNumber(priceBounds?.min_price);
   const maxBound = toNumber(priceBounds?.max_price);
   let dispatchBidPrice = base;

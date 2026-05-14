@@ -1353,7 +1353,13 @@ const acceptExtraPayload = {
       toDriverRoom: driverRoom(driverId),
       payload: optimisticEvt,
     });
-    io.to(`ride:${rideId}`).emit("ride:statusUpdated", optimisticEvt);
+    if (rideStatus === 4) {
+      io.to(`ride:${rideId}`)
+        .except(driverRoom(driverId))
+        .emit("ride:statusUpdated", optimisticEvt);
+    } else {
+      io.to(`ride:${rideId}`).emit("ride:statusUpdated", optimisticEvt);
+    }
     if (rideStatus !== 4) {
       io.to(driverRoom(driverId)).emit("ride:statusUpdated", optimisticEvt);
     }

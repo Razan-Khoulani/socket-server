@@ -1765,6 +1765,10 @@ const shouldReleaseRideRef =
       statusKey,
       STATUS_DEDUPE_TTL_MS
     );
+    const rideAudience =
+      suppressDriverSelfCancelEvents && driverId
+        ? io.to(`ride:${rideId}`).except(`driver:${driverId}`)
+        : io.to(`ride:${rideId}`);
 
     // ✅ keep active ride mapping in sync with driver status updates
 if (
@@ -1784,7 +1788,7 @@ if (
         payload,
       });
 
-      io.to(`ride:${rideId}`).emit("ride:statusUpdated", evt);
+      rideAudience.emit("ride:statusUpdated", evt);
       const room = io.sockets.adapter.rooms.get(`ride:${rideId}`);
       const count = room ? room.size : 0;
       console.log(
@@ -1803,7 +1807,7 @@ if (
           updated_at: Date.now(),
           source: "ride-cancelled",
         });
-        io.to(`ride:${rideId}`).emit("ride:cancelled", cancelledEvt);
+        rideAudience.emit("ride:cancelled", cancelledEvt);
         if (driverId && !suppressDriverSelfCancelEvents) {
           io.to(`driver:${driverId}`).emit("ride:cancelled", cancelledEvt);
         }
@@ -1914,7 +1918,7 @@ const shouldEmitEndedEvent = !isTransitionStatus;      if (shouldEmitEndedEvent)
           ENDED_DEDUPE_TTL_MS
         );
         if (!isDupEnded) {
-          io.to(`ride:${rideId}`).emit("ride:ended", endEvt);
+          rideAudience.emit("ride:ended", endEvt);
           const emitDriverId = driverId ?? activeDriverIdBeforeClear ?? null;
           if (emitDriverId && !suppressDriverSelfCancelEvents) {
             io.to(`driver:${emitDriverId}`).emit("ride:ended", endEvt);
@@ -2241,9 +2245,13 @@ app.post("/webhooks/ride-cancelled", (req, res) => {
     }
     clearRideRoute(rideId);
 
-    io.to(`ride:${rideId}`).emit("ride:statusUpdated", statusEvt);
-    io.to(`ride:${rideId}`).emit("ride:cancelled", cancelledEvt);
-    io.to(`ride:${rideId}`).emit("ride:ended", cancelledEvt);
+    const rideAudience =
+      suppressDriverSelfCancelEvents && driverId
+        ? io.to(`ride:${rideId}`).except(`driver:${driverId}`)
+        : io.to(`ride:${rideId}`);
+    rideAudience.emit("ride:statusUpdated", statusEvt);
+    rideAudience.emit("ride:cancelled", cancelledEvt);
+    rideAudience.emit("ride:ended", cancelledEvt);
 
     if (driverId && !suppressDriverSelfCancelEvents) {
       io.to(`driver:${driverId}`).emit("ride:statusUpdated", statusEvt);
