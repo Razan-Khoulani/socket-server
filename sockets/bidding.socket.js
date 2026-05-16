@@ -88,6 +88,23 @@ const toTrimmedText = (v) => {
   const s = String(v).trim();
   return s.length ? s : null;
 };
+const normalizeLanguageCode = (value) => {
+  const raw = toTrimmedText(value);
+  if (!raw) return null;
+  const normalized = raw.toLowerCase().replace(/_/g, "-");
+  if (normalized.startsWith("ar")) return "ar";
+  if (normalized.startsWith("en")) return "en";
+  return normalized;
+};
+const pickLocalizedText = (language, englishText, arabicText, fallbackText = null) => {
+  const lang = normalizeLanguageCode(language);
+  const en = toTrimmedText(englishText);
+  const ar = toTrimmedText(arabicText);
+  const fallback = toTrimmedText(fallbackText);
+
+  if (lang === "ar") return ar ?? en ?? fallback;
+  return en ?? ar ?? fallback;
+};
 const normalizeToken = (value) => {
   if (value === null || value === undefined) return null;
   const token = String(value).trim();
@@ -2415,6 +2432,17 @@ const buildUserDetails = (data) => {
 
   const stored = userId ? getUserDetails(userId) : null;
   const storedByToken = !stored && token ? getUserDetailsByToken(token) : null;
+  const userLanguage = normalizeLanguageCode(
+    src?.user_language ??
+      src?.language ??
+      data?.user_language ??
+      data?.language ??
+      stored?.user_language ??
+      stored?.language ??
+      storedByToken?.user_language ??
+      storedByToken?.language ??
+      null
+  );
 
   if (!userId && storedByToken?.user_id) {
     userId = toNumber(storedByToken.user_id) ?? userId;
@@ -2438,6 +2466,8 @@ const buildUserDetails = (data) => {
     // ✅ NEW: keep token in user_details snapshot (helps later merges on retry)
     user_token: token ?? stored?.user_token ?? stored?.token ?? storedByToken?.user_token ?? null,
     token: token ?? stored?.user_token ?? stored?.token ?? storedByToken?.user_token ?? null,
+    user_language: userLanguage,
+    language: userLanguage,
   };
 
   if (
@@ -4779,6 +4809,74 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       : {}),
   };
 
+  const dispatchUserLanguage = normalizeLanguageCode(
+    pickFirstValue(
+      data?.user_language,
+      data?.language,
+      data?.user_details?.user_language,
+      data?.user_details?.language,
+      userDetails?.user_language,
+      userDetails?.language,
+      storedUser?.user_language,
+      storedUser?.language,
+      storedByToken?.user_language,
+      storedByToken?.language,
+      previousRideSnapshot?.user_language,
+      previousRideSnapshot?.language,
+      previousRideSnapshot?.user_details?.user_language,
+      previousRideSnapshot?.user_details?.language
+    )
+  );
+  const serviceTypeNameEn = toTrimmedText(
+    pickFirstValue(
+      data?.service_type_name_en,
+      data?.vehicle_type_name_en,
+      previousRideSnapshot?.service_type_name_en,
+      previousRideSnapshot?.vehicle_type_name_en,
+      previousRideSnapshot?.ride_details?.service_type_name_en,
+      previousRideSnapshot?.ride_details?.vehicle_type_name_en,
+      previousRideSnapshot?.meta?.service_type_name_en,
+      previousRideSnapshot?.meta?.vehicle_type_name_en
+    )
+  );
+  const serviceTypeNameAr = toTrimmedText(
+    pickFirstValue(
+      data?.service_type_name_ar,
+      data?.vehicle_type_name_ar,
+      previousRideSnapshot?.service_type_name_ar,
+      previousRideSnapshot?.vehicle_type_name_ar,
+      previousRideSnapshot?.ride_details?.service_type_name_ar,
+      previousRideSnapshot?.ride_details?.vehicle_type_name_ar,
+      previousRideSnapshot?.meta?.service_type_name_ar,
+      previousRideSnapshot?.meta?.vehicle_type_name_ar
+    )
+  );
+  const serviceTypeNameRaw = toTrimmedText(
+    pickFirstValue(
+      data?.service_type_name,
+      data?.vehicle_type_name,
+      previousRideSnapshot?.service_type_name,
+      previousRideSnapshot?.vehicle_type_name,
+      previousRideSnapshot?.ride_details?.service_type_name,
+      previousRideSnapshot?.ride_details?.vehicle_type_name,
+      previousRideSnapshot?.meta?.service_type_name,
+      previousRideSnapshot?.meta?.vehicle_type_name
+    )
+  );
+  const localizedServiceTypeName = pickLocalizedText(
+    dispatchUserLanguage,
+    serviceTypeNameEn,
+    serviceTypeNameAr,
+    serviceTypeNameRaw
+  );
+  if (userDetails && dispatchUserLanguage) {
+    userDetails = {
+      ...userDetails,
+      user_language: userDetails?.user_language ?? dispatchUserLanguage,
+      language: userDetails?.language ?? dispatchUserLanguage,
+    };
+  }
+
   const ridePayloadBase = {
     ride_id: rideId,
     event_type: "driver_bid_list_item",
@@ -4794,6 +4892,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     user_phone: userDetails?.user_phone ?? null,
     user_country_code: userDetails?.user_country_code ?? null,
     user_phone_full: userDetails?.user_phone_full ?? null,
+    user_language: dispatchUserLanguage ?? null,
+    language: dispatchUserLanguage ?? null,
 
     // ✅ keep token for later accept/merge paths
     token: tokenTmp ?? null,
@@ -4825,6 +4925,12 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
 
     service_type_id: toNumber(data.service_type_id) ?? null,
     service_category_id: toNumber(data.service_category_id) ?? null,
+    service_type_name: localizedServiceTypeName ?? null,
+    vehicle_type_name: localizedServiceTypeName ?? null,
+    service_type_name_en: serviceTypeNameEn ?? localizedServiceTypeName ?? null,
+    service_type_name_ar: serviceTypeNameAr ?? localizedServiceTypeName ?? null,
+    vehicle_type_name_en: serviceTypeNameEn ?? localizedServiceTypeName ?? null,
+    vehicle_type_name_ar: serviceTypeNameAr ?? localizedServiceTypeName ?? null,
     created_at: data.created_at ?? null,
 
     ...(routeKm !== null ? { route: routeKm } : {}),
@@ -4856,6 +4962,14 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       max_fare: priceBounds.max_price,
       service_type_id: toNumber(data.service_type_id) ?? null,
       service_category_id: toNumber(data.service_category_id) ?? null,
+      service_type_name: localizedServiceTypeName ?? null,
+      vehicle_type_name: localizedServiceTypeName ?? null,
+      service_type_name_en: serviceTypeNameEn ?? localizedServiceTypeName ?? null,
+      service_type_name_ar: serviceTypeNameAr ?? localizedServiceTypeName ?? null,
+      vehicle_type_name_en: serviceTypeNameEn ?? localizedServiceTypeName ?? null,
+      vehicle_type_name_ar: serviceTypeNameAr ?? localizedServiceTypeName ?? null,
+      user_language: dispatchUserLanguage ?? null,
+      language: dispatchUserLanguage ?? null,
       duration: finalRouteApiDurationMin,
       route_api_distance_km: finalRouteApiDistanceKm,
       ...dispatchPreferencePayload,
@@ -4872,6 +4986,11 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       ...(priceBounds.base_fare !== null ? { base_fare: priceBounds.base_fare } : {}),
       ...(priceBounds.min_price !== null ? { min_price: priceBounds.min_price } : {}),
       ...(priceBounds.max_price !== null ? { max_price: priceBounds.max_price } : {}),
+      ...(localizedServiceTypeName ? { service_type_name: localizedServiceTypeName } : {}),
+      ...(localizedServiceTypeName ? { vehicle_type_name: localizedServiceTypeName } : {}),
+      ...(serviceTypeNameEn ? { service_type_name_en: serviceTypeNameEn, vehicle_type_name_en: serviceTypeNameEn } : {}),
+      ...(serviceTypeNameAr ? { service_type_name_ar: serviceTypeNameAr, vehicle_type_name_ar: serviceTypeNameAr } : {}),
+      ...(dispatchUserLanguage ? { user_language: dispatchUserLanguage, language: dispatchUserLanguage } : {}),
       ...dispatchPreferencePayload,
       ...(routeApiData && typeof routeApiData === "object"
         ? { route_api_data: routeApiData }
@@ -4928,6 +5047,14 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         max_fare: priceBounds.max_price,
         service_type_id: serviceTypeId,
         service_category_id: toNumber(data.service_category_id) ?? null,
+        service_type_name: localizedServiceTypeName ?? null,
+        vehicle_type_name: localizedServiceTypeName ?? null,
+        service_type_name_en: serviceTypeNameEn ?? localizedServiceTypeName ?? null,
+        service_type_name_ar: serviceTypeNameAr ?? localizedServiceTypeName ?? null,
+        vehicle_type_name_en: serviceTypeNameEn ?? localizedServiceTypeName ?? null,
+        vehicle_type_name_ar: serviceTypeNameAr ?? localizedServiceTypeName ?? null,
+        user_language: dispatchUserLanguage ?? null,
+        language: dispatchUserLanguage ?? null,
         created_at: data.created_at ?? null,
 
         ...(routeKm !== null ? { route: routeKm } : {}),
@@ -4958,6 +5085,14 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
           max_fare: priceBounds.max_price,
           service_type_id: serviceTypeId,
           service_category_id: toNumber(data.service_category_id) ?? null,
+          service_type_name: localizedServiceTypeName ?? null,
+          vehicle_type_name: localizedServiceTypeName ?? null,
+          service_type_name_en: serviceTypeNameEn ?? localizedServiceTypeName ?? null,
+          service_type_name_ar: serviceTypeNameAr ?? localizedServiceTypeName ?? null,
+          vehicle_type_name_en: serviceTypeNameEn ?? localizedServiceTypeName ?? null,
+          vehicle_type_name_ar: serviceTypeNameAr ?? localizedServiceTypeName ?? null,
+          user_language: dispatchUserLanguage ?? null,
+          language: dispatchUserLanguage ?? null,
           duration: finalRouteApiDurationMin,
           route_api_distance_km: finalRouteApiDistanceKm,
           ...dispatchPreferencePayload,
@@ -4974,6 +5109,17 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
           ...(priceBounds.base_fare !== null ? { base_fare: priceBounds.base_fare } : {}),
           ...(priceBounds.min_price !== null ? { min_price: priceBounds.min_price } : {}),
           ...(priceBounds.max_price !== null ? { max_price: priceBounds.max_price } : {}),
+          ...(localizedServiceTypeName ? { service_type_name: localizedServiceTypeName } : {}),
+          ...(localizedServiceTypeName ? { vehicle_type_name: localizedServiceTypeName } : {}),
+          ...(serviceTypeNameEn
+            ? { service_type_name_en: serviceTypeNameEn, vehicle_type_name_en: serviceTypeNameEn }
+            : {}),
+          ...(serviceTypeNameAr
+            ? { service_type_name_ar: serviceTypeNameAr, vehicle_type_name_ar: serviceTypeNameAr }
+            : {}),
+          ...(dispatchUserLanguage
+            ? { user_language: dispatchUserLanguage, language: dispatchUserLanguage }
+            : {}),
           ...dispatchPreferencePayload,
           ...(routeApiData && typeof routeApiData === "object"
             ? { route_api_data: routeApiData }
@@ -4988,6 +5134,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         user_phone: userDetails?.user_phone ?? null,
         user_country_code: userDetails?.user_country_code ?? null,
         user_phone_full: userDetails?.user_phone_full ?? null,
+        user_language: dispatchUserLanguage ?? null,
+        language: dispatchUserLanguage ?? null,
 
         token: tokenTmp ?? null,
         ...dispatchPreferencePayload,
@@ -6663,6 +6811,64 @@ if (removed) {
       driverRideInbox.get(driverId)?.get(rideId) ??
       getRideDetails(rideId) ??
       null;
+    const rideOwnerUserId = toNumber(
+      rideSnapshot?.user_id ?? rideSnapshot?.user_details?.user_id ?? null
+    );
+    const rideOwnerUserDetails = rideOwnerUserId ? getUserDetails(rideOwnerUserId) : null;
+    const bidUserLanguage = normalizeLanguageCode(
+      pickFirstValue(
+        payload?.user_language,
+        payload?.language,
+        rideSnapshot?.user_language,
+        rideSnapshot?.language,
+        rideSnapshot?.user_details?.user_language,
+        rideSnapshot?.user_details?.language,
+        rideOwnerUserDetails?.user_language,
+        rideOwnerUserDetails?.language
+      )
+    );
+    const rideServiceTypeNameEn = toTrimmedText(
+      pickFirstValue(
+        payload?.service_type_name_en,
+        payload?.vehicle_type_name_en,
+        rideSnapshot?.service_type_name_en,
+        rideSnapshot?.vehicle_type_name_en,
+        rideSnapshot?.ride_details?.service_type_name_en,
+        rideSnapshot?.ride_details?.vehicle_type_name_en,
+        rideSnapshot?.meta?.service_type_name_en,
+        rideSnapshot?.meta?.vehicle_type_name_en
+      )
+    );
+    const rideServiceTypeNameAr = toTrimmedText(
+      pickFirstValue(
+        payload?.service_type_name_ar,
+        payload?.vehicle_type_name_ar,
+        rideSnapshot?.service_type_name_ar,
+        rideSnapshot?.vehicle_type_name_ar,
+        rideSnapshot?.ride_details?.service_type_name_ar,
+        rideSnapshot?.ride_details?.vehicle_type_name_ar,
+        rideSnapshot?.meta?.service_type_name_ar,
+        rideSnapshot?.meta?.vehicle_type_name_ar
+      )
+    );
+    const rideServiceTypeNameRaw = toTrimmedText(
+      pickFirstValue(
+        payload?.service_type_name,
+        payload?.vehicle_type_name,
+        rideSnapshot?.service_type_name,
+        rideSnapshot?.vehicle_type_name,
+        rideSnapshot?.ride_details?.service_type_name,
+        rideSnapshot?.ride_details?.vehicle_type_name,
+        rideSnapshot?.meta?.service_type_name,
+        rideSnapshot?.meta?.vehicle_type_name
+      )
+    );
+    const bidLocalizedServiceTypeName = pickLocalizedText(
+      bidUserLanguage,
+      rideServiceTypeNameEn,
+      rideServiceTypeNameAr,
+      rideServiceTypeNameRaw
+    );
 
     const ridePriceBounds = getRidePriceBounds(rideSnapshot ?? {});
     if (!isPriceWithinBounds(offeredPrice, ridePriceBounds)) {
@@ -7041,6 +7247,21 @@ if (removed) {
       driver_service_id: driverIdentity.driver_service_id ?? driverServiceId ?? null,
       driver_detail_id: driverIdentity.driver_detail_id ?? null,
     };
+    if (bidLocalizedServiceTypeName) {
+      driverDetails = {
+        ...(driverDetails && typeof driverDetails === "object" ? driverDetails : {}),
+        vehicle_type: bidLocalizedServiceTypeName,
+        vehicle_type_name: bidLocalizedServiceTypeName,
+      };
+    }
+    if (rideServiceTypeNameEn || rideServiceTypeNameAr || bidUserLanguage) {
+      driverDetails = {
+        ...(driverDetails && typeof driverDetails === "object" ? driverDetails : {}),
+        ...(rideServiceTypeNameEn ? { vehicle_type_name_en: rideServiceTypeNameEn } : {}),
+        ...(rideServiceTypeNameAr ? { vehicle_type_name_ar: rideServiceTypeNameAr } : {}),
+        ...(bidUserLanguage ? { user_language: bidUserLanguage, language: bidUserLanguage } : {}),
+      };
+    }
     console.log("[driver:submitBid][details-normalized]", {
       ride_id: rideId,
       driver_id: driverId,
@@ -7229,12 +7450,46 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       driver_details: {
         ...(driverDetails && typeof driverDetails === "object" ? driverDetails : {}),
         ...buildDriverIdentityPayload(driverIdentity, customerFacingDriverId),
+        ...(rideServiceTypeNameEn ? { vehicle_type_name_en: rideServiceTypeNameEn } : {}),
+        ...(rideServiceTypeNameAr ? { vehicle_type_name_ar: rideServiceTypeNameAr } : {}),
+        ...(bidUserLanguage ? { user_language: bidUserLanguage, language: bidUserLanguage } : {}),
       },
       driver_name: driverDetails?.driver_name ?? null,
       driver_image: driverDetails?.driver_image ?? null,
       driver_rating: driverDetails?.rating ?? null,
-      vehicle_type: driverDetails?.vehicle_type ?? null,
-      vehicle_type_name: driverDetails?.vehicle_type_name ?? driverDetails?.vehicle_type ?? null,
+      vehicle_type: bidLocalizedServiceTypeName ?? driverDetails?.vehicle_type ?? null,
+      vehicle_type_name:
+        bidLocalizedServiceTypeName ??
+        driverDetails?.vehicle_type_name ??
+        driverDetails?.vehicle_type ??
+        null,
+      vehicle_type_name_en:
+        rideServiceTypeNameEn ??
+        driverDetails?.vehicle_type_name_en ??
+        bidLocalizedServiceTypeName ??
+        null,
+      vehicle_type_name_ar:
+        rideServiceTypeNameAr ??
+        driverDetails?.vehicle_type_name_ar ??
+        bidLocalizedServiceTypeName ??
+        null,
+      service_type_name:
+        bidLocalizedServiceTypeName ??
+        driverDetails?.vehicle_type_name ??
+        driverDetails?.vehicle_type ??
+        null,
+      service_type_name_en:
+        rideServiceTypeNameEn ??
+        driverDetails?.vehicle_type_name_en ??
+        bidLocalizedServiceTypeName ??
+        null,
+      service_type_name_ar:
+        rideServiceTypeNameAr ??
+        driverDetails?.vehicle_type_name_ar ??
+        bidLocalizedServiceTypeName ??
+        null,
+      user_language: bidUserLanguage ?? null,
+      language: bidUserLanguage ?? null,
       vehicle_company: driverDetails?.vehicle_company ?? null,
       vehicle_manufacturer:
         driverDetails?.vehicle_manufacturer ?? driverDetails?.manufacturer_name ?? null,
@@ -7258,21 +7513,68 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       // ✅ timer fields (SECONDS)
       ...(timer ? timer : {}),
     };
-    io.to(driverRoom(driverId)).emit("ride:newBid", ridePayload);
+
+    const driverDefaultVehicleType = toTrimmedText(
+      pickFirstValue(
+        driverDetails?.vehicle_type_name,
+        driverDetails?.vehicle_type,
+        ridePayload?.vehicle_type_name,
+        ridePayload?.vehicle_type,
+        null
+      )
+    );
+    const driverDefaultVehicleTypeEn = toTrimmedText(
+      pickFirstValue(
+        driverDetails?.vehicle_type_name_en,
+        rideServiceTypeNameEn,
+        null
+      )
+    );
+    const driverDefaultVehicleTypeAr = toTrimmedText(
+      pickFirstValue(
+        driverDetails?.vehicle_type_name_ar,
+        rideServiceTypeNameAr,
+        null
+      )
+    );
+    const driverRoomPayload = {
+      ...ridePayload,
+      ...(driverDefaultVehicleType
+        ? {
+            vehicle_type: driverDefaultVehicleType,
+            vehicle_type_name: driverDefaultVehicleType,
+            service_type_name: driverDefaultVehicleType,
+          }
+        : {}),
+      ...(driverDefaultVehicleTypeEn
+        ? {
+            vehicle_type_name_en: driverDefaultVehicleTypeEn,
+            service_type_name_en: driverDefaultVehicleTypeEn,
+          }
+        : {}),
+      ...(driverDefaultVehicleTypeAr
+        ? {
+            vehicle_type_name_ar: driverDefaultVehicleTypeAr,
+            service_type_name_ar: driverDefaultVehicleTypeAr,
+          }
+        : {}),
+    };
+
+    io.to(driverRoom(driverId)).emit("ride:newBid", driverRoomPayload);
     console.log("[emit][driver][ride:newBid]", {
       ride_id: rideId,
       driver_id: driverId,
       room: driverRoom(driverId),
-      vehicle_company: ridePayload?.vehicle_company ?? null,
-      plat_no: ridePayload?.plat_no ?? null,
-      model_year: ridePayload?.model_year ?? null,
-      model_name: ridePayload?.model_name ?? null,
-      vehicle_color: ridePayload?.vehicle_color ?? null,
-      driver_name: ridePayload?.driver_name ?? null,
-      driver_rating: ridePayload?.driver_rating ?? null,
-      driver_image: ridePayload?.driver_image ?? null,
+      vehicle_company: driverRoomPayload?.vehicle_company ?? null,
+      plat_no: driverRoomPayload?.plat_no ?? null,
+      model_year: driverRoomPayload?.model_year ?? null,
+      model_name: driverRoomPayload?.model_name ?? null,
+      vehicle_color: driverRoomPayload?.vehicle_color ?? null,
+      driver_name: driverRoomPayload?.driver_name ?? null,
+      driver_rating: driverRoomPayload?.driver_rating ?? null,
+      driver_image: driverRoomPayload?.driver_image ?? null,
       additional_remarks:
-        resolveAdditionalRemarks(ridePayload),
+        resolveAdditionalRemarks(driverRoomPayload),
       at: Date.now(),
     });
 
