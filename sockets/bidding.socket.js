@@ -7369,11 +7369,65 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       patch_inboxes: true,
     });
 
-    const ridePayload = {
+    const snapshotUserToken = normalizeToken(
+      pickFirstValue(
+        rideSnapshot?.user_details?.user_token,
+        rideSnapshot?.user_details?.token,
+        rideSnapshot?.token,
+        rideSnapshot?.access_token,
+        null
+      )
+    );
+    const snapshotUserIdForBid = toNumber(
+      pickFirstValue(
+        rideSnapshot?.user_id,
+        rideSnapshot?.user_details?.user_id,
+        getUserIdForRide(rideId)
+      )
+    );
+    const snapshotUserFromStore = snapshotUserIdForBid
+      ? getUserDetails(snapshotUserIdForBid)
+      : null;
+    const snapshotUserFromToken =
+      !snapshotUserFromStore && snapshotUserToken
+        ? getUserDetailsByToken(snapshotUserToken)
+        : null;
+    const snapshotUserSeed = buildUserDetails({
+      ...(rideSnapshot && typeof rideSnapshot === "object" ? rideSnapshot : {}),
+      ...(snapshotUserIdForBid ? { user_id: snapshotUserIdForBid } : {}),
+      ...(snapshotUserToken
+        ? {
+            user_token: snapshotUserToken,
+            token: snapshotUserToken,
+            access_token: snapshotUserToken,
+          }
+        : {}),
+      user_details:
+        (rideSnapshot?.user_details && typeof rideSnapshot.user_details === "object"
+          ? rideSnapshot.user_details
+          : null) ??
+        snapshotUserFromStore ??
+        snapshotUserFromToken ??
+        null,
+    });
+    const bidUserDetails =
+      snapshotUserSeed ?? snapshotUserFromStore ?? snapshotUserFromToken ?? null;
+
+    let ridePayload = {
       ride_id: rideId,
       ...buildDriverIdentityPayload(driverIdentity, customerFacingDriverId),
       offered_price: offeredPrice,
       bidding_time: Date.now(),
+      user_id: bidUserDetails?.user_id ?? snapshotUserIdForBid ?? null,
+      user_name: bidUserDetails?.user_name ?? rideSnapshot?.user_name ?? null,
+      user_gender: bidUserDetails?.user_gender ?? rideSnapshot?.user_gender ?? null,
+      user_image: bidUserDetails?.user_image ?? rideSnapshot?.user_image ?? null,
+      user_profile: bidUserDetails?.user_image ?? rideSnapshot?.user_image ?? null,
+      customer_image: bidUserDetails?.user_image ?? rideSnapshot?.user_image ?? null,
+      user_phone: bidUserDetails?.user_phone ?? rideSnapshot?.user_phone ?? null,
+      user_country_code:
+        bidUserDetails?.user_country_code ?? rideSnapshot?.user_country_code ?? null,
+      user_phone_full: bidUserDetails?.user_phone_full ?? rideSnapshot?.user_phone_full ?? null,
 
       pickup_lat: payload.pickup_lat ?? null,
       pickup_long: payload.pickup_long ?? null,
@@ -7513,6 +7567,27 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       // ✅ timer fields (SECONDS)
       ...(timer ? timer : {}),
     };
+    ridePayload = attachCustomerFields(
+      {
+        ...ridePayload,
+        user_details: bidUserDetails
+          ? {
+              ...bidUserDetails,
+              user_token:
+                bidUserDetails?.user_token ??
+                bidUserDetails?.token ??
+                snapshotUserToken ??
+                null,
+              token:
+                bidUserDetails?.user_token ??
+                bidUserDetails?.token ??
+                snapshotUserToken ??
+                null,
+            }
+          : ridePayload?.user_details ?? null,
+      },
+      bidUserDetails ?? ridePayload?.user_details ?? null
+    );
 
     const driverDefaultVehicleType = toTrimmedText(
       pickFirstValue(
