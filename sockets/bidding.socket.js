@@ -134,6 +134,69 @@ const toRouteMetricNumber = (v) => {
   }
   return null;
 };
+const normalizeCoordForRouteKey = (value) => {
+  const safe = toNumber(value);
+  if (safe === null) return null;
+  return String(safe);
+};
+const buildRouteMetricsCacheKey = (startLat, startLong, endLat, endLong) => {
+  const aLat = normalizeCoordForRouteKey(startLat);
+  const aLong = normalizeCoordForRouteKey(startLong);
+  const bLat = normalizeCoordForRouteKey(endLat);
+  const bLong = normalizeCoordForRouteKey(endLong);
+  if (aLat === null || aLong === null || bLat === null || bLong === null) return null;
+  return `${aLat},${aLong}->${bLat},${bLong}`;
+};
+const getCachedRouteMetrics = (cacheKey) => {
+  if (!cacheKey || ROUTE_API_CACHE_TTL_MS <= 0) return null;
+  const cached = routeMetricsCache.get(cacheKey);
+  if (!cached) return null;
+  if (Date.now() - cached.at > ROUTE_API_CACHE_TTL_MS) {
+    routeMetricsCache.delete(cacheKey);
+    return null;
+  }
+  return cached.value ? { ...cached.value } : null;
+};
+const setCachedRouteMetrics = (cacheKey, value) => {
+  if (!cacheKey || ROUTE_API_CACHE_TTL_MS <= 0 || !value || typeof value !== "object") return;
+  routeMetricsCache.set(cacheKey, {
+    at: Date.now(),
+    value: { ...value },
+  });
+};
+const mapWithConcurrency = async (items = [], concurrency = 4, mapper = async () => null) => {
+  const list = Array.isArray(items) ? items : [];
+  if (list.length === 0) return [];
+  const safeConcurrency = Math.max(1, Math.floor(toNumber(concurrency) ?? 1));
+  const results = new Array(list.length);
+  let index = 0;
+  let active = 0;
+  return new Promise((resolve) => {
+    const launch = () => {
+      if (index >= list.length && active === 0) {
+        resolve(results);
+        return;
+      }
+      while (active < safeConcurrency && index < list.length) {
+        const current = index++;
+        active += 1;
+        Promise.resolve(mapper(list[current], current))
+          .then((result) => {
+            results[current] = result;
+          })
+          .catch((error) => {
+            console.warn("[mapWithConcurrency] worker failed:", error?.message || error);
+            results[current] = null;
+          })
+          .finally(() => {
+            active -= 1;
+            launch();
+          });
+      }
+    };
+    launch();
+  });
+};
 const pickFirstValue = (...values) => {
   for (const v of values) {
     if (v !== undefined && v !== null && v !== "") return v;
@@ -1257,6 +1320,17 @@ const LARAVEL_ACCEPT_BID_TIMEOUT_MS = Number.isFinite(
 )
   ? Number(process.env.LARAVEL_ACCEPT_BID_TIMEOUT_MS)
   : 7000;
+const LARAVEL_ROUTE_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
+  ? Math.max(1000, Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
+  : 10000;
+const ROUTE_API_CACHE_TTL_MS = Number.isFinite(Number(process.env.ROUTE_API_CACHE_TTL_MS))
+  ? Math.max(0, Number(process.env.ROUTE_API_CACHE_TTL_MS))
+  : 15000;
+const ROUTE_API_MAX_CONCURRENCY = Number.isFinite(Number(process.env.ROUTE_API_MAX_CONCURRENCY))
+  ? Math.max(1, Number(process.env.ROUTE_API_MAX_CONCURRENCY))
+  : 4;
+const routeMetricsCache = new Map();
+const routeMetricsInFlight = new Map();
 const DISPATCH_EXPANSION_INTERVAL_S = 5;
 
 const getDriverLocationAgeMs = (driver = null, meta = null) => {
@@ -5461,53 +5535,77 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
     };
   }
 
-  try {
-    const res = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
-      params: {
-        startLongitude: lo1,
-        startLatitude: la1,
-        endLongitude: lo2,
-        endLatitude: la2,
-        requested_at: new Date().toISOString(),
-      },
-      timeout: 10000,
-    });
-
-    const data = res?.data ?? null;
-    const roadDistanceM = extractRoadDistanceMeters(data);
-    const durationMin = toRouteMetricNumber(data?.duration ?? null);
-    const durationS = durationMin !== null ? Math.round(durationMin * 60) : null;
-    const resolvedRoadDistanceM = roadDistanceM ?? airDistanceM;
-    const resolvedDurationS = durationS ?? airDurationS;
-
+  const routeKey = buildRouteMetricsCacheKey(la1, lo1, la2, lo2);
+  const cached = getCachedRouteMetrics(routeKey);
+  if (cached) {
     return {
-      road_distance_m: resolvedRoadDistanceM,
-      road_duration_s: resolvedDurationS,
-      road_duration_min:
-        resolvedDurationS !== null
-          ? round2(resolvedDurationS / 60)
-          : durationMin !== null
-          ? round2(durationMin)
-          : null,
-      raw: data,
-      source: roadDistanceM !== null ? "road-api" : "air-fallback-road-api-empty",
-    };
-  } catch (error) {
-    console.error(
-      "[dispatch][driverToPickupRoadMetrics] failed; using air fallback:",
-      {
-        error: error?.response?.data || error?.message || error,
-        air_distance_m: airDistanceM,
-      }
-    );
-    return {
-      road_distance_m: airDistanceM,
-      road_duration_s: airDurationS,
-      road_duration_min: airDurationS !== null ? round2(airDurationS / 60) : null,
-      raw: null,
-      source: airDistanceM !== null ? "air-fallback-error" : "error",
+      ...cached,
+      source: cached?.source ? `${cached.source}-cache` : "cache",
     };
   }
+
+  if (routeKey && routeMetricsInFlight.has(routeKey)) {
+    return routeMetricsInFlight.get(routeKey);
+  }
+
+  const inFlightPromise = (async () => {
+    try {
+      const res = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
+        params: {
+          startLongitude: lo1,
+          startLatitude: la1,
+          endLongitude: lo2,
+          endLatitude: la2,
+          requested_at: new Date().toISOString(),
+        },
+        timeout: LARAVEL_ROUTE_TIMEOUT_MS,
+      });
+
+      const data = res?.data ?? null;
+      const roadDistanceM = extractRoadDistanceMeters(data);
+      const durationMin = toRouteMetricNumber(data?.duration ?? null);
+      const durationS = durationMin !== null ? Math.round(durationMin * 60) : null;
+      const resolvedRoadDistanceM = roadDistanceM ?? airDistanceM;
+      const resolvedDurationS = durationS ?? airDurationS;
+
+      const result = {
+        road_distance_m: resolvedRoadDistanceM,
+        road_duration_s: resolvedDurationS,
+        road_duration_min:
+          resolvedDurationS !== null
+            ? round2(resolvedDurationS / 60)
+            : durationMin !== null
+            ? round2(durationMin)
+            : null,
+        raw: data,
+        source: roadDistanceM !== null ? "road-api" : "air-fallback-road-api-empty",
+      };
+      setCachedRouteMetrics(routeKey, result);
+      return result;
+    } catch (error) {
+      console.error(
+        "[dispatch][driverToPickupRoadMetrics] failed; using air fallback:",
+        {
+          error: error?.response?.data || error?.message || error,
+          air_distance_m: airDistanceM,
+        }
+      );
+      const fallback = {
+        road_distance_m: airDistanceM,
+        road_duration_s: airDurationS,
+        road_duration_min: airDurationS !== null ? round2(airDurationS / 60) : null,
+        raw: null,
+        source: airDistanceM !== null ? "air-fallback-error" : "error",
+      };
+      setCachedRouteMetrics(routeKey, fallback);
+      return fallback;
+    } finally {
+      if (routeKey) routeMetricsInFlight.delete(routeKey);
+    }
+  })();
+
+  if (routeKey) routeMetricsInFlight.set(routeKey, inFlightPromise);
+  return inFlightPromise;
 }
 
 async function filterDriversByRoadRadius(drivers, pickupLat, pickupLong, roadRadiusM) {
@@ -5517,8 +5615,7 @@ async function filterDriversByRoadRadius(drivers, pickupLat, pickupLong, roadRad
       : drivers
     : [];
 
-  const results = await Promise.all(
-    list.map(async (d) => {
+  const results = await mapWithConcurrency(list, ROUTE_API_MAX_CONCURRENCY, async (d) => {
       const driverId = toNumber(d?.driver_id);
       const driverLat = toNumber(d?.lat);
       const driverLong = toNumber(d?.long);
@@ -5541,8 +5638,7 @@ async function filterDriversByRoadRadius(drivers, pickupLat, pickupLong, roadRad
         driver_to_pickup_duration_s: metrics.road_duration_s,
         driver_to_pickup_duration_min: metrics.road_duration_min,
       };
-    })
-  );
+    });
 
   return results.filter(Boolean);
 }
