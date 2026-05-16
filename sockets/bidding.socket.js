@@ -105,6 +105,21 @@ const pickLocalizedText = (language, englishText, arabicText, fallbackText = nul
   if (lang === "ar") return ar ?? en ?? fallback;
   return en ?? ar ?? fallback;
 };
+const resolveLocalizedFieldVariants = (
+  language,
+  englishText = null,
+  arabicText = null,
+  fallbackText = null
+) => {
+  const en = toTrimmedText(englishText);
+  const ar = toTrimmedText(arabicText);
+  const fallback = toTrimmedText(fallbackText);
+  return {
+    localized: pickLocalizedText(language, en, ar, fallback),
+    en: en ?? ar ?? fallback ?? null,
+    ar: ar ?? en ?? fallback ?? null,
+  };
+};
 const normalizeToken = (value) => {
   if (value === null || value === undefined) return null;
   const token = String(value).trim();
@@ -436,36 +451,183 @@ const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
   const vehicleCompany = toTrimmedText(
     pickFirstValue(
       src.vehicle_company,
+      src.vehicle_manufacture_name,
       src.company,
       src.brand,
       src.make,
       src.manufacturer_name,
+      src.vehicle_company_en,
+      src.vehicle_company_ar,
+      src.vehicle_manufacture_name_en,
+      src.vehicle_manufacture_name_ar,
+      src.manufacturer_name_en,
+      src.manufacturer_name_ar,
       meta.vehicle_company,
+      meta.vehicle_manufacture_name,
       meta.company,
       meta.brand,
       meta.make,
-      meta.manufacturer_name
+      meta.manufacturer_name,
+      meta.vehicle_company_en,
+      meta.vehicle_company_ar,
+      meta.vehicle_manufacture_name_en,
+      meta.vehicle_manufacture_name_ar,
+      meta.manufacturer_name_en,
+      meta.manufacturer_name_ar
+    )
+  );
+  const vehicleCompanyEn = toTrimmedText(
+    pickFirstValue(
+      src.vehicle_company_en,
+      src.vehicle_manufacture_name_en,
+      src.manufacturer_name_en,
+      meta.vehicle_company_en,
+      meta.vehicle_manufacture_name_en,
+      meta.manufacturer_name_en
+    )
+  );
+  const vehicleCompanyAr = toTrimmedText(
+    pickFirstValue(
+      src.vehicle_company_ar,
+      src.vehicle_manufacture_name_ar,
+      src.manufacturer_name_ar,
+      meta.vehicle_company_ar,
+      meta.vehicle_manufacture_name_ar,
+      meta.manufacturer_name_ar
     )
   );
   const modelName = toTrimmedText(
-    pickFirstValue(src.model_name, src.model, src.vehicle_model, meta.model_name, meta.model, meta.vehicle_model)
+    pickFirstValue(
+      src.model_name,
+      src.model,
+      src.vehicle_model,
+      src.vehicle_model_name,
+      src.model_name_en,
+      src.model_name_ar,
+      src.vehicle_model_name_en,
+      src.vehicle_model_name_ar,
+      meta.model_name,
+      meta.model,
+      meta.vehicle_model,
+      meta.vehicle_model_name,
+      meta.model_name_en,
+      meta.model_name_ar,
+      meta.vehicle_model_name_en,
+      meta.vehicle_model_name_ar
+    )
+  );
+  const modelNameEn = toTrimmedText(
+    pickFirstValue(
+      src.model_name_en,
+      src.vehicle_model_name_en,
+      meta.model_name_en,
+      meta.vehicle_model_name_en
+    )
+  );
+  const modelNameAr = toTrimmedText(
+    pickFirstValue(
+      src.model_name_ar,
+      src.vehicle_model_name_ar,
+      meta.model_name_ar,
+      meta.vehicle_model_name_ar
+    )
   );
   const vehicleColor = toTrimmedText(
-    pickFirstValue(src.vehicle_color, src.color, meta.vehicle_color, meta.color)
+    pickFirstValue(
+      src.vehicle_color,
+      src.color,
+      src.vehicle_color_en,
+      src.vehicle_color_ar,
+      src.color_en,
+      src.color_ar,
+      meta.vehicle_color,
+      meta.color,
+      meta.vehicle_color_en,
+      meta.vehicle_color_ar,
+      meta.color_en,
+      meta.color_ar
+    )
+  );
+  const vehicleColorEn = toTrimmedText(
+    pickFirstValue(src.vehicle_color_en, src.color_en, meta.vehicle_color_en, meta.color_en)
+  );
+  const vehicleColorAr = toTrimmedText(
+    pickFirstValue(src.vehicle_color_ar, src.color_ar, meta.vehicle_color_ar, meta.color_ar)
   );
   const vehicleManufacturer = toTrimmedText(
     pickFirstValue(
       src.vehicle_manufacturer,
       src.manufacturer,
       src.manufacturer_name,
+      src.vehicle_manufacture_name,
+      src.vehicle_manufacturer_en,
+      src.vehicle_manufacturer_ar,
+      src.manufacturer_name_en,
+      src.manufacturer_name_ar,
+      src.vehicle_manufacture_name_en,
+      src.vehicle_manufacture_name_ar,
       src.make,
       src.brand,
       meta.vehicle_manufacturer,
       meta.manufacturer,
       meta.manufacturer_name,
+      meta.vehicle_manufacture_name,
+      meta.vehicle_manufacturer_en,
+      meta.vehicle_manufacturer_ar,
+      meta.manufacturer_name_en,
+      meta.manufacturer_name_ar,
+      meta.vehicle_manufacture_name_en,
+      meta.vehicle_manufacture_name_ar,
       meta.make,
       meta.brand
     )
+  );
+  const vehicleManufacturerEn = toTrimmedText(
+    pickFirstValue(
+      src.vehicle_manufacturer_en,
+      src.manufacturer_name_en,
+      src.vehicle_manufacture_name_en,
+      meta.vehicle_manufacturer_en,
+      meta.manufacturer_name_en,
+      meta.vehicle_manufacture_name_en
+    )
+  );
+  const vehicleManufacturerAr = toTrimmedText(
+    pickFirstValue(
+      src.vehicle_manufacturer_ar,
+      src.manufacturer_name_ar,
+      src.vehicle_manufacture_name_ar,
+      meta.vehicle_manufacturer_ar,
+      meta.manufacturer_name_ar,
+      meta.vehicle_manufacture_name_ar
+    )
+  );
+  const resolvedLanguage = normalizeLanguageCode(
+    pickFirstValue(src.user_language, src.language, meta.user_language, meta.language)
+  );
+  const localizedVehicleCompany = pickLocalizedText(
+    resolvedLanguage,
+    vehicleCompanyEn,
+    vehicleCompanyAr,
+    vehicleCompany
+  );
+  const localizedModelName = pickLocalizedText(
+    resolvedLanguage,
+    modelNameEn,
+    modelNameAr,
+    modelName
+  );
+  const localizedVehicleColor = pickLocalizedText(
+    resolvedLanguage,
+    vehicleColorEn,
+    vehicleColorAr,
+    vehicleColor
+  );
+  const localizedVehicleManufacturer = pickLocalizedText(
+    resolvedLanguage,
+    vehicleManufacturerEn,
+    vehicleManufacturerAr,
+    vehicleManufacturer ?? localizedVehicleCompany
   );
 
   const modelYearRaw = pickFirstValue(
@@ -508,11 +670,21 @@ const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
     driver_name: driverName,
     vehicle_type: vehicleType,
     vehicle_number: vehicleNumber,
-    vehicle_company: vehicleCompany,
-    model_name: modelName,
+    vehicle_company: localizedVehicleCompany ?? vehicleCompany,
+    vehicle_company_en: vehicleCompanyEn ?? vehicleCompany ?? null,
+    vehicle_company_ar: vehicleCompanyAr ?? vehicleCompany ?? null,
+    model_name: localizedModelName ?? modelName,
+    model_name_en: modelNameEn ?? modelName ?? null,
+    model_name_ar: modelNameAr ?? modelName ?? null,
     model_year: modelYear,
-    vehicle_color: vehicleColor,
-    vehicle_manufacturer: vehicleManufacturer,
+    vehicle_color: localizedVehicleColor ?? vehicleColor,
+    vehicle_color_en: vehicleColorEn ?? vehicleColor ?? null,
+    vehicle_color_ar: vehicleColorAr ?? vehicleColor ?? null,
+    vehicle_manufacturer: localizedVehicleManufacturer ?? vehicleManufacturer,
+    vehicle_manufacturer_en:
+      vehicleManufacturerEn ?? vehicleCompanyEn ?? vehicleManufacturer ?? null,
+    vehicle_manufacturer_ar:
+      vehicleManufacturerAr ?? vehicleCompanyAr ?? vehicleManufacturer ?? null,
     rating,
     driver_image: driverImage,
 
@@ -520,8 +692,20 @@ const normalizeDriverDetailsPayload = (details = null, fallbackMeta = null) => {
     vehicle_type_name: vehicleType,
     plat_no: vehicleNumber,
     plate_no: vehicleNumber,
-    manufacturer_name: vehicleManufacturer,
-    vehicle_make: vehicleCompany,
+    manufacturer_name: localizedVehicleManufacturer ?? vehicleManufacturer,
+    manufacturer_name_en:
+      vehicleManufacturerEn ?? vehicleCompanyEn ?? vehicleManufacturer ?? null,
+    manufacturer_name_ar:
+      vehicleManufacturerAr ?? vehicleCompanyAr ?? vehicleManufacturer ?? null,
+    vehicle_manufacture_name: localizedVehicleManufacturer ?? vehicleManufacturer,
+    vehicle_manufacture_name_en:
+      vehicleManufacturerEn ?? vehicleCompanyEn ?? vehicleManufacturer ?? null,
+    vehicle_manufacture_name_ar:
+      vehicleManufacturerAr ?? vehicleCompanyAr ?? vehicleManufacturer ?? null,
+    vehicle_model_name: localizedModelName ?? modelName,
+    vehicle_model_name_en: modelNameEn ?? modelName ?? null,
+    vehicle_model_name_ar: modelNameAr ?? modelName ?? null,
+    vehicle_make: localizedVehicleCompany ?? vehicleCompany,
   };
 };
 const resolveDriverIdFromPayload = (payload = {}, explicitDriverId = null) => {
@@ -2190,10 +2374,18 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
     const vehicleType = normalizedDetails.vehicle_type;
     const vehicleNumber = normalizedDetails.vehicle_number;
     const vehicleCompany = normalizedDetails.vehicle_company;
+    const vehicleCompanyEn = normalizedDetails.vehicle_company_en;
+    const vehicleCompanyAr = normalizedDetails.vehicle_company_ar;
     const modelName = normalizedDetails.model_name;
+    const modelNameEn = normalizedDetails.model_name_en;
+    const modelNameAr = normalizedDetails.model_name_ar;
     const modelYear = normalizedDetails.model_year;
     const vehicleColor = normalizedDetails.vehicle_color;
+    const vehicleColorEn = normalizedDetails.vehicle_color_en;
+    const vehicleColorAr = normalizedDetails.vehicle_color_ar;
     const vehicleManufacturer = normalizedDetails.vehicle_manufacturer;
+    const vehicleManufacturerEn = normalizedDetails.vehicle_manufacturer_en;
+    const vehicleManufacturerAr = normalizedDetails.vehicle_manufacturer_ar;
     const rating = normalizedDetails.rating;
     const driverImage = normalizedDetails.driver_image;
     const childSeatFromApi = toBinaryFlag(
@@ -2216,10 +2408,27 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
       ...(vehicleType ? { vehicle_type_name: vehicleType } : {}),
       ...(vehicleNumber ? { plat_no: vehicleNumber } : {}),
       ...(vehicleCompany ? { vehicle_company: vehicleCompany } : {}),
+      ...(vehicleCompanyEn ? { vehicle_company_en: vehicleCompanyEn } : {}),
+      ...(vehicleCompanyAr ? { vehicle_company_ar: vehicleCompanyAr } : {}),
+      ...(vehicleCompany ? { vehicle_manufacture_name: vehicleCompany } : {}),
+      ...(vehicleCompanyEn ? { vehicle_manufacture_name_en: vehicleCompanyEn } : {}),
+      ...(vehicleCompanyAr ? { vehicle_manufacture_name_ar: vehicleCompanyAr } : {}),
       ...(modelName ? { model_name: modelName } : {}),
+      ...(modelNameEn ? { model_name_en: modelNameEn } : {}),
+      ...(modelNameAr ? { model_name_ar: modelNameAr } : {}),
+      ...(modelName ? { vehicle_model_name: modelName } : {}),
+      ...(modelNameEn ? { vehicle_model_name_en: modelNameEn } : {}),
+      ...(modelNameAr ? { vehicle_model_name_ar: modelNameAr } : {}),
       ...(modelYear !== null && modelYear !== undefined ? { model_year: modelYear } : {}),
       ...(vehicleColor ? { vehicle_color: vehicleColor } : {}),
+      ...(vehicleColorEn ? { vehicle_color_en: vehicleColorEn } : {}),
+      ...(vehicleColorAr ? { vehicle_color_ar: vehicleColorAr } : {}),
       ...(vehicleManufacturer ? { vehicle_manufacturer: vehicleManufacturer } : {}),
+      ...(vehicleManufacturerEn ? { vehicle_manufacturer_en: vehicleManufacturerEn } : {}),
+      ...(vehicleManufacturerAr ? { vehicle_manufacturer_ar: vehicleManufacturerAr } : {}),
+      ...(vehicleManufacturer ? { manufacturer_name: vehicleManufacturer } : {}),
+      ...(vehicleManufacturerEn ? { manufacturer_name_en: vehicleManufacturerEn } : {}),
+      ...(vehicleManufacturerAr ? { manufacturer_name_ar: vehicleManufacturerAr } : {}),
       ...(rating != null ? { rating } : {}),
       ...(driverImage ? { driver_image: driverImage } : {}),
       ...(childSeatFromApi === 0 || childSeatFromApi === 1
@@ -2245,10 +2454,27 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
       vehicle_type: vehicleType,
       vehicle_number: vehicleNumber,
       vehicle_company: vehicleCompany,
+      vehicle_company_en: vehicleCompanyEn,
+      vehicle_company_ar: vehicleCompanyAr,
+      vehicle_manufacture_name: vehicleCompany,
+      vehicle_manufacture_name_en: vehicleCompanyEn,
+      vehicle_manufacture_name_ar: vehicleCompanyAr,
       model_name: modelName,
+      model_name_en: modelNameEn,
+      model_name_ar: modelNameAr,
+      vehicle_model_name: modelName,
+      vehicle_model_name_en: modelNameEn,
+      vehicle_model_name_ar: modelNameAr,
       model_year: modelYear,
       vehicle_color: vehicleColor,
+      vehicle_color_en: vehicleColorEn,
+      vehicle_color_ar: vehicleColorAr,
       vehicle_manufacturer: vehicleManufacturer,
+      vehicle_manufacturer_en: vehicleManufacturerEn,
+      vehicle_manufacturer_ar: vehicleManufacturerAr,
+      manufacturer_name: vehicleManufacturer,
+      manufacturer_name_en: vehicleManufacturerEn,
+      manufacturer_name_ar: vehicleManufacturerAr,
       rating,
       driver_image: driverImage,
       child_seat: childSeatFromApi,
@@ -2656,17 +2882,55 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
   }
 
   if (safeCustomer) {
+    const resolvedUserId = toNumber(sanitized.user_id) ?? safeCustomer.user_id ?? null;
+    const resolvedUserName = toTrimmedText(sanitized.user_name) ?? safeCustomer.user_name ?? null;
+    const resolvedUserGenderRaw = sanitized.user_gender ?? safeCustomer.user_gender ?? null;
+    const resolvedUserGender =
+      resolvedUserGenderRaw === "" || resolvedUserGenderRaw == null
+        ? null
+        : Number.isFinite(Number(resolvedUserGenderRaw))
+        ? Number(resolvedUserGenderRaw)
+        : resolvedUserGenderRaw;
+    const resolvedUserCountryCode =
+      toTrimmedText(sanitized.user_country_code) ?? safeCustomer.user_country_code ?? null;
+    const resolvedUserPhone = toTrimmedText(sanitized.user_phone) ?? safeCustomer.user_phone ?? null;
+    const resolvedUserPhoneFull =
+      toTrimmedText(sanitized.user_phone_full) ??
+      safeCustomer.user_phone_full ??
+      (resolvedUserCountryCode && resolvedUserPhone
+        ? `${resolvedUserCountryCode}${resolvedUserPhone}`
+        : null);
+    const resolvedUserImage = normalizeCustomerImageUrl(
+      toTrimmedText(sanitized.user_image) ?? safeCustomer.user_image ?? null
+    );
+
+    sanitized.user_id = resolvedUserId;
+    sanitized.user_name = resolvedUserName;
+    sanitized.user_gender = resolvedUserGender;
+    sanitized.user_country_code = resolvedUserCountryCode;
+    sanitized.user_phone = resolvedUserPhone;
+    sanitized.user_phone_full = resolvedUserPhoneFull;
+    sanitized.user_image = resolvedUserImage;
+    sanitized.user_profile = resolvedUserImage;
     sanitized.user_details = safeCustomer;
     sanitized.customer = safeCustomer;
     sanitized.customer_details = safeCustomer;
-    sanitized.customer_id = safeCustomer.user_id ?? null;
-    sanitized.customer_name = safeCustomer.user_name ?? null;
-    sanitized.customer_gender = safeCustomer.user_gender ?? null;
-    sanitized.customer_country_code = safeCustomer.user_country_code ?? null;
-    sanitized.customer_phone = safeCustomer.user_phone ?? null;
-    sanitized.customer_phone_full = safeCustomer.user_phone_full ?? null;
-    sanitized.customer_image = safeCustomer.user_image ?? null;
+    sanitized.customer_id = resolvedUserId;
+    sanitized.customer_name = resolvedUserName;
+    sanitized.customer_gender = resolvedUserGender;
+    sanitized.customer_country_code = resolvedUserCountryCode;
+    sanitized.customer_phone = resolvedUserPhone;
+    sanitized.customer_phone_full = resolvedUserPhoneFull;
+    sanitized.customer_image = resolvedUserImage;
   } else {
+    sanitized.user_id = null;
+    sanitized.user_name = null;
+    sanitized.user_gender = null;
+    sanitized.user_country_code = null;
+    sanitized.user_phone = null;
+    sanitized.user_phone_full = null;
+    sanitized.user_image = null;
+    sanitized.user_profile = null;
     sanitized.user_details = null;
     sanitized.customer = null;
     sanitized.customer_details = null;
@@ -7412,6 +7676,114 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
     });
     const bidUserDetails =
       snapshotUserSeed ?? snapshotUserFromStore ?? snapshotUserFromToken ?? null;
+    const bidVehicleCompany = resolveLocalizedFieldVariants(
+      bidUserLanguage,
+      pickFirstValue(
+        driverDetails?.vehicle_company_en,
+        driverDetails?.vehicle_manufacture_name_en,
+        rideSnapshot?.vehicle_company_en,
+        rideSnapshot?.vehicle_manufacture_name_en,
+        rideSnapshot?.ride_details?.vehicle_company_en,
+        rideSnapshot?.ride_details?.vehicle_manufacture_name_en,
+        rideSnapshot?.meta?.vehicle_company_en,
+        rideSnapshot?.meta?.vehicle_manufacture_name_en
+      ),
+      pickFirstValue(
+        driverDetails?.vehicle_company_ar,
+        driverDetails?.vehicle_manufacture_name_ar,
+        rideSnapshot?.vehicle_company_ar,
+        rideSnapshot?.vehicle_manufacture_name_ar,
+        rideSnapshot?.ride_details?.vehicle_company_ar,
+        rideSnapshot?.ride_details?.vehicle_manufacture_name_ar,
+        rideSnapshot?.meta?.vehicle_company_ar,
+        rideSnapshot?.meta?.vehicle_manufacture_name_ar
+      ),
+      pickFirstValue(
+        driverDetails?.vehicle_company,
+        driverDetails?.vehicle_manufacture_name,
+        rideSnapshot?.vehicle_company,
+        rideSnapshot?.vehicle_manufacture_name,
+        rideSnapshot?.ride_details?.vehicle_company,
+        rideSnapshot?.ride_details?.vehicle_manufacture_name,
+        rideSnapshot?.meta?.vehicle_company,
+        rideSnapshot?.meta?.vehicle_manufacture_name
+      )
+    );
+    const bidModelName = resolveLocalizedFieldVariants(
+      bidUserLanguage,
+      pickFirstValue(
+        driverDetails?.model_name_en,
+        driverDetails?.vehicle_model_name_en,
+        rideSnapshot?.model_name_en,
+        rideSnapshot?.vehicle_model_name_en,
+        rideSnapshot?.ride_details?.model_name_en,
+        rideSnapshot?.ride_details?.vehicle_model_name_en,
+        rideSnapshot?.meta?.model_name_en,
+        rideSnapshot?.meta?.vehicle_model_name_en
+      ),
+      pickFirstValue(
+        driverDetails?.model_name_ar,
+        driverDetails?.vehicle_model_name_ar,
+        rideSnapshot?.model_name_ar,
+        rideSnapshot?.vehicle_model_name_ar,
+        rideSnapshot?.ride_details?.model_name_ar,
+        rideSnapshot?.ride_details?.vehicle_model_name_ar,
+        rideSnapshot?.meta?.model_name_ar,
+        rideSnapshot?.meta?.vehicle_model_name_ar
+      ),
+      pickFirstValue(
+        driverDetails?.model_name,
+        driverDetails?.vehicle_model_name,
+        rideSnapshot?.model_name,
+        rideSnapshot?.vehicle_model_name,
+        rideSnapshot?.ride_details?.model_name,
+        rideSnapshot?.ride_details?.vehicle_model_name,
+        rideSnapshot?.meta?.model_name,
+        rideSnapshot?.meta?.vehicle_model_name
+      )
+    );
+    const bidVehicleColor = resolveLocalizedFieldVariants(
+      bidUserLanguage,
+      pickFirstValue(
+        driverDetails?.vehicle_color_en,
+        rideSnapshot?.vehicle_color_en,
+        rideSnapshot?.ride_details?.vehicle_color_en,
+        rideSnapshot?.meta?.vehicle_color_en
+      ),
+      pickFirstValue(
+        driverDetails?.vehicle_color_ar,
+        rideSnapshot?.vehicle_color_ar,
+        rideSnapshot?.ride_details?.vehicle_color_ar,
+        rideSnapshot?.meta?.vehicle_color_ar
+      ),
+      pickFirstValue(
+        driverDetails?.vehicle_color,
+        rideSnapshot?.vehicle_color,
+        rideSnapshot?.ride_details?.vehicle_color,
+        rideSnapshot?.meta?.vehicle_color
+      )
+    );
+    const bidVehicleManufacturer = resolveLocalizedFieldVariants(
+      bidUserLanguage,
+      pickFirstValue(
+        driverDetails?.vehicle_manufacturer_en,
+        driverDetails?.manufacturer_name_en,
+        driverDetails?.vehicle_manufacture_name_en,
+        bidVehicleCompany.en
+      ),
+      pickFirstValue(
+        driverDetails?.vehicle_manufacturer_ar,
+        driverDetails?.manufacturer_name_ar,
+        driverDetails?.vehicle_manufacture_name_ar,
+        bidVehicleCompany.ar
+      ),
+      pickFirstValue(
+        driverDetails?.vehicle_manufacturer,
+        driverDetails?.manufacturer_name,
+        driverDetails?.vehicle_manufacture_name,
+        bidVehicleCompany.localized
+      )
+    );
 
     let ridePayload = {
       ride_id: rideId,
@@ -7499,6 +7871,57 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
         ...(apiEtaMin !== null
           ? { driver_to_pickup_api_duration_min: apiEtaMin }
           : {}),
+        ...(bidVehicleCompany.localized
+          ? {
+              vehicle_company: bidVehicleCompany.localized,
+              vehicle_manufacture_name: bidVehicleCompany.localized,
+            }
+          : {}),
+        ...(bidVehicleCompany.en
+          ? {
+              vehicle_company_en: bidVehicleCompany.en,
+              vehicle_manufacture_name_en: bidVehicleCompany.en,
+            }
+          : {}),
+        ...(bidVehicleCompany.ar
+          ? {
+              vehicle_company_ar: bidVehicleCompany.ar,
+              vehicle_manufacture_name_ar: bidVehicleCompany.ar,
+            }
+          : {}),
+        ...(bidModelName.localized
+          ? {
+              model_name: bidModelName.localized,
+              vehicle_model_name: bidModelName.localized,
+            }
+          : {}),
+        ...(bidModelName.en
+          ? { model_name_en: bidModelName.en, vehicle_model_name_en: bidModelName.en }
+          : {}),
+        ...(bidModelName.ar
+          ? { model_name_ar: bidModelName.ar, vehicle_model_name_ar: bidModelName.ar }
+          : {}),
+        ...(bidVehicleColor.localized ? { vehicle_color: bidVehicleColor.localized } : {}),
+        ...(bidVehicleColor.en ? { vehicle_color_en: bidVehicleColor.en } : {}),
+        ...(bidVehicleColor.ar ? { vehicle_color_ar: bidVehicleColor.ar } : {}),
+        ...(bidVehicleManufacturer.localized
+          ? {
+              vehicle_manufacturer: bidVehicleManufacturer.localized,
+              manufacturer_name: bidVehicleManufacturer.localized,
+            }
+          : {}),
+        ...(bidVehicleManufacturer.en
+          ? {
+              vehicle_manufacturer_en: bidVehicleManufacturer.en,
+              manufacturer_name_en: bidVehicleManufacturer.en,
+            }
+          : {}),
+        ...(bidVehicleManufacturer.ar
+          ? {
+              vehicle_manufacturer_ar: bidVehicleManufacturer.ar,
+              manufacturer_name_ar: bidVehicleManufacturer.ar,
+            }
+          : {}),
       },
 
       driver_details: {
@@ -7506,6 +7929,57 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
         ...buildDriverIdentityPayload(driverIdentity, customerFacingDriverId),
         ...(rideServiceTypeNameEn ? { vehicle_type_name_en: rideServiceTypeNameEn } : {}),
         ...(rideServiceTypeNameAr ? { vehicle_type_name_ar: rideServiceTypeNameAr } : {}),
+        ...(bidVehicleCompany.localized
+          ? {
+              vehicle_company: bidVehicleCompany.localized,
+              vehicle_manufacture_name: bidVehicleCompany.localized,
+            }
+          : {}),
+        ...(bidVehicleCompany.en
+          ? {
+              vehicle_company_en: bidVehicleCompany.en,
+              vehicle_manufacture_name_en: bidVehicleCompany.en,
+            }
+          : {}),
+        ...(bidVehicleCompany.ar
+          ? {
+              vehicle_company_ar: bidVehicleCompany.ar,
+              vehicle_manufacture_name_ar: bidVehicleCompany.ar,
+            }
+          : {}),
+        ...(bidModelName.localized
+          ? {
+              model_name: bidModelName.localized,
+              vehicle_model_name: bidModelName.localized,
+            }
+          : {}),
+        ...(bidModelName.en
+          ? { model_name_en: bidModelName.en, vehicle_model_name_en: bidModelName.en }
+          : {}),
+        ...(bidModelName.ar
+          ? { model_name_ar: bidModelName.ar, vehicle_model_name_ar: bidModelName.ar }
+          : {}),
+        ...(bidVehicleColor.localized ? { vehicle_color: bidVehicleColor.localized } : {}),
+        ...(bidVehicleColor.en ? { vehicle_color_en: bidVehicleColor.en } : {}),
+        ...(bidVehicleColor.ar ? { vehicle_color_ar: bidVehicleColor.ar } : {}),
+        ...(bidVehicleManufacturer.localized
+          ? {
+              vehicle_manufacturer: bidVehicleManufacturer.localized,
+              manufacturer_name: bidVehicleManufacturer.localized,
+            }
+          : {}),
+        ...(bidVehicleManufacturer.en
+          ? {
+              vehicle_manufacturer_en: bidVehicleManufacturer.en,
+              manufacturer_name_en: bidVehicleManufacturer.en,
+            }
+          : {}),
+        ...(bidVehicleManufacturer.ar
+          ? {
+              vehicle_manufacturer_ar: bidVehicleManufacturer.ar,
+              manufacturer_name_ar: bidVehicleManufacturer.ar,
+            }
+          : {}),
         ...(bidUserLanguage ? { user_language: bidUserLanguage, language: bidUserLanguage } : {}),
       },
       driver_name: driverDetails?.driver_name ?? null,
@@ -7544,12 +8018,28 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
         null,
       user_language: bidUserLanguage ?? null,
       language: bidUserLanguage ?? null,
-      vehicle_company: driverDetails?.vehicle_company ?? null,
-      vehicle_manufacturer:
-        driverDetails?.vehicle_manufacturer ?? driverDetails?.manufacturer_name ?? null,
-      model_name: driverDetails?.model_name ?? null,
+      vehicle_company: bidVehicleCompany.localized,
+      vehicle_company_en: bidVehicleCompany.en,
+      vehicle_company_ar: bidVehicleCompany.ar,
+      vehicle_manufacture_name: bidVehicleCompany.localized,
+      vehicle_manufacture_name_en: bidVehicleCompany.en,
+      vehicle_manufacture_name_ar: bidVehicleCompany.ar,
+      vehicle_manufacturer: bidVehicleManufacturer.localized,
+      vehicle_manufacturer_en: bidVehicleManufacturer.en,
+      vehicle_manufacturer_ar: bidVehicleManufacturer.ar,
+      manufacturer_name: bidVehicleManufacturer.localized,
+      manufacturer_name_en: bidVehicleManufacturer.en,
+      manufacturer_name_ar: bidVehicleManufacturer.ar,
+      model_name: bidModelName.localized,
+      model_name_en: bidModelName.en,
+      model_name_ar: bidModelName.ar,
+      vehicle_model_name: bidModelName.localized,
+      vehicle_model_name_en: bidModelName.en,
+      vehicle_model_name_ar: bidModelName.ar,
       model_year: driverDetails?.model_year ?? null,
-      vehicle_color: driverDetails?.vehicle_color ?? null,
+      vehicle_color: bidVehicleColor.localized,
+      vehicle_color_en: bidVehicleColor.en,
+      vehicle_color_ar: bidVehicleColor.ar,
       vehicle_number: driverDetails?.vehicle_number ?? null,
       plat_no: driverDetails?.plat_no ?? driverDetails?.vehicle_number ?? null,
       address_list: payload.address_list ?? [],
@@ -7612,6 +8102,69 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
         null
       )
     );
+    const driverDefaultVehicleCompany = toTrimmedText(
+      pickFirstValue(
+        driverDetails?.vehicle_company,
+        driverDetails?.vehicle_manufacture_name,
+        ridePayload?.vehicle_company,
+        ridePayload?.vehicle_manufacture_name,
+        null
+      )
+    );
+    const driverDefaultVehicleCompanyEn = toTrimmedText(
+      pickFirstValue(
+        driverDetails?.vehicle_company_en,
+        driverDetails?.vehicle_manufacture_name_en,
+        ridePayload?.vehicle_company_en,
+        ridePayload?.vehicle_manufacture_name_en,
+        null
+      )
+    );
+    const driverDefaultVehicleCompanyAr = toTrimmedText(
+      pickFirstValue(
+        driverDetails?.vehicle_company_ar,
+        driverDetails?.vehicle_manufacture_name_ar,
+        ridePayload?.vehicle_company_ar,
+        ridePayload?.vehicle_manufacture_name_ar,
+        null
+      )
+    );
+    const driverDefaultModelName = toTrimmedText(
+      pickFirstValue(
+        driverDetails?.model_name,
+        driverDetails?.vehicle_model_name,
+        ridePayload?.model_name,
+        ridePayload?.vehicle_model_name,
+        null
+      )
+    );
+    const driverDefaultModelNameEn = toTrimmedText(
+      pickFirstValue(
+        driverDetails?.model_name_en,
+        driverDetails?.vehicle_model_name_en,
+        ridePayload?.model_name_en,
+        ridePayload?.vehicle_model_name_en,
+        null
+      )
+    );
+    const driverDefaultModelNameAr = toTrimmedText(
+      pickFirstValue(
+        driverDetails?.model_name_ar,
+        driverDetails?.vehicle_model_name_ar,
+        ridePayload?.model_name_ar,
+        ridePayload?.vehicle_model_name_ar,
+        null
+      )
+    );
+    const driverDefaultVehicleColor = toTrimmedText(
+      pickFirstValue(driverDetails?.vehicle_color, ridePayload?.vehicle_color, null)
+    );
+    const driverDefaultVehicleColorEn = toTrimmedText(
+      pickFirstValue(driverDetails?.vehicle_color_en, ridePayload?.vehicle_color_en, null)
+    );
+    const driverDefaultVehicleColorAr = toTrimmedText(
+      pickFirstValue(driverDetails?.vehicle_color_ar, ridePayload?.vehicle_color_ar, null)
+    );
     const driverRoomPayload = {
       ...ridePayload,
       ...(driverDefaultVehicleType
@@ -7632,6 +8185,49 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
             vehicle_type_name_ar: driverDefaultVehicleTypeAr,
             service_type_name_ar: driverDefaultVehicleTypeAr,
           }
+        : {}),
+      ...(driverDefaultVehicleCompany
+        ? {
+            vehicle_company: driverDefaultVehicleCompany,
+            vehicle_manufacture_name: driverDefaultVehicleCompany,
+          }
+        : {}),
+      ...(driverDefaultVehicleCompanyEn
+        ? {
+            vehicle_company_en: driverDefaultVehicleCompanyEn,
+            vehicle_manufacture_name_en: driverDefaultVehicleCompanyEn,
+          }
+        : {}),
+      ...(driverDefaultVehicleCompanyAr
+        ? {
+            vehicle_company_ar: driverDefaultVehicleCompanyAr,
+            vehicle_manufacture_name_ar: driverDefaultVehicleCompanyAr,
+          }
+        : {}),
+      ...(driverDefaultModelName
+        ? {
+            model_name: driverDefaultModelName,
+            vehicle_model_name: driverDefaultModelName,
+          }
+        : {}),
+      ...(driverDefaultModelNameEn
+        ? {
+            model_name_en: driverDefaultModelNameEn,
+            vehicle_model_name_en: driverDefaultModelNameEn,
+          }
+        : {}),
+      ...(driverDefaultModelNameAr
+        ? {
+            model_name_ar: driverDefaultModelNameAr,
+            vehicle_model_name_ar: driverDefaultModelNameAr,
+          }
+        : {}),
+      ...(driverDefaultVehicleColor ? { vehicle_color: driverDefaultVehicleColor } : {}),
+      ...(driverDefaultVehicleColorEn
+        ? { vehicle_color_en: driverDefaultVehicleColorEn }
+        : {}),
+      ...(driverDefaultVehicleColorAr
+        ? { vehicle_color_ar: driverDefaultVehicleColorAr }
         : {}),
     };
 
