@@ -48,9 +48,28 @@ const acceptLocks = new Map(); // rideId -> timestamp (prevent double-accept rac
 const driverAcceptLocks = new Map(); // driverId -> timestamp (prevent concurrent accepts for same driver)
 const driverQueuedRide = new Map(); // driverId -> { ride_id, offered_price, ride_snapshot, reserved_at }
 const rideDriverStates = new Map(); // rideId -> Map(driverId -> { status, notified_at, updated_at })
+const dispatchInFlightByRide = new Map(); // rideId -> token
 
 // ✅ NEW: per-driver patch sequence (ordering)
 const driverPatchSeq = new Map(); // driverId -> number
+
+const RIDE_STATE_STALE_TTL_MS = Number.isFinite(Number(process.env.RIDE_STATE_STALE_TTL_MS))
+  ? Math.max(60_000, Number(process.env.RIDE_STATE_STALE_TTL_MS))
+  : 20 * 60 * 1000;
+const RIDE_STATE_SWEEP_EVERY_MS = Number.isFinite(Number(process.env.RIDE_STATE_SWEEP_EVERY_MS))
+  ? Math.max(30_000, Number(process.env.RIDE_STATE_SWEEP_EVERY_MS))
+  : 60_000;
+const rideStateActivityAt = new Map(); // rideId -> last activity timestamp
+const touchRideState = (rideId) => {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return;
+  rideStateActivityAt.set(safeRideId, Date.now());
+};
+const clearRideStateTouch = (rideId) => {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return;
+  rideStateActivityAt.delete(safeRideId);
+};
 
 const ACCEPT_LOCK_TTL_MS = Number.isFinite(Number(process.env.ACCEPT_LOCK_TTL_MS))
   ? Number(process.env.ACCEPT_LOCK_TTL_MS)
@@ -2557,6 +2576,7 @@ const setUserActiveRide = (userId, rideId) => {
   if (!userId || !rideId) return;
   cancelRetryStateCleanup(rideId);
   rideOwnerByRide.set(rideId, userId);
+  touchRideState(rideId);
 };
 
 const clearUserRideByRideId = (rideId) => {
@@ -3000,7 +3020,8 @@ const rideDetailsMap = new Map();
 function saveRideDetails(rideId, rideDetails) {
   cancelRetryStateCleanup(rideId);
   rideDetailsMap.set(rideId, rideDetails);
-  console.log(`Details for ride ${rideId} saved in memory.`);
+  touchRideState(rideId);
+  debugLog("ride:details:saved", { ride_id: rideId }, null);
 }
 function getRideDetails(rideId) {
   return rideDetailsMap.get(rideId);
@@ -3023,6 +3044,7 @@ function setDriverQueuedRide(driverId, payload) {
     reserved_at: Date.now(),
     queued_at: Date.now(),
   });
+  touchRideState(payload?.ride_id);
   return true;
 }
 
@@ -3051,6 +3073,7 @@ function markRideCancelled(io, rideId, options = {}) {
 
   removeRideFromAllInboxes(io, safeRideId);
   rideCandidates.delete(safeRideId);
+  clearRideStateTouch(safeRideId);
   clearActiveRideByRideId(safeRideId);
 
   if (activateQueued && activeDriverIdBeforeCancel) {
@@ -3165,6 +3188,9 @@ function scheduleRetryStateCleanup(
     if (preserveUser) {
       clearUserRideByRideId(rideId);
     }
+    if (preserveSnapshot || preserveUser) {
+      clearRideStateTouch(rideId);
+    }
     retryStateCleanupTimers.delete(rideId);
     console.log(`[retry-state] cleared preserved state for ride ${rideId}`);
   }, ttlMs);
@@ -3189,15 +3215,9 @@ const normalizeDispatchRadiusMeters = (radiusMeters) => {
 
 const buildDispatchRadiusStagesMeters = (initialRadiusMeters) => {
   const initialMeters = normalizeDispatchRadiusMeters(initialRadiusMeters);
-  const initialKm = round2(initialMeters / 1000);
-  const stageKm = uniqueSortedNumbers([...DISPATCH_RADIUS_STEPS_KM, initialKm]).filter(
-    (km) => km >= initialKm
-  );
-  const stageMeters = uniqueSortedNumbers(
-    stageKm.map((km) => normalizeDispatchRadiusMeters(Math.round(km * 1000)))
-  );
-
-  return stageMeters.length > 0 ? stageMeters : [initialMeters];
+  // Dashboard-first behavior: when dispatch stages are missing from payload,
+  // keep a single stage instead of expanding through hardcoded km steps.
+  return [initialMeters];
 };
 
 const normalizeDispatchStageIndex = (stagesMeters, stageIndex, currentRadiusMeters) => {
@@ -3757,6 +3777,7 @@ function inboxUpsert(driverId, rideId, payload) {
     ride_id: rideId,
     _ts: Date.now(), // ✅ مهم للتنظيف
   });
+  touchRideState(rideId);
 }
 
 function inboxRemove(driverId, rideId) {
@@ -3829,6 +3850,59 @@ setInterval(() => {
     console.log("⚠️ [inbox prune] interval error:", e?.message || e);
   }
 }, 30 * 1000);
+
+// ✅ periodic stale-ride state sweep (covers maps that can survive missed close/cancel flows)
+setInterval(() => {
+  try {
+    const now = Date.now();
+    let removed = 0;
+
+    for (const [rideIdRaw, lastActivityAtRaw] of rideStateActivityAt.entries()) {
+      const rideId = toNumber(rideIdRaw);
+      const lastActivityAt = toNumber(lastActivityAtRaw) ?? 0;
+      if (!rideId || !lastActivityAt) {
+        rideStateActivityAt.delete(rideIdRaw);
+        continue;
+      }
+
+      if (now - lastActivityAt < RIDE_STATE_STALE_TTL_MS) continue;
+      if (rideTimers.has(rideId)) continue;
+      if (getActiveDriverByRide(rideId)) continue;
+      if (cancelledRides.has(rideId)) continue;
+
+      rideDetailsMap.delete(rideId);
+      rideCandidates.delete(rideId);
+      clearRideDriverStates(rideId);
+      clearUserRideByRideId(rideId);
+      cancelRetryStateCleanup(rideId);
+      dispatchInFlightByRide.delete(rideId);
+
+      for (const [driverId, box] of driverRideInbox.entries()) {
+        if (!box || !box.has(rideId)) continue;
+        box.delete(rideId);
+        clearDriverBidStatus(driverId, rideId);
+        if (box.size === 0) driverRideInbox.delete(driverId);
+      }
+
+      for (const [driverId, queued] of driverQueuedRide.entries()) {
+        if (toNumber(queued?.ride_id) !== rideId) continue;
+        driverQueuedRide.delete(driverId);
+      }
+
+      clearRideStateTouch(rideId);
+      removed += 1;
+    }
+
+    if (removed > 0) {
+      console.log("[memory-sweep] removed stale ride state entries", {
+        removed,
+        ttl_ms: RIDE_STATE_STALE_TTL_MS,
+      });
+    }
+  } catch (e) {
+    console.log("[memory-sweep] interval error:", e?.message || e);
+  }
+}, RIDE_STATE_SWEEP_EVERY_MS);
 
 function inboxList(driverId, limit = 30) {
   const box = driverRideInbox.get(driverId);
@@ -4387,6 +4461,7 @@ function removeRideFromAllInboxes(io, rideId, options = {}) {
 
   rideCandidates.delete(rideId);
   clearRideDriverStates(rideId);
+  clearRideStateTouch(rideId);
 }
 
 // ✅ Close bidding for a ride (remove from all inboxes) + PATCH remove
@@ -4430,6 +4505,7 @@ function closeRideBidding(io, rideId, opts = {}) {
 
   rideCandidates.delete(rideId);
   clearRideDriverStates(rideId);
+  clearRideStateTouch(rideId);
 }
 
 // ─────────────────────────────
@@ -4454,6 +4530,7 @@ function syncRideCandidates(io, rideId, nextDriverIds = [], options = {}) {
     }
 
     rideCandidates.set(rideId, mergedSet);
+    touchRideState(rideId);
 
     return {
       candidateSet: mergedSet,
@@ -4476,6 +4553,7 @@ function syncRideCandidates(io, rideId, nextDriverIds = [], options = {}) {
   }
 
   rideCandidates.set(rideId, nextSet);
+  touchRideState(rideId);
 
   return {
     candidateSet: nextSet,
@@ -4519,7 +4597,16 @@ async function dispatchToNearbyDrivers(io, data) {
   const inputPayload = data && typeof data === "object" ? data : {};
   const rideId = toNumber(inputPayload?.ride_id ?? inputPayload?.id);
   if (!rideId) return false;
-  data = inputPayload;
+  const existingInFlightToken = dispatchInFlightByRide.get(rideId);
+  if (existingInFlightToken) {
+    console.log(`[dispatch][dedup] ride ${rideId} skipped duplicate in-flight dispatch`);
+    return true;
+  }
+  const inFlightToken = `${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  dispatchInFlightByRide.set(rideId, inFlightToken);
+
+  try {
+    data = inputPayload;
 
   // Re-broadcast decision must rely on explicit input only, not merged snapshot fields.
   const inputDispatchExpandReason =
@@ -5741,6 +5828,11 @@ if (incrementalExpansion) {
   emitRideCandidatesSummary(io, rideId);
 
   return true;
+  } finally {
+    if (dispatchInFlightByRide.get(rideId) === inFlightToken) {
+      dispatchInFlightByRide.delete(rideId);
+    }
+  }
 }
 
 const isCandidateDriver = (rideId, driverId) => {
