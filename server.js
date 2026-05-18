@@ -57,6 +57,12 @@ const SOCKET_BIND_HOST =
   process.env.SOCKET_BIND_HOST || "0.0.0.0";
 const SOCKET_BIND_PORT =
   Number(process.env.PORT || process.env.SOCKET_BIND_PORT) || 4000;
+const INTERNAL_SECRET_ENFORCE = String(
+  process.env.INTERNAL_SECRET_ENFORCE || "0"
+) === "1";
+const SOCKET_INTERNAL_SECRET = String(
+  process.env.SOCKET_INTERNAL_SECRET || process.env.LARAVEL_INTERNAL_SECRET || ""
+).trim();
 const INVOICE_STATUSES = new Set([7, 8, 9]);
 const TRIP_SUMMARY_START_STATUSES = new Set([5]);
 const TRIP_SUMMARY_COMPLETE_STATUSES = new Set([7, 8, 11]);
@@ -728,6 +734,22 @@ const shouldSkipDedupe = (map, key, ttlMs) => {
 
 const app = express();
 app.use(express.json());
+app.use("/events/internal", (req, res, next) => {
+  if (!INTERNAL_SECRET_ENFORCE) return next();
+  if (!SOCKET_INTERNAL_SECRET) {
+    console.warn("[internal-auth] enforced but SOCKET_INTERNAL_SECRET is empty");
+    return res
+      .status(503)
+      .json({ status: 0, message: "internal secret not configured" });
+  }
+
+  const providedSecret = String(req.get("X-Socket-Internal-Secret") || "").trim();
+  if (providedSecret && providedSecret === SOCKET_INTERNAL_SECRET) {
+    return next();
+  }
+
+  return res.status(401).json({ status: 0, message: "unauthorized internal request" });
+});
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });

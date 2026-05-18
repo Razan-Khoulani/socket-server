@@ -27,7 +27,7 @@ const LARAVEL_LOCATION_PUSH_EVERY_MS = 10000; // how often to push driver locati
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
-  "https://aiactive.co.uk/backend/backend-laravel/public";
+  "https://api.catch-syria.com";
 const LARAVEL_TIMEOUT_MS = 7000;
 const DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS = Number.isFinite(
   Number(process.env.DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS)

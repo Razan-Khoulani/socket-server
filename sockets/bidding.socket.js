@@ -2,6 +2,7 @@
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios"); // لضمان استدعاء Laravel API عند قبول العرض
 const { getDistanceMeters } = require("../utils/geo.util");
+const routeCacheL2 = require("../services/routeCacheL2.service");
 const {
   getUserDetails,
   getUserDetailsByToken,
@@ -169,7 +170,7 @@ const toRouteMetricNumber = (v) => {
 const normalizeCoordForRouteKey = (value) => {
   const safe = toNumber(value);
   if (safe === null) return null;
-  return String(safe);
+  return safe.toFixed(5);
 };
 const buildRouteMetricsCacheKey = (startLat, startLong, endLat, endLong) => {
   const aLat = normalizeCoordForRouteKey(startLat);
@@ -179,6 +180,12 @@ const buildRouteMetricsCacheKey = (startLat, startLong, endLat, endLong) => {
   if (aLat === null || aLong === null || bLat === null || bLong === null) return null;
   return `${aLat},${aLong}->${bLat},${bLong}`;
 };
+const buildRouteL2CacheKey = (cacheKey) =>
+  cacheKey ? `route:v1:${cacheKey}` : null;
+const buildRouteL2LockKey = (cacheKey) =>
+  cacheKey ? `route:lock:v1:${cacheKey}` : null;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+const getRandomLockRecheckDelayMs = () => 100 + Math.floor(Math.random() * 101);
 const getCachedRouteMetrics = (cacheKey) => {
   if (!cacheKey || ROUTE_API_CACHE_TTL_MS <= 0) return null;
   const cached = routeMetricsCache.get(cacheKey);
@@ -1506,7 +1513,7 @@ const MAX_QUEUED_RIDES_PER_DRIVER = Number.isFinite(Number(process.env.MAX_QUEUE
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
-  "https://aiactive.co.uk/backend/backend-laravel/public";
+  "https://api.catch-syria.com";
 const NORMALIZED_LARAVEL_BASE_URL = String(LARAVEL_BASE_URL || "").trim().replace(/\/+$/, "");
 const DEFAULT_CUSTOMER_IMAGE_URL = `${NORMALIZED_LARAVEL_BASE_URL}/assets/images/user.svg`;
 
@@ -1516,6 +1523,9 @@ const LARAVEL_DRIVER_REJECT_REQUEST_PATH = "/api/driver/reject-request";
 const LARAVEL_DRIVER_REJECT_NOTIFICATION_PATH = "/api/driver/driver-reject-notification";
 const LARAVEL_DRIVER_UPDATE_LIST_NOTIFICATION_PATH =
   "/api/internal/driver-update-list-notification";
+const LARAVEL_INTERNAL_SECRET = String(
+  process.env.SOCKET_INTERNAL_SECRET || process.env.LARAVEL_INTERNAL_SECRET || ""
+).trim();
 const LARAVEL_ACCEPT_BID_TIMEOUT_MS = Number.isFinite(
   Number(process.env.LARAVEL_ACCEPT_BID_TIMEOUT_MS)
 )
@@ -1530,9 +1540,21 @@ const ROUTE_API_CACHE_TTL_MS = Number.isFinite(Number(process.env.ROUTE_API_CACH
 const ROUTE_API_MAX_CONCURRENCY = Number.isFinite(Number(process.env.ROUTE_API_MAX_CONCURRENCY))
   ? Math.max(1, Number(process.env.ROUTE_API_MAX_CONCURRENCY))
   : 4;
+const ROUTE_CACHE_L2_TTL_S = Number.isFinite(Number(process.env.ROUTE_CACHE_L2_TTL_S))
+  ? Math.max(1, Math.floor(Number(process.env.ROUTE_CACHE_L2_TTL_S)))
+  : 15;
+const ROUTE_LOCK_TTL_S = Number.isFinite(Number(process.env.ROUTE_LOCK_TTL_S))
+  ? Math.max(1, Math.floor(Number(process.env.ROUTE_LOCK_TTL_S)))
+  : 3;
 const routeMetricsCache = new Map();
 const routeMetricsInFlight = new Map();
 const DISPATCH_EXPANSION_INTERVAL_S = 5;
+const buildInternalLaravelHeaders = () => {
+  if (!LARAVEL_INTERNAL_SECRET) return undefined;
+  return {
+    "X-Socket-Internal-Secret": LARAVEL_INTERNAL_SECRET,
+  };
+};
 
 const getDriverLocationAgeMs = (driver = null, meta = null) => {
   const ts =
@@ -1718,7 +1740,10 @@ async function syncDriverUpdateListNotification({
     await axios.post(
       `${LARAVEL_BASE_URL}${LARAVEL_DRIVER_UPDATE_LIST_NOTIFICATION_PATH}`,
       laravelSyncPayload,
-      { timeout: 7000 }
+      {
+        timeout: 7000,
+        headers: buildInternalLaravelHeaders(),
+      }
     );
 
     console.log("[driver:rides:list][push] Laravel sync succeeded", {
@@ -5783,17 +5808,18 @@ async function fetchRouteAndEmit(io, rideId, driverId, rideSnapshot = null) {
           endLatitude,
           requested_at,
         },
-        timeout: 10000,
+        timeout: LARAVEL_ROUTE_TIMEOUT_MS,
       }
     );
 
     const routeApiData = response?.data ?? null;
-const normalizedDuration = normalizeDuration(
-  pickFirstValue(
-    routeApiData?.driver_to_pickup_distance_m,
-    routeApiData?.duration
-  )
-);
+    const normalizedDuration = normalizeDuration(
+      pickFirstValue(
+        routeApiData?.duration,
+        routeApiData?.eta_min,
+        routeApiData?.route_api_duration_min
+      )
+    );
     if (normalizedDuration === null) {
       const errorPayload = {
         ride_id: rideId,
@@ -5882,7 +5908,7 @@ async function fetchRouteDataByCoords({
         endLatitude: safeEndLatitude,
         requested_at: safeRequestedAt,
       },
-      timeout: 10000,
+      timeout: LARAVEL_ROUTE_TIMEOUT_MS,
     });
 
     return response?.data ?? null;
@@ -5961,7 +5987,37 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
   }
 
   const inFlightPromise = (async () => {
+    let routeLockToken = null;
+    const routeL2CacheKey = buildRouteL2CacheKey(routeKey);
+    const routeL2LockKey = buildRouteL2LockKey(routeKey);
+
     try {
+      if (routeL2CacheKey && routeCacheL2.isEnabled()) {
+        const cachedL2 = await routeCacheL2.getJson(routeL2CacheKey);
+        if (cachedL2 && typeof cachedL2 === "object") {
+          setCachedRouteMetrics(routeKey, cachedL2);
+          return {
+            ...cachedL2,
+            source: cachedL2?.source ? `${cachedL2.source}-l2-cache` : "l2-cache",
+          };
+        }
+
+        routeLockToken = await routeCacheL2.tryAcquireLock(routeL2LockKey, ROUTE_LOCK_TTL_S);
+        if (!routeLockToken) {
+          await sleep(getRandomLockRecheckDelayMs());
+          const delayedL2 = await routeCacheL2.getJson(routeL2CacheKey);
+          if (delayedL2 && typeof delayedL2 === "object") {
+            setCachedRouteMetrics(routeKey, delayedL2);
+            return {
+              ...delayedL2,
+              source: delayedL2?.source
+                ? `${delayedL2.source}-l2-cache-after-wait`
+                : "l2-cache-after-wait",
+            };
+          }
+        }
+      }
+
       const res = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
         params: {
           startLongitude: lo1,
@@ -5993,6 +6049,9 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
         source: roadDistanceM !== null ? "road-api" : "air-fallback-road-api-empty",
       };
       setCachedRouteMetrics(routeKey, result);
+      if (routeL2CacheKey && routeCacheL2.isEnabled()) {
+        await routeCacheL2.setJson(routeL2CacheKey, result, ROUTE_CACHE_L2_TTL_S);
+      }
       return result;
     } catch (error) {
       console.error(
@@ -6010,8 +6069,14 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
         source: airDistanceM !== null ? "air-fallback-error" : "error",
       };
       setCachedRouteMetrics(routeKey, fallback);
+      if (routeL2CacheKey && routeCacheL2.isEnabled()) {
+        await routeCacheL2.setJson(routeL2CacheKey, fallback, ROUTE_CACHE_L2_TTL_S);
+      }
       return fallback;
     } finally {
+      if (routeL2LockKey && routeLockToken) {
+        await routeCacheL2.releaseLock(routeL2LockKey, routeLockToken);
+      }
       if (routeKey) routeMetricsInFlight.delete(routeKey);
     }
   })();

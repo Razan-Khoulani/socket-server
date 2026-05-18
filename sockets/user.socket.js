@@ -2,6 +2,7 @@
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios");
 const { getDistanceMeters } = require("../utils/geo.util");
+const routeCacheL2 = require("../services/routeCacheL2.service");
 const {
   setUserDetails,
   getUserDetailsByToken,
@@ -79,6 +80,14 @@ const ROUTE_API_CACHE_TTL_MS = Number.isFinite(Number(process.env.ROUTE_API_CACH
 const ROUTE_API_MAX_CONCURRENCY = Number.isFinite(Number(process.env.ROUTE_API_MAX_CONCURRENCY))
   ? Math.max(1, Number(process.env.ROUTE_API_MAX_CONCURRENCY))
   : 4;
+const ROUTE_CACHE_L2_TTL_S = Number.isFinite(Number(process.env.ROUTE_CACHE_L2_TTL_S))
+  ? Math.max(1, Math.floor(Number(process.env.ROUTE_CACHE_L2_TTL_S)))
+  : 15;
+const ROUTE_LOCK_TTL_S = Number.isFinite(Number(process.env.ROUTE_LOCK_TTL_S))
+  ? Math.max(1, Math.floor(Number(process.env.ROUTE_LOCK_TTL_S)))
+  : 3;
+const ROUTE_LOCK_RECHECK_MIN_MS = 100;
+const ROUTE_LOCK_RECHECK_MAX_MS = 200;
 const routeMetricsCache = new Map();
 const routeMetricsInFlight = new Map();
 const VEHICLE_ICON_RELATIVE_DIR = "assets/images/service-category/transport-service-type";
@@ -100,7 +109,7 @@ const toNumber = (v) => {
 const normalizeCoordForRouteKey = (value) => {
   const safe = toNumber(value);
   if (safe === null) return null;
-  return String(safe);
+  return safe.toFixed(5);
 };
 const buildRouteMetricsCacheKey = (startLat, startLong, endLat, endLong) => {
   const aLat = normalizeCoordForRouteKey(startLat);
@@ -110,6 +119,14 @@ const buildRouteMetricsCacheKey = (startLat, startLong, endLat, endLong) => {
   if (aLat === null || aLong === null || bLat === null || bLong === null) return null;
   return `${aLat},${aLong}->${bLat},${bLong}`;
 };
+const buildRouteL2CacheKey = (cacheKey) =>
+  cacheKey ? `route:v1:${cacheKey}` : null;
+const buildRouteL2LockKey = (cacheKey) =>
+  cacheKey ? `route:lock:v1:${cacheKey}` : null;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+const getRandomLockRecheckDelayMs = () =>
+  ROUTE_LOCK_RECHECK_MIN_MS +
+  Math.floor(Math.random() * (ROUTE_LOCK_RECHECK_MAX_MS - ROUTE_LOCK_RECHECK_MIN_MS + 1));
 const getCachedRouteMetrics = (cacheKey) => {
   if (!cacheKey || ROUTE_API_CACHE_TTL_MS <= 0) return null;
   const cached = routeMetricsCache.get(cacheKey);
@@ -1152,7 +1169,37 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
   }
 
   const inFlightPromise = (async () => {
+    let routeLockToken = null;
+    const routeL2CacheKey = buildRouteL2CacheKey(routeKey);
+    const routeL2LockKey = buildRouteL2LockKey(routeKey);
+
     try {
+      if (routeL2CacheKey && routeCacheL2.isEnabled()) {
+        const cachedL2 = await routeCacheL2.getJson(routeL2CacheKey);
+        if (cachedL2 && typeof cachedL2 === "object") {
+          setCachedRouteMetrics(routeKey, cachedL2);
+          return {
+            ...cachedL2,
+            source: cachedL2?.source ? `${cachedL2.source}-l2-cache` : "l2-cache",
+          };
+        }
+
+        routeLockToken = await routeCacheL2.tryAcquireLock(routeL2LockKey, ROUTE_LOCK_TTL_S);
+        if (!routeLockToken) {
+          await sleep(getRandomLockRecheckDelayMs());
+          const delayedL2 = await routeCacheL2.getJson(routeL2CacheKey);
+          if (delayedL2 && typeof delayedL2 === "object") {
+            setCachedRouteMetrics(routeKey, delayedL2);
+            return {
+              ...delayedL2,
+              source: delayedL2?.source
+                ? `${delayedL2.source}-l2-cache-after-wait`
+                : "l2-cache-after-wait",
+            };
+          }
+        }
+      }
+
       const res = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
         params: {
           startLongitude: lo1,
@@ -1185,6 +1232,9 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
         source: roadDistanceM !== null ? "road-api" : "air-fallback-empty-route",
       };
       setCachedRouteMetrics(routeKey, result);
+      if (routeL2CacheKey && routeCacheL2.isEnabled()) {
+        await routeCacheL2.setJson(routeL2CacheKey, result, ROUTE_CACHE_L2_TTL_S);
+      }
       return result;
     } catch (e) {
       console.warn("[driverToPickupRoadMetrics] failed:", e?.response?.data || e?.message || e);
@@ -1196,8 +1246,14 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
         source: safeAirDistanceM !== null ? "air-fallback-error" : "error",
       };
       setCachedRouteMetrics(routeKey, fallback);
+      if (routeL2CacheKey && routeCacheL2.isEnabled()) {
+        await routeCacheL2.setJson(routeL2CacheKey, fallback, ROUTE_CACHE_L2_TTL_S);
+      }
       return fallback;
     } finally {
+      if (routeL2LockKey && routeLockToken) {
+        await routeCacheL2.releaseLock(routeL2LockKey, routeLockToken);
+      }
       if (routeKey) routeMetricsInFlight.delete(routeKey);
     }
   })();
@@ -1521,6 +1577,8 @@ module.exports = (io, socket) => {
   socket.nearbyCenter = null; // { lat, long }
   socket.nearbyDriversInterval = null;
   socket.nearbyVehicleTypesInterval = null;
+  socket.nearbyDriversInFlight = false;
+  socket.nearbyVehicleTypesInFlight = false;
   socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
   socket.nearbyDispatchStagesMeters = [DEFAULT_NEARBY_RADIUS_METERS];
   socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
@@ -1768,7 +1826,7 @@ const syncNearbyRadius = async (payload = {}) => {
     dispatchStagesSeed
   );
   const normalizedDispatchTimeoutSeconds = normalizeNearbyDispatchTimeoutSeconds(
-    NEARBY_DISPATCH_TIMEOUT_S,
+    nextDispatchTimeoutSeconds,
     NEARBY_DISPATCH_TIMEOUT_S
   );
 
@@ -2100,7 +2158,7 @@ const registerUser = (payload, source = "user:loginInfo") => {
     socket.emit("ride:joined", { ride_id: activeRideId });
     emitRideStatusCatchup(activeRideId, source);
     ensureNearbyCenterFromRide(activeRideId);
-    void emitNearbyVehicleTypes();
+    void emitNearbyVehicleTypesGuarded();
     console.log(
       `[${source}] auto-rejoin user ${normalizedDetails.user_id} -> ride:${activeRideId} (socket:${socket.id})`
     );
@@ -2315,7 +2373,7 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     socket.emit("ride:joined", { ride_id: rideId });
     emitRideStatusCatchup(rideId, "user:joinRideRoom");
     ensureNearbyCenterFromRide(rideId);
-    void emitNearbyVehicleTypes();
+    void emitNearbyVehicleTypesGuarded();
 
     console.log(
       `?? User ${socket.userId || "unknown"} joined ride room ride:${rideId} (socket:${socket.id})`
@@ -2374,7 +2432,7 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     });
     emitRideStatusCatchup(rideId, "user:rejoinRideRoom");
     ensureNearbyCenterFromRide(rideId);
-    void emitNearbyVehicleTypes();
+    void emitNearbyVehicleTypesGuarded();
 
     console.log(`?? User ${userId} rejoined ride room ride:${rideId} (socket:${socket.id})`);
   });
@@ -2384,6 +2442,7 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       clearInterval(socket.nearbyDriversInterval);
       socket.nearbyDriversInterval = null;
     }
+    socket.nearbyDriversInFlight = false;
   };
 
   const stopNearbyVehicleTypesLoop = () => {
@@ -2394,6 +2453,7 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
         socket_id: socket.id,
       });
     }
+    socket.nearbyVehicleTypesInFlight = false;
   };
 
   const stopNearby = () => {
@@ -2835,7 +2895,7 @@ item.max_price = priceBounds.max_price;
 };
 
   /////////////////////////////////////////////////////////////
-  const sendNearby = async (eventName = "user:nearbyDrivers") => {
+const sendNearby = async (eventName = "user:nearbyDrivers") => {
     if (!socket.nearbyCenter) return;
 
     const { lat, long } = socket.nearbyCenter;
@@ -2912,6 +2972,26 @@ item.max_price = priceBounds.max_price;
     });
   };
 
+  const sendNearbyGuarded = async (eventName = "user:nearbyDrivers") => {
+    if (socket.nearbyDriversInFlight) return;
+    socket.nearbyDriversInFlight = true;
+    try {
+      await sendNearby(eventName);
+    } finally {
+      socket.nearbyDriversInFlight = false;
+    }
+  };
+
+  const emitNearbyVehicleTypesGuarded = async () => {
+    if (socket.nearbyVehicleTypesInFlight) return;
+    socket.nearbyVehicleTypesInFlight = true;
+    try {
+      await emitNearbyVehicleTypes();
+    } finally {
+      socket.nearbyVehicleTypesInFlight = false;
+    }
+  };
+
   socket.on("user:findNearbyDrivers", async (payload = {}) => {
     debugLog("user:findNearbyDrivers", payload, socket.id);
     console.log("?? payload from frontend:", payload);
@@ -2975,11 +3055,11 @@ item.max_price = priceBounds.max_price;
 
     socket.lastVehicleTypesSig = null;
 
-    await sendNearby("user:nearbyDrivers");
+    await sendNearbyGuarded("user:nearbyDrivers");
 
     stopNearbyDriversLoop();
     socket.nearbyDriversInterval = setInterval(() => {
-      void sendNearby("user:nearbyDrivers:update");
+      void sendNearbyGuarded("user:nearbyDrivers:update");
     }, NEARBY_EVERY_MS);
   });
 
@@ -3102,12 +3182,12 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     base_radius_m: socket.nearbyRadius,
   });
 
-  await emitNearbyVehicleTypes();
-  await sendNearby("user:nearbyDrivers:update");
+  await emitNearbyVehicleTypesGuarded();
+  await sendNearbyGuarded("user:nearbyDrivers:update");
 
   stopNearbyVehicleTypesLoop();
   socket.nearbyVehicleTypesInterval = setInterval(() => {
-    void emitNearbyVehicleTypes();
+    void emitNearbyVehicleTypesGuarded();
   }, NEARBY_EVERY_MS);
   console.log("[nearbyVehicleTypes] loop started", {
     socket_id: socket.id,
@@ -3118,7 +3198,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
 
   if (!socket.nearbyDriversInterval) {
     socket.nearbyDriversInterval = setInterval(() => {
-      void sendNearby("user:nearbyDrivers:update");
+      void sendNearbyGuarded("user:nearbyDrivers:update");
     }, NEARBY_EVERY_MS);
     console.log("[nearbyDrivers] loop started via vehicle-types", {
       socket_id: socket.id,
@@ -3181,8 +3261,8 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     persistRideRouteMetrics(payload, routeKm, routeDurationMin, etaMin);
     emitRouteEtaToDriver(routeKm, etaMin, payload);
 
-    void sendNearby("user:nearbyDrivers:update");
-    await emitNearbyVehicleTypes();
+    void sendNearbyGuarded("user:nearbyDrivers:update");
+    await emitNearbyVehicleTypesGuarded();
   });
 
   socket.on("user:setNearbyServiceType", async ({ service_type_id }) => {
@@ -3199,10 +3279,10 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
 
     await syncNearbyRadius({});
 
-    void sendNearby("user:nearbyDrivers:update");
+    void sendNearbyGuarded("user:nearbyDrivers:update");
 
     if (socket.nearbyCenter) {
-      await emitNearbyVehicleTypes();
+      await emitNearbyVehicleTypesGuarded();
     }
   });
 
