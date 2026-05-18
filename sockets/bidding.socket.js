@@ -24,6 +24,21 @@ const debugLog = (event, payload, socketId) => {
   if (!DEBUG_EVENTS) return;
   console.log("[bidding.socket]", event, "socket:", socketId, "payload:", payload);
 };
+const LOG_ROUTE_FAILURES = String(process.env.LOG_ROUTE_FAILURES || "1") === "1";
+const ROUTE_FAILURE_LOG_THROTTLE_MS = Number.isFinite(
+  Number(process.env.ROUTE_FAILURE_LOG_THROTTLE_MS)
+)
+  ? Math.max(1000, Number(process.env.ROUTE_FAILURE_LOG_THROTTLE_MS))
+  : 60_000;
+const throttledWarnAt = new Map();
+const warnThrottled = (key, ...args) => {
+  if (!LOG_ROUTE_FAILURES) return;
+  const now = Date.now();
+  const last = throttledWarnAt.get(key) ?? 0;
+  if (now - last < ROUTE_FAILURE_LOG_THROTTLE_MS) return;
+  throttledWarnAt.set(key, now);
+  console.error(...args);
+};
 
 // ✅ In-memory Maps (no Redis)
 const rideCandidates = new Map(); // rideId -> Set(driverId)
@@ -6054,7 +6069,8 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
       }
       return result;
     } catch (error) {
-      console.error(
+      warnThrottled(
+        "dispatch-driver-to-pickup-road-metrics-failed",
         "[dispatch][driverToPickupRoadMetrics] failed; using air fallback:",
         {
           error: error?.response?.data || error?.message || error,

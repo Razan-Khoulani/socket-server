@@ -20,11 +20,33 @@ const debugLog = (event, payload, socketId) => {
   if (!DEBUG_EVENTS) return;
   console.log("[user.socket]", event, "socket:", socketId, "payload:", payload);
 };
+const VERBOSE_NEARBY_LOGS = process.env.VERBOSE_NEARBY_LOGS === "1";
+const LOG_ROUTE_FAILURES = String(process.env.LOG_ROUTE_FAILURES || "1") === "1";
+const ROUTE_FAILURE_LOG_THROTTLE_MS = Number.isFinite(
+  Number(process.env.ROUTE_FAILURE_LOG_THROTTLE_MS)
+)
+  ? Math.max(1000, Number(process.env.ROUTE_FAILURE_LOG_THROTTLE_MS))
+  : 60_000;
+const throttledWarnAt = new Map();
+const nearbyLog = (...args) => {
+  if (!VERBOSE_NEARBY_LOGS) return;
+  console.log(...args);
+};
+const warnThrottled = (key, ...args) => {
+  if (!LOG_ROUTE_FAILURES) return;
+  const now = Date.now();
+  const last = throttledWarnAt.get(key) ?? 0;
+  if (now - last < ROUTE_FAILURE_LOG_THROTTLE_MS) return;
+  throttledWarnAt.set(key, now);
+  console.warn(...args);
+};
 const userRoom = (userId) => `user:${userId}`;
 
 const DEFAULT_NEARBY_RADIUS_METERS = 5000;
 const NEARBY_DISPATCH_RADIUS_STEPS_KM = Object.freeze([1, 2, 3, 5, 7, 10, 15, 20]);
-const NEARBY_EVERY_MS = 3000;
+const NEARBY_EVERY_MS = Number.isFinite(Number(process.env.NEARBY_EVERY_MS))
+  ? Math.max(1000, Number(process.env.NEARBY_EVERY_MS))
+  : 3000;
 const MAX_DRIVER_LOCATION_AGE_MS = 2 * 60 * 1000;
 const NEARBY_CENTER_RESET_THRESHOLD_M = Number.isFinite(
   Number(process.env.NEARBY_CENTER_RESET_THRESHOLD_M)
@@ -647,7 +669,8 @@ const fetchVehicleFareVersionFromApi = async (serviceCategoryId) => {
     setCachedNearbyFareVersion(safeServiceCategoryId, version);
     return version;
   } catch (e) {
-    console.warn(
+    warnThrottled(
+      "vehicle-fares-version-failed",
       "[vehicle-fares-version] failed:",
       e?.response?.data || e?.message || e
     );
@@ -1077,7 +1100,7 @@ const fetchVehicleFaresFromApi = async (
     }
     if (data?.status === 1 && Array.isArray(data.items)) {
       const first = data.items[0] || null;
-      console.log("[vehicle-fares-api] ok", {
+      nearbyLog("[vehicle-fares-api] ok", {
         count: data.items.length,
         has_driver_distance: !!(first && first.driver_to_pickup_distance_m != null),
       });
@@ -1092,7 +1115,11 @@ const fetchVehicleFaresFromApi = async (
     }
     return map;
   } catch (e) {
-    console.warn("[vehicle-fares-api] failed:", e?.response?.data || e?.message || e);
+    warnThrottled(
+      "vehicle-fares-api-failed",
+      "[vehicle-fares-api] failed:",
+      e?.response?.data || e?.message || e
+    );
     return new Map();
   }
 };
@@ -1237,7 +1264,11 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
       }
       return result;
     } catch (e) {
-      console.warn("[driverToPickupRoadMetrics] failed:", e?.response?.data || e?.message || e);
+      warnThrottled(
+        "driver-to-pickup-road-metrics-failed",
+        "[driverToPickupRoadMetrics] failed:",
+        e?.response?.data || e?.message || e
+      );
       const fallback = {
         road_distance_m: safeAirDistanceM,
         road_duration_s: safeAirDurationS,
@@ -2499,7 +2530,7 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     const nearbyForTypes =
       nearbyDrivers.length > 0 ? nearbyDrivers : buildAirFallbackCandidates(nearbyAvailable);
 
-    console.log("[nearbyVehicleTypes] candidates", {
+    nearbyLog("[nearbyVehicleTypes] candidates", {
       socket_id: socket.id,
       stage_number: radiusPlan.stageNumber,
       stage_total: radiusPlan.stageTotal,
@@ -2717,7 +2748,7 @@ item.max_price = priceBounds.max_price;
     const sig = buildVehicleTypesSignature(nearbyTypes);
     const vehicleTypesChanged = sig !== socket.lastVehicleTypesSig;
 
-    console.log("[nearbyVehicleTypes] tick", {
+    nearbyLog("[nearbyVehicleTypes] tick", {
       socket_id: socket.id,
       stage_number: radiusPlan.stageNumber,
       stage_total: radiusPlan.stageTotal,
@@ -2731,7 +2762,7 @@ item.max_price = priceBounds.max_price;
 
     if (vehicleTypesChanged) {
       socket.lastVehicleTypesSig = sig;
-      console.log("[user:nearbyVehicleTypes] emit ->", {
+      nearbyLog("[user:nearbyVehicleTypes] emit ->", {
         stage_number: radiusPlan.stageNumber,
         stage_total: radiusPlan.stageTotal,
         road_radius_m: radiusPlan.roadRadius,
@@ -2739,7 +2770,7 @@ item.max_price = priceBounds.max_price;
       });
       socket.emit("user:nearbyVehicleTypes", nearbyTypes);
     } else {
-      console.log("[user:nearbyVehicleTypes] skipped (no change)", {
+      nearbyLog("[user:nearbyVehicleTypes] skipped (no change)", {
         stage_number: radiusPlan.stageNumber,
         stage_total: radiusPlan.stageTotal,
         road_radius_m: radiusPlan.roadRadius,
@@ -2955,10 +2986,10 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
 
     socket.emit(eventName, nearbyWithNormalizedIcons);
 
-    console.log(
+    nearbyLog(
       `?? Nearby -> ${nearby.length} drivers within road radius ${roadRadius}m (stage ${radiusPlan.stageNumber}/${radiusPlan.stageTotal})`
     );
-    console.log("[nearbyDrivers] filter counters", {
+    nearbyLog("[nearbyDrivers] filter counters", {
       socket_id: socket.id,
       required_gender: socket.nearbyRequiredGender,
       need_child_seat: socket.nearbyNeedChildSeat,
@@ -2994,7 +3025,7 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
 
   socket.on("user:findNearbyDrivers", async (payload = {}) => {
     debugLog("user:findNearbyDrivers", payload, socket.id);
-    console.log("?? payload from frontend:", payload);
+    nearbyLog("?? payload from frontend:", payload);
     const { user_id, lat, long, service_type_id } = payload;
     const nearbyToken = normalizeToken(
       payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
@@ -3171,7 +3202,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   const resolvedServiceCategoryId =
     normalizeServiceCategoryId(socket.nearbyServiceCategoryId) ??
     getNearbyServiceCategoryFromRideSnapshot();
-  console.log("[user:getNearbyVehicleTypes] expansion config", {
+  nearbyLog("[user:getNearbyVehicleTypes] expansion config", {
     socket_id: socket.id,
     service_category_id: resolvedServiceCategoryId ?? null,
     center_changed: centerChanged,
@@ -3189,7 +3220,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   socket.nearbyVehicleTypesInterval = setInterval(() => {
     void emitNearbyVehicleTypesGuarded();
   }, NEARBY_EVERY_MS);
-  console.log("[nearbyVehicleTypes] loop started", {
+  nearbyLog("[nearbyVehicleTypes] loop started", {
     socket_id: socket.id,
     every_ms: NEARBY_EVERY_MS,
     dispatch_timeout_s: socket.nearbyDispatchTimeoutS,
@@ -3200,7 +3231,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     socket.nearbyDriversInterval = setInterval(() => {
       void sendNearbyGuarded("user:nearbyDrivers:update");
     }, NEARBY_EVERY_MS);
-    console.log("[nearbyDrivers] loop started via vehicle-types", {
+    nearbyLog("[nearbyDrivers] loop started via vehicle-types", {
       socket_id: socket.id,
       every_ms: NEARBY_EVERY_MS,
       dispatch_timeout_s: socket.nearbyDispatchTimeoutS,
@@ -3208,7 +3239,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     });
   }
 
-  console.log(`?? Nearby vehicle types requested (socket:${socket.id})`);
+  nearbyLog(`?? Nearby vehicle types requested (socket:${socket.id})`);
 };
 
   socket.on("user:getNearbyVehicleTypes", handleGetNearbyVehicleTypes);

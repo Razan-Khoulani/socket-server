@@ -29,6 +29,12 @@ const LARAVEL_BASE_URL =
   process.env.LARAVEL_URL ||
   "https://api.catch-syria.com";
 const LARAVEL_TIMEOUT_MS = 7000;
+const VERBOSE_DRIVER_LOCATION_LOGS =
+  process.env.VERBOSE_DRIVER_LOCATION_LOGS === "1";
+const locationLog = (...args) => {
+  if (!VERBOSE_DRIVER_LOCATION_LOGS) return;
+  console.log(...args);
+};
 const DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS = Number.isFinite(
   Number(process.env.DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS)
 )
@@ -726,7 +732,7 @@ module.exports = (io, socket) => {
   });
 
   socket.on("update-location", ({ lat, long }) => {
-    console.log("[update-location] payload:", { lat, long });
+    locationLog("[update-location] payload:", { lat, long });
     if (!socket.driverId) return;
 
     const la = toNumber(lat);
@@ -741,7 +747,7 @@ module.exports = (io, socket) => {
       now
     );
     if (!locationCheck.ok) {
-      console.log("[update-location][filtered]", {
+      locationLog("[update-location][filtered]", {
         driver_id: socket.driverId,
         lat: la,
         long: lo,
@@ -818,7 +824,7 @@ module.exports = (io, socket) => {
 
     // ✅ ابعث تحديث المرشحين مع كل update-location مقبول
     emitCandidatesSummaryForDriver(socket.driverId);
-    console.log(
+    locationLog(
       "[update-location] payload:",
       { lat: la, long: lo },
       "socket:",
