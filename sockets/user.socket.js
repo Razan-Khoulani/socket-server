@@ -43,7 +43,6 @@ const warnThrottled = (key, ...args) => {
 const userRoom = (userId) => `user:${userId}`;
 
 const DEFAULT_NEARBY_RADIUS_METERS = 5000;
-const NEARBY_DISPATCH_RADIUS_STEPS_KM = Object.freeze([1, 2, 3, 5, 7, 10, 15, 20]);
 const NEARBY_EVERY_MS = Number.isFinite(Number(process.env.NEARBY_EVERY_MS))
   ? Math.max(1000, Number(process.env.NEARBY_EVERY_MS))
   : 3000;
@@ -348,17 +347,10 @@ const normalizeNearbyRadiusMeters = (
 
 const buildDefaultNearbyDispatchStagesMeters = (initialRadiusMeters) => {
   const initial = normalizeNearbyRadiusMeters(initialRadiusMeters);
-  const initialKm = Math.round((initial / 1000) * 100) / 100;
-  const stageKm = uniqueSortedNumbers([
-    ...NEARBY_DISPATCH_RADIUS_STEPS_KM,
-    initialKm,
-  ]).filter((km) => km >= initialKm);
-
-  const stageMeters = uniqueSortedNumbers(
-    stageKm.map((km) => normalizeNearbyRadiusMeters(Math.round(km * 1000), initial))
-  );
-
-  return stageMeters.length > 0 ? stageMeters : [initial];
+  // Dashboard-first behavior:
+  // when dispatch stages are missing, keep a single stage at base radius
+  // instead of expanding using hardcoded km steps.
+  return [initial];
 };
 
 const resolveNearbyRadiusFromPayload = (payload = {}) => {
@@ -614,7 +606,7 @@ const fetchServiceSearchRadiusFromApi = async (serviceCategoryId) => {
     const explicitDispatchStages =
       extractDispatchRadiusStagesMetersFromPayload(data, radiusMeters) ?? null;
     const dispatchRadiusStagesMeters =
-      Array.isArray(explicitDispatchStages) && explicitDispatchStages.length > 1
+      Array.isArray(explicitDispatchStages) && explicitDispatchStages.length > 0
         ? normalizeNearbyDispatchStagesMeters(radiusMeters, explicitDispatchStages)
         : buildDefaultNearbyDispatchStagesMeters(radiusMeters);
     const dispatchTimeoutSeconds = extractDispatchTimeoutSecondsFromPayload(
@@ -1771,7 +1763,7 @@ module.exports = (io, socket) => {
         payloadServiceCategoryId !== null &&
         payloadServiceCategoryId !== snapshotServiceCategoryId
       ) {
-        console.log("[nearby-service-category] payload/snapshot mismatch", {
+        nearbyLog("[nearby-service-category] payload/snapshot mismatch", {
           source,
           payload_service_category_id: payloadServiceCategoryId,
           snapshot_service_category_id: snapshotServiceCategoryId,
@@ -1849,7 +1841,7 @@ const syncNearbyRadius = async (payload = {}) => {
     socket.nearbyRadius ?? DEFAULT_NEARBY_RADIUS_METERS
   );
   const dispatchStagesSeed =
-    Array.isArray(nextDispatchStagesMeters) && nextDispatchStagesMeters.length > 1
+    Array.isArray(nextDispatchStagesMeters) && nextDispatchStagesMeters.length > 0
       ? nextDispatchStagesMeters
       : buildDefaultNearbyDispatchStagesMeters(normalizedRadius);
   const normalizedDispatchStages = normalizeNearbyDispatchStagesMeters(
@@ -1880,7 +1872,7 @@ const syncNearbyRadius = async (payload = {}) => {
 
   if (radiusChanged || stagesChanged || timeoutChanged) {
     socket.lastVehicleTypesSig = null;
-    console.log("[nearby-radius] updated", {
+    nearbyLog("[nearby-radius] updated", {
       service_category_id: serviceCategoryId ?? null,
       radius_m: normalizedRadius,
       source: source ?? "fallback",
@@ -1889,7 +1881,7 @@ const syncNearbyRadius = async (payload = {}) => {
     });
   }
 
-  console.log("[nearby-radius][vehicle-types]", {
+  nearbyLog("[nearby-radius][vehicle-types]", {
     service_category_id: serviceCategoryId ?? null,
     source: source ?? "fallback",
     radius_m: normalizedRadius,
