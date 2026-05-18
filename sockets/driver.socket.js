@@ -28,7 +28,9 @@ const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
   "https://api.catch-syria.com";
-const LARAVEL_TIMEOUT_MS = 7000;
+const LARAVEL_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_TIMEOUT_MS))
+  ? Math.max(1000, Number(process.env.LARAVEL_TIMEOUT_MS))
+  : 7000;
 const VERBOSE_DRIVER_LOCATION_LOGS =
   process.env.VERBOSE_DRIVER_LOCATION_LOGS === "1";
 const locationLog = (...args) => {

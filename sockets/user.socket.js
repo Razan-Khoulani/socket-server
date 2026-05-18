@@ -91,7 +91,9 @@ const LARAVEL_VEHICLE_FARE_VERSION_PATH =
 const LARAVEL_GET_ROUTE_PATH =
   process.env.LARAVEL_GET_ROUTE_PATH || "/api/getRoute";
 
-const LARAVEL_TIMEOUT_MS = 7000;
+const LARAVEL_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_TIMEOUT_MS))
+  ? Math.max(1000, Number(process.env.LARAVEL_TIMEOUT_MS))
+  : 7000;
 const LARAVEL_ROUTE_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
   ? Math.max(1000, Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
   : LARAVEL_TIMEOUT_MS;
@@ -2618,9 +2620,9 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
           groups.get(serviceCatId).add(item.service_type_id);
         }
 
+        const shouldIncludePickupForFareLookup = nearbyDrivers.length === 0;
         for (const [serviceCatId, typeSet] of groups.entries()) {
           let cacheEntry = socket.nearbyFareCache.get(serviceCatId);
-          const fareConfigVersion = await fetchVehicleFareVersionFromApi(serviceCatId);
           const cacheKeyChanged =
             !cacheEntry ||
             cacheEntry.distanceKm !== distanceKm ||
@@ -2632,12 +2634,25 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
               distanceKm,
               pickupLat,
               pickupLong,
-              configVersion: fareConfigVersion,
+              configVersion: toNumber(cacheEntry?.configVersion),
               cachedAt: 0,
               map: new Map(),
             };
             socket.nearbyFareCache.set(serviceCatId, cacheEntry);
             socket.lastVehicleTypesSig = null;
+          }
+
+          const cacheExpired =
+            NEARBY_FARE_CACHE_TTL_MS === 0 ||
+            !Number.isFinite(Number(cacheEntry.cachedAt)) ||
+            Date.now() - Number(cacheEntry.cachedAt) > NEARBY_FARE_CACHE_TTL_MS;
+
+          let fareConfigVersion = toNumber(cacheEntry.configVersion);
+          if (cacheExpired) {
+            const refreshedVersion = await fetchVehicleFareVersionFromApi(serviceCatId);
+            if (refreshedVersion !== null) {
+              fareConfigVersion = refreshedVersion;
+            }
           }
 
           const configVersionChanged =
@@ -2648,11 +2663,6 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
             cacheEntry.cachedAt = 0;
             socket.lastVehicleTypesSig = null;
           }
-
-          const cacheExpired =
-            NEARBY_FARE_CACHE_TTL_MS === 0 ||
-            !Number.isFinite(Number(cacheEntry.cachedAt)) ||
-            Date.now() - Number(cacheEntry.cachedAt) > NEARBY_FARE_CACHE_TTL_MS;
 
           const missingTypeIds = [];
           for (const typeId of typeSet) {
@@ -2668,8 +2678,8 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
               serviceCatId,
               distanceKm,
               typeIdsToRefresh,
-              pickupLat,
-              pickupLong
+              shouldIncludePickupForFareLookup ? pickupLat : null,
+              shouldIncludePickupForFareLookup ? pickupLong : null
             );
             for (const [id, item] of fareMap.entries()) {
               cacheEntry.map.set(id, item);
@@ -3091,7 +3101,7 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
 const handleGetNearbyVehicleTypes = async (payload = {}) => {
   const { lat, long } = payload;
   debugLog("user:getNearbyVehicleTypes", { lat, long }, socket.id);
-  console.log("[user:getNearbyVehicleTypes] payload:", payload);
+  nearbyLog("[user:getNearbyVehicleTypes] payload:", payload);
 
   const nearbyTypesToken = normalizeToken(
     payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
@@ -3155,13 +3165,13 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     );
     if (inferredSc !== null) {
       setNearbyServiceCategoryId(inferredSc, "user:getNearbyVehicleTypes:nearby-memory");
-      console.log("[user:getNearbyVehicleTypes] inferred service_category_id", {
+      nearbyLog("[user:getNearbyVehicleTypes] inferred service_category_id", {
         socket_id: socket.id,
         service_category_id: inferredSc,
         service_type_id: socket.nearbyServiceTypeId ?? null,
       });
     } else {
-      console.log("[user:getNearbyVehicleTypes] could not infer service_category_id", {
+      nearbyLog("[user:getNearbyVehicleTypes] could not infer service_category_id", {
         socket_id: socket.id,
         service_type_id: socket.nearbyServiceTypeId ?? null,
       });

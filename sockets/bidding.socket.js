@@ -1560,11 +1560,14 @@ const LARAVEL_DRIVER_UPDATE_LIST_NOTIFICATION_PATH =
 const LARAVEL_INTERNAL_SECRET = String(
   process.env.SOCKET_INTERNAL_SECRET || process.env.LARAVEL_INTERNAL_SECRET || ""
 ).trim();
+const LARAVEL_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_TIMEOUT_MS))
+  ? Math.max(1000, Number(process.env.LARAVEL_TIMEOUT_MS))
+  : 7000;
 const LARAVEL_ACCEPT_BID_TIMEOUT_MS = Number.isFinite(
   Number(process.env.LARAVEL_ACCEPT_BID_TIMEOUT_MS)
 )
   ? Number(process.env.LARAVEL_ACCEPT_BID_TIMEOUT_MS)
-  : 7000;
+  : LARAVEL_TIMEOUT_MS;
 const LARAVEL_ROUTE_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
   ? Math.max(1000, Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
   : 10000;
@@ -1664,7 +1667,7 @@ async function syncDriverRejectNotification({
     for (const path of rejectPaths) {
       try {
         await axios.post(`${LARAVEL_BASE_URL}${path}`, rejectPayload, {
-          timeout: 7000,
+          timeout: LARAVEL_TIMEOUT_MS,
         });
 
         console.log("[driver:declineRide] Laravel reject sync succeeded", {
@@ -1775,7 +1778,7 @@ async function syncDriverUpdateListNotification({
       `${LARAVEL_BASE_URL}${LARAVEL_DRIVER_UPDATE_LIST_NOTIFICATION_PATH}`,
       laravelSyncPayload,
       {
-        timeout: 7000,
+        timeout: LARAVEL_TIMEOUT_MS,
         headers: buildInternalLaravelHeaders(),
       }
     );
@@ -2418,7 +2421,7 @@ const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) =>
         driver_service_id: driverServiceId,
         update_status: 1,
       },
-      { timeout: 7000 }
+      { timeout: LARAVEL_TIMEOUT_MS }
     );
 
     let d = res?.data || {};
@@ -6969,7 +6972,7 @@ socket.emit("ride:candidatesSummary", {
 
     axios
       .post(`${LARAVEL_BASE_URL}/api/customer/transport/cancel-ride`, cancelPayload, {
-        timeout: 7000,
+        timeout: LARAVEL_TIMEOUT_MS,
       })
       .then((response) => {
         console.log("API Response: Ride Cancelled", response.data);
@@ -7778,7 +7781,7 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
 
   axios
     .post(`${LARAVEL_BASE_URL}${LARAVEL_DRIVER_BID_PATH}`, bidPayload, {
-      timeout: 7000,
+      timeout: LARAVEL_TIMEOUT_MS,
     })
     .then((response) => {
       console.log("[driver:submitBid][api-ok]", {

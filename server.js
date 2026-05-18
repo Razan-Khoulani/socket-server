@@ -52,7 +52,9 @@ const LARAVEL_BASE_URL =
   process.env.LARAVEL_URL ||
   "https://api.catch-syria.com";
 const LARAVEL_DRIVER_INVOICE_PATH = "/api/driver/transport-ride-invoice";
-const LARAVEL_TIMEOUT_MS = 7000;
+const LARAVEL_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_TIMEOUT_MS))
+  ? Math.max(1000, Number(process.env.LARAVEL_TIMEOUT_MS))
+  : 7000;
 const SOCKET_BIND_HOST =
   process.env.SOCKET_BIND_HOST || "0.0.0.0";
 const SOCKET_BIND_PORT =
