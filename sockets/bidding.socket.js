@@ -5173,6 +5173,16 @@ async function dispatchToNearbyDrivers(io, data) {
 const incrementalExpansion =
   data?.dispatch_expand_reason === "timeout" ||
   toNumber(data?.dispatch_incremental_only) === 1;
+const forceNewSearchWindow =
+  toNumber(data?.force_new_search_window ?? data?.reset_search_window ?? null) === 1;
+const shouldResetCandidateHistory =
+  forceNewSearchWindow &&
+  !incrementalExpansion &&
+  radiusPlan.currentStageIndex === 0;
+if (shouldResetCandidateHistory) {
+  rideCandidates.delete(rideId);
+  clearRideDriverStates(rideId);
+}
 const shouldRetainExistingCandidates = incrementalExpansion;
 const existingCandidateSet = shouldRetainExistingCandidates
   ? (rideCandidates.get(rideId) ?? new Set())
