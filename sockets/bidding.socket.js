@@ -4996,7 +4996,7 @@ async function dispatchToNearbyDrivers(io, data) {
           gender: requiredGender,
         }
       : {}),
-    ...(needChildSeat === 0 || needChildSeat === 1
+    ...(needChildSeat === 1
       ? {
           need_child_seat: needChildSeat,
           child_seat: needChildSeat,
@@ -5007,7 +5007,7 @@ async function dispatchToNearbyDrivers(io, data) {
           child_seat_accessibility: needChildSeat,
         }
       : {}),
-    ...(needHandicap === 0 || needHandicap === 1
+    ...(needHandicap === 1
       ? {
           need_handicap: needHandicap,
           handicap: needHandicap,
@@ -5289,13 +5289,13 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   final_candidates: nextCandidateIds.length,
   required_gender: requiredGender ?? null,
   need_child_seat: needChildSeat ?? null,
-  need_child_seat_filter_applied: needChildSeat === 0 || needChildSeat === 1,
+  need_child_seat_filter_applied: needChildSeat === 1,
   raw_required_gender: requiredGenderRaw ?? null,
   raw_smoking: needChildSeatRaw ?? null,
   raw_child_seat: needChildSeatRaw ?? null,
   raw_need_child_seat: needChildSeatRaw ?? null,
   need_handicap: needHandicap ?? null,
-  need_handicap_filter_applied: needHandicap === 0 || needHandicap === 1,
+  need_handicap_filter_applied: needHandicap === 1,
   raw_handicap: needHandicapRaw ?? null,
   raw_need_handicap: needHandicapRaw ?? null,
   raw_require_handicap: needHandicapRaw ?? null,
