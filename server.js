@@ -1138,6 +1138,35 @@ const normalizeLegacyRideNewPayload = (incoming = {}) => {
       payload.destination_address ?? payload.dropoff_address ?? null,
     service_category_id:
       payload.service_category_id ?? payload.service_cat_id ?? null,
+    service_type_id:
+      payload.service_type_id ??
+      payload.vehicle_type_id ??
+      payload.vehicle_type ??
+      null,
+    required_gender:
+      payload.required_gender ??
+      payload.required_driver_gender ??
+      payload.driver_gender ??
+      payload.gender ??
+      null,
+    need_child_seat:
+      payload.need_child_seat ??
+      payload.child_seat ??
+      payload.require_child_seat ??
+      payload.smoking ??
+      payload.need_smoking ??
+      payload.smoking_value ??
+      payload.child_seat_accessibility ??
+      null,
+    need_handicap:
+      payload.need_handicap ??
+      payload.handicap ??
+      payload.require_handicap ??
+      payload.need_special_needs ??
+      payload.special_needs ??
+      payload.handicap_accessibility ??
+      payload.can_receive_special_needs ??
+      null,
     user_bid_price:
       payload.user_bid_price ??
       payload.price ??
@@ -1167,6 +1196,30 @@ const normalizeLegacyRideNewPayload = (incoming = {}) => {
     dispatch_timeout_s: payload.dispatch_timeout_s ?? payload.request_timeout ?? null,
     force_new_search_window: 1,
   };
+
+  if (normalized.required_gender !== null && normalized.required_gender !== undefined) {
+    normalized.required_driver_gender = normalized.required_gender;
+    normalized.driver_gender = normalized.required_gender;
+    normalized.gender = normalized.required_gender;
+  }
+
+  if (normalized.need_child_seat !== null && normalized.need_child_seat !== undefined) {
+    normalized.child_seat = normalized.need_child_seat;
+    normalized.require_child_seat = normalized.need_child_seat;
+    normalized.smoking = normalized.need_child_seat;
+    normalized.need_smoking = normalized.need_child_seat;
+    normalized.smoking_value = normalized.need_child_seat;
+    normalized.child_seat_accessibility = normalized.need_child_seat;
+  }
+
+  if (normalized.need_handicap !== null && normalized.need_handicap !== undefined) {
+    normalized.handicap = normalized.need_handicap;
+    normalized.require_handicap = normalized.need_handicap;
+    normalized.need_special_needs = normalized.need_handicap;
+    normalized.special_needs = normalized.need_handicap;
+    normalized.handicap_accessibility = normalized.need_handicap;
+    normalized.can_receive_special_needs = normalized.need_handicap;
+  }
 
   if (legacyDriverIds.length > 0) {
     normalized.driver_ids = legacyDriverIds;
