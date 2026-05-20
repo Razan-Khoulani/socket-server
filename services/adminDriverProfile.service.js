@@ -4,7 +4,7 @@ const PROFILE_CACHE_TTL_MS = Number.isFinite(
   Number(process.env.DRIVER_ADMIN_PROFILE_CACHE_TTL_MS)
 )
   ? Math.max(5000, Number(process.env.DRIVER_ADMIN_PROFILE_CACHE_TTL_MS))
-  : 30 * 1000;
+  : 60 * 1000;
 const profileCache = new Map();
 
 const LARAVEL_BASE_URL = String(

@@ -41,7 +41,7 @@ const DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS = Number.isFinite(
   Number(process.env.DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS)
 )
   ? Math.max(10_000, Number(process.env.DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS))
-  : 30_000;
+  : 60_000;
 const extraDistanceSessions = new Map(); // rideId -> { driverId, acceptedAt, baselineRoutePointCount, baselineTotalDistanceKm, acceptedLat, acceptedLong, settled }
 const STATUS_DEDUPE_TTL_MS = Number.isFinite(
   Number(process.env.STATUS_DEDUPE_TTL_MS)
