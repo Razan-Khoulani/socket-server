@@ -4776,13 +4776,6 @@ async function dispatchToNearbyDrivers(io, data) {
     data = inputPayload;
 
   // Re-broadcast decision must rely on explicit input only, not merged snapshot fields.
-  const inputDispatchExpandReason =
-    toTrimmedText(inputPayload?.dispatch_expand_reason)?.toLowerCase() ?? null;
-  const hasExplicitPriceUpdateSignal =
-    inputPayload?.isPriceUpdated === true ||
-    inputPayload?.isPriceUpdated === 1 ||
-    inputPayload?.isPriceUpdated === "1" ||
-    toNumber(inputPayload?.updatedPrice ?? null) !== null;
   const forcedRebroadcastFromInput =
     toBinaryFlag(inputPayload?.force_rebroadcast ?? inputPayload?.rebroadcast_all ?? null) === 1;
 
@@ -5358,13 +5351,9 @@ const candidateSync = syncRideCandidates(
 );
 
 // افتراضياً: dispatch يكون فقط للجدد حتى لا نكرر bidRequest على نفس السائق.
-// إعادة البث للجميع تكون فقط للحالات المقصودة (تحديث سعر/تفاعل مستخدم/طلب صريح).
-const rebroadcastForPriceUpdateWithoutExpansion =
-  inputDispatchExpandReason === null && hasExplicitPriceUpdateSignal;
-const shouldRebroadcastBidRequest =
-  forcedRebroadcastFromInput ||
-  inputDispatchExpandReason === "user_response" ||
-  rebroadcastForPriceUpdateWithoutExpansion;
+// إعادة البث للجميع تكون فقط بطلب صريح (force_rebroadcast / rebroadcast_all),
+// ونستخدمها في retry.
+const shouldRebroadcastBidRequest = forcedRebroadcastFromInput;
 
 const notifyDriverIdSet = new Set(
   shouldRebroadcastBidRequest

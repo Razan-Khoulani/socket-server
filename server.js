@@ -2412,6 +2412,10 @@ app.post("/events/internal/ride-dispatch-retry", async (req, res) => {
     pickup_long: long,
     user_bid_price: base,
     min_fare_amount: min,
+    dispatch_expand_reason: "retry",
+    dispatch_incremental_only: 0,
+    force_new_search_window: 1,
+    rebroadcast_all: 1,
     ...(rad !== null ? { radius: rad } : {}),
     ...(dispatchTimeoutSec !== null ? { dispatch_timeout_s: dispatchTimeoutSec } : {}),
   });
