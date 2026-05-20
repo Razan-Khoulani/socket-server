@@ -373,9 +373,9 @@ const resolveAdditionalRemarks = (...sources) => {
 
   return null;
 };
-const resolveDispatchPreferenceValue = (payload = {}, keys = []) => {
+const resolveDispatchPreferenceInfo = (payload = {}, keys = []) => {
   if (!payload || typeof payload !== "object" || !Array.isArray(keys) || keys.length === 0) {
-    return null;
+    return { provided: false, value: null, key: null };
   }
 
   const dispatchPayload = toObjectPayload(
@@ -405,11 +405,17 @@ const resolveDispatchPreferenceValue = (payload = {}, keys = []) => {
 
   for (const scope of scopes) {
     if (!scope || typeof scope !== "object") continue;
-    const resolved = pickFirstValue(...keys.map((key) => scope?.[key]));
-    if (resolved !== null) return resolved;
+    for (const key of keys) {
+      if (!Object.prototype.hasOwnProperty.call(scope, key)) continue;
+      return {
+        provided: true,
+        value: scope[key],
+        key,
+      };
+    }
   }
 
-  return null;
+  return { provided: false, value: null, key: null };
 };
 const getRideIdFromDriverPayload = (payload = {}) => {
   const nestedRide = getNestedRidePayload(payload);
@@ -4958,7 +4964,7 @@ async function dispatchToNearbyDrivers(io, data) {
   );
 
   // ✅ optional filter requirements (apply only if provided)
-  const requiredGenderRaw = resolveDispatchPreferenceValue(data, [
+  const requiredGenderInfo = resolveDispatchPreferenceInfo(data, [
     "required_driver_gender",
     "required_gender",
     "driver_gender",
@@ -4966,7 +4972,7 @@ async function dispatchToNearbyDrivers(io, data) {
     "requiredDriverGender",
     "driverGender",
   ]);
-  const needChildSeatRaw = resolveDispatchPreferenceValue(data, [
+  const needChildSeatInfo = resolveDispatchPreferenceInfo(data, [
     "need_child_seat",
     "child_seat",
     "require_child_seat",
@@ -4975,7 +4981,7 @@ async function dispatchToNearbyDrivers(io, data) {
     "smoking_value",
     "child_seat_accessibility",
   ]);
-  const needHandicapRaw = resolveDispatchPreferenceValue(data, [
+  const needHandicapInfo = resolveDispatchPreferenceInfo(data, [
     "need_handicap",
     "handicap",
     "require_handicap",
@@ -4984,11 +4990,23 @@ async function dispatchToNearbyDrivers(io, data) {
     "handicap_accessibility",
     "can_receive_special_needs",
   ]);
+  const requiredGenderRaw = requiredGenderInfo.value;
+  const needChildSeatRaw = needChildSeatInfo.value;
+  const needHandicapRaw = needHandicapInfo.value;
+  const requiredGenderProvided = requiredGenderInfo.provided;
+  const needChildSeatProvided = needChildSeatInfo.provided;
+  const needHandicapProvided = needHandicapInfo.provided;
   const requiredGender = toGenderFilter(requiredGenderRaw);
   const needChildSeat = toBinaryFlag(needChildSeatRaw);
   const needHandicap = toBinaryFlag(needHandicapRaw);
+  const applyRequiredGenderFilter =
+    requiredGenderProvided && (requiredGender === 1 || requiredGender === 2);
+  const applyNeedChildSeatFilter =
+    needChildSeatProvided && needChildSeat === 1;
+  const applyNeedHandicapFilter =
+    needHandicapProvided && needHandicap === 1;
   const dispatchPreferencePayload = {
-    ...(requiredGender === 1 || requiredGender === 2
+    ...(applyRequiredGenderFilter
       ? {
           required_driver_gender: requiredGender,
           required_gender: requiredGender,
@@ -4996,7 +5014,7 @@ async function dispatchToNearbyDrivers(io, data) {
           gender: requiredGender,
         }
       : {}),
-    ...(needChildSeat === 1
+    ...(applyNeedChildSeatFilter
       ? {
           need_child_seat: needChildSeat,
           child_seat: needChildSeat,
@@ -5007,7 +5025,7 @@ async function dispatchToNearbyDrivers(io, data) {
           child_seat_accessibility: needChildSeat,
         }
       : {}),
-    ...(needHandicap === 1
+    ...(applyNeedHandicapFilter
       ? {
           need_handicap: needHandicap,
           handicap: needHandicap,
@@ -5126,9 +5144,9 @@ async function dispatchToNearbyDrivers(io, data) {
     only_online: true,
     service_type_id: serviceTypeId,
     max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
-    required_gender: requiredGender,
-    need_child_seat: needChildSeat,
-    need_handicap: needHandicap,
+    required_gender: applyRequiredGenderFilter ? requiredGender : null,
+    need_child_seat: applyNeedChildSeatFilter ? needChildSeat : null,
+    need_handicap: applyNeedHandicapFilter ? needHandicap : null,
   });
 
   const availableAirResults = await mapWithConcurrency(
@@ -5304,21 +5322,24 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   retained_existing_candidates: retainedExistingIds.length,
   new_candidates: newCandidateIds.length,
   final_candidates: nextCandidateIds.length,
-  required_gender: requiredGender ?? null,
-  required_gender_filter_applied: requiredGender === 1 || requiredGender === 2,
-  need_child_seat: needChildSeat ?? null,
-  need_child_seat_filter_applied: needChildSeat === 1,
+  required_gender: applyRequiredGenderFilter ? requiredGender : null,
+  required_gender_filter_applied: applyRequiredGenderFilter,
+  need_child_seat: applyNeedChildSeatFilter ? needChildSeat : null,
+  need_child_seat_filter_applied: applyNeedChildSeatFilter,
   raw_required_gender: requiredGenderRaw ?? null,
+  required_gender_provided: requiredGenderProvided,
   raw_smoking: needChildSeatRaw ?? null,
   raw_child_seat: needChildSeatRaw ?? null,
   raw_need_child_seat: needChildSeatRaw ?? null,
-  need_handicap: needHandicap ?? null,
-  need_handicap_filter_applied: needHandicap === 1,
+  need_child_seat_provided: needChildSeatProvided,
+  need_handicap: applyNeedHandicapFilter ? needHandicap : null,
+  need_handicap_filter_applied: applyNeedHandicapFilter,
   raw_handicap: needHandicapRaw ?? null,
   raw_need_handicap: needHandicapRaw ?? null,
   raw_require_handicap: needHandicapRaw ?? null,
   raw_special_needs: needHandicapRaw ?? null,
   raw_need_special_needs: needHandicapRaw ?? null,
+  need_handicap_provided: needHandicapProvided,
   has_user_details: !!userDetails,
   token_present: !!tokenTmp,
   additional_remarks: additionalRemarks ?? null,
