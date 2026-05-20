@@ -5168,7 +5168,15 @@ async function dispatchToNearbyDrivers(io, data) {
         })
       : roadFilteredRaw;
 
-const existingCandidateSet = rideCandidates.get(rideId) ?? new Set();
+// Keep old candidates only during incremental expansion stages.
+// For a fresh/initial dispatch window, start from current filtered drivers only.
+const incrementalExpansion =
+  data?.dispatch_expand_reason === "timeout" ||
+  toNumber(data?.dispatch_incremental_only) === 1;
+const shouldRetainExistingCandidates = incrementalExpansion;
+const existingCandidateSet = shouldRetainExistingCandidates
+  ? (rideCandidates.get(rideId) ?? new Set())
+  : new Set();
 
 const eligibleForDispatch = roadFiltered.filter((driver) => {
   const driverId = toNumber(driver?.driver_id);
@@ -5224,9 +5232,11 @@ const candidateDriversRaw =
 // - ما عندهم رحلة ثانية
 // - ما عندهم queued ride ثانية
 // - العرض لسا صالح
-const retainedExistingIds = Array.from(existingCandidateSet).filter((driverId) =>
-  shouldKeepExistingCandidateForRide(rideId, driverId)
-);
+const retainedExistingIds = shouldRetainExistingCandidates
+  ? Array.from(existingCandidateSet).filter((driverId) =>
+      shouldKeepExistingCandidateForRide(rideId, driverId)
+    )
+  : [];
 
 // السائقين الجدد من الفلترة الحالية
 const newCandidateIds = candidateDriversRaw
@@ -5240,9 +5250,6 @@ const nextCandidateIds = Array.from(new Set([
 ]));
 
 // هذا المتغير منخليه فقط للـ log والتوافق مع بقية المنطق
-const incrementalExpansion =
-  data?.dispatch_expand_reason === "timeout" ||
-  toNumber(data?.dispatch_incremental_only) === 1;
 
 const remainingSearchStageCount = Math.max(
   1,
