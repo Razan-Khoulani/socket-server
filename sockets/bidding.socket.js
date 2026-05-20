@@ -4988,7 +4988,7 @@ async function dispatchToNearbyDrivers(io, data) {
   const needChildSeat = toBinaryFlag(needChildSeatRaw);
   const needHandicap = toBinaryFlag(needHandicapRaw);
   const dispatchPreferencePayload = {
-    ...(requiredGender === 1 || requiredGender === 2 || requiredGender === 0
+    ...(requiredGender === 1 || requiredGender === 2
       ? {
           required_driver_gender: requiredGender,
           required_gender: requiredGender,
@@ -5288,6 +5288,7 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   new_candidates: newCandidateIds.length,
   final_candidates: nextCandidateIds.length,
   required_gender: requiredGender ?? null,
+  required_gender_filter_applied: requiredGender === 1 || requiredGender === 2,
   need_child_seat: needChildSeat ?? null,
   need_child_seat_filter_applied: needChildSeat === 1,
   raw_required_gender: requiredGenderRaw ?? null,
