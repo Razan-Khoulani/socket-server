@@ -2834,26 +2834,30 @@ item.max_price = priceBounds.max_price;
     const pricingTypesSig = buildVehicleTypesSignature(pricingTypes);
 
     const snapshotBaseFare =
-      toNumber(rideDetails?.base_fare) ??
-      toNumber(rideDetails?.estimated_fare) ??
       toNumber(selectedVehicleType?.base_fare) ??
       toNumber(selectedVehicleType?.estimated_fare) ??
+      toNumber(rideDetails?.base_fare) ??
+      toNumber(rideDetails?.estimated_fare) ??
+      toNumber(rideDetails?.user_bid_price) ??
+      toNumber(rideDetails?.min_fare_amount) ??
       null;
     const snapshotEstimatedFare =
-      toNumber(rideDetails?.estimated_fare) ??
-      toNumber(rideDetails?.base_fare) ??
       toNumber(selectedVehicleType?.estimated_fare) ??
       toNumber(selectedVehicleType?.base_fare) ??
+      toNumber(rideDetails?.estimated_fare) ??
+      toNumber(rideDetails?.base_fare) ??
+      toNumber(rideDetails?.user_bid_price) ??
+      toNumber(rideDetails?.min_fare_amount) ??
       null;
 
     const snapshotMinPrice =
-      toNumber(rideDetails?.min_price) ??
       toNumber(selectedVehicleType?.min_price) ??
+      toNumber(rideDetails?.min_price) ??
       null;
 
     const snapshotMaxPrice =
-      toNumber(rideDetails?.max_price) ??
       toNumber(selectedVehicleType?.max_price) ??
+      toNumber(rideDetails?.max_price) ??
       null;
 
     const timer = ensureRideTimer(rideId, rideDetails);
