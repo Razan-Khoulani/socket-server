@@ -1187,21 +1187,30 @@ function resolveRideDriverIdentity(rideId, payload = {}, options = {}) {
 }
 
 const round2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
-const buildPriceBounds = (baseFare, distanceKm = null) => {
+const buildPriceBounds = (baseFare, estimatedFare = null, distanceKm = null) => {
   const base = toNumber(baseFare);
-  if (base === null) {
+  const estimated = toNumber(estimatedFare);
+  const distance = toNumber(distanceKm);
+  const hasAny = base !== null || estimated !== null;
+  if (!hasAny) {
     return {
       base_fare: null,
+      estimated_fare: null,
       min_price: null,
       max_price: null,
     };
   }
 
+  const roundedBase = base !== null ? round2(base) : null;
+  const roundedEstimated = estimated !== null ? round2(estimated) : roundedBase;
+  const anchor = roundedEstimated ?? roundedBase;
+
   return {
-    base_fare: round2(base),
-    // Business rule: min is always 70% of computed trip price.
-    min_price: round2(base * 0.7),
-    max_price: round2(base * 2),
+    base_fare: roundedBase,
+    estimated_fare: roundedEstimated,
+    min_price:
+      anchor !== null ? round2(distance !== null && distance <= 1 ? anchor : anchor * 0.7) : null,
+    max_price: anchor !== null ? round2(anchor * 2) : null,
   };
 };
 
@@ -1223,17 +1232,18 @@ const normalizePriceBoundsPair = (minRaw, maxRaw) => {
 const getPayloadDistanceKm = (payload = {}) => {
   const distance = pickFirstValue(
     toRouteMetricNumber(payload?.distance_km),
-    toRouteMetricNumber(payload?.route_api_distance_km),
-    toRouteMetricNumber(payload?.ride_details?.route_api_distance_km),
-    toRouteMetricNumber(payload?.meta?.route_api_distance_km),
     toRouteMetricNumber(payload?.meta?.route_api_data?.distance_km),
     toRouteMetricNumber(payload?.meta?.route_api_data?.total_distance),
+    toRouteMetricNumber(payload?.meta?.route_api_data?.route),
     toRouteMetricNumber(payload?.distance),
     toRouteMetricNumber(payload?.route),
     toRouteMetricNumber(payload?.total_distance),
     toRouteMetricNumber(payload?.meta?.distance),
     toRouteMetricNumber(payload?.meta?.route),
-    toRouteMetricNumber(payload?.meta?.total_distance)
+    toRouteMetricNumber(payload?.meta?.total_distance),
+    toRouteMetricNumber(payload?.route_api_distance_km),
+    toRouteMetricNumber(payload?.ride_details?.route_api_distance_km),
+    toRouteMetricNumber(payload?.meta?.route_api_distance_km)
   );
 
   return distance !== null && distance >= 0 ? distance : null;
@@ -1274,10 +1284,16 @@ const getRidePriceBounds = (payload = {}) => {
     toNumber(payload?.ride_details?.estimated_fare),
     toNumber(payload?.meta?.estimated_fare)
   );
+  const explicitEstimated = pickFirstValue(
+    toNumber(payload?.estimated_fare),
+    toNumber(payload?.ride_details?.estimated_fare),
+    toNumber(payload?.meta?.estimated_fare)
+  );
   if (explicitMin !== null && explicitMax !== null) {
     const normalized = normalizePriceBoundsPair(explicitMin, explicitMax);
     return {
       base_fare: explicitBase !== null ? round2(explicitBase) : null,
+      estimated_fare: explicitEstimated !== null ? round2(explicitEstimated) : null,
       min_price: normalized.min_price,
       max_price: normalized.max_price,
     };
@@ -1300,8 +1316,8 @@ const getRidePriceBounds = (payload = {}) => {
     toNumber(payload?.ride_details?.offered_price)
   );
 
-  if (computedBase !== null) {
-    return buildPriceBounds(computedBase, distanceKm);
+  if (computedBase !== null || explicitEstimated !== null) {
+    return buildPriceBounds(explicitBase ?? computedBase, explicitEstimated, distanceKm);
   }
 
   const normalized = normalizePriceBoundsPair(explicitMin, explicitMax);
@@ -4899,6 +4915,11 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(previousRideSnapshot?.ride_details?.base_fare),
     toNumber(previousRideSnapshot?.meta?.base_fare)
   );
+  const persistedEstimatedFare = pickFirstValue(
+    toNumber(previousRideSnapshot?.estimated_fare),
+    toNumber(previousRideSnapshot?.ride_details?.estimated_fare),
+    toNumber(previousRideSnapshot?.meta?.estimated_fare)
+  );
   const persistedMinPrice = pickFirstValue(
     toNumber(previousRideSnapshot?.min_price),
     toNumber(previousRideSnapshot?.ride_details?.min_price),
@@ -4925,7 +4946,17 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(data?.price),
     toNumber(data?.offered_price)
   );
+  const incomingEstimatedFare = pickFirstValue(
+    toNumber(data?.estimated_fare),
+    toNumber(data?.ride_details?.estimated_fare),
+    toNumber(data?.meta?.estimated_fare)
+  );
   const resolvedBaseFare = pickFirstValue(persistedBaseFare, incomingSystemBaseFare);
+  const resolvedEstimatedFare = pickFirstValue(persistedEstimatedFare, incomingEstimatedFare);
+  const tripDistanceKm = pickFirstValue(
+    getPayloadDistanceKm(data),
+    getPayloadDistanceKm(previousRideSnapshot)
+  );
   const base =
     toNumber(data?.user_bid_price) ??
     toNumber(data?.price) ??
@@ -4961,7 +4992,9 @@ async function dispatchToNearbyDrivers(io, data) {
   );
   const incomingBounds = normalizePriceBoundsPair(incomingMinPrice, incomingMaxPrice);
   let priceBounds = null;
-  if (incomingBounds.min_price !== null && incomingBounds.max_price !== null) {
+  if (resolvedBaseFare !== null || resolvedEstimatedFare !== null) {
+    priceBounds = buildPriceBounds(resolvedBaseFare, resolvedEstimatedFare, tripDistanceKm);
+  } else if (incomingBounds.min_price !== null && incomingBounds.max_price !== null) {
     priceBounds = {
       base_fare: resolvedBaseFare !== null ? round2(resolvedBaseFare) : null,
       min_price: incomingBounds.min_price,
@@ -4973,8 +5006,6 @@ async function dispatchToNearbyDrivers(io, data) {
       min_price: snapshotBounds.min_price,
       max_price: snapshotBounds.max_price,
     };
-  } else if (resolvedBaseFare !== null) {
-    priceBounds = buildPriceBounds(resolvedBaseFare);
   } else {
     priceBounds = getRidePriceBounds(data);
   }
