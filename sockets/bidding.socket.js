@@ -3160,11 +3160,199 @@ const rideTimers = new Map(); // rideId -> setTimeout ID
 
 // الخريطة لحفظ تفاصيل الرحلات في الذاكرة (إذا احتجتها لاحقاً)
 const rideDetailsMap = new Map();
+const rideLockedPriceBoundsByRide = new Map(); // rideId -> { min_price, max_price }
+
+const extractRidePriceBoundsFromSnapshot = (snapshot = null) => {
+  if (!snapshot || typeof snapshot !== "object") {
+    return { min_price: null, max_price: null };
+  }
+  const minRaw = pickFirstValue(
+    toNumber(snapshot?.min_price),
+    toNumber(snapshot?.min_fare),
+    toNumber(snapshot?.MIN_PRICE),
+    toNumber(snapshot?.ride_details?.min_price),
+    toNumber(snapshot?.ride_details?.min_fare),
+    toNumber(snapshot?.ride_details?.MIN_PRICE),
+    toNumber(snapshot?.meta?.min_price),
+    toNumber(snapshot?.meta?.min_fare),
+    toNumber(snapshot?.meta?.MIN_PRICE)
+  );
+  const maxRaw = pickFirstValue(
+    toNumber(snapshot?.max_price),
+    toNumber(snapshot?.max_fare),
+    toNumber(snapshot?.MAX_PRICE),
+    toNumber(snapshot?.ride_details?.max_price),
+    toNumber(snapshot?.ride_details?.max_fare),
+    toNumber(snapshot?.ride_details?.MAX_PRICE),
+    toNumber(snapshot?.meta?.max_price),
+    toNumber(snapshot?.meta?.max_fare),
+    toNumber(snapshot?.meta?.MAX_PRICE)
+  );
+  const normalizedExplicitBounds = normalizePriceBoundsPair(minRaw, maxRaw);
+  if (
+    toNumber(normalizedExplicitBounds?.min_price) !== null &&
+    toNumber(normalizedExplicitBounds?.max_price) !== null
+  ) {
+    return normalizedExplicitBounds;
+  }
+
+  // Fallback for first snapshot when explicit min/max are not present yet.
+  // We derive once from base/estimated fare so later user price updates cannot shift bounds.
+  const computedBounds = getRidePriceBounds(snapshot);
+  return normalizePriceBoundsPair(
+    pickFirstValue(
+      toNumber(normalizedExplicitBounds?.min_price),
+      toNumber(computedBounds?.min_price)
+    ),
+    pickFirstValue(
+      toNumber(normalizedExplicitBounds?.max_price),
+      toNumber(computedBounds?.max_price)
+    )
+  );
+};
+
+const mergeRideSnapshots = (previousSnapshot = null, incomingSnapshot = null) => {
+  if (!previousSnapshot || typeof previousSnapshot !== "object") {
+    return incomingSnapshot;
+  }
+  if (!incomingSnapshot || typeof incomingSnapshot !== "object") {
+    return previousSnapshot;
+  }
+  return {
+    ...previousSnapshot,
+    ...incomingSnapshot,
+    ride_details: {
+      ...(previousSnapshot?.ride_details &&
+      typeof previousSnapshot.ride_details === "object" &&
+      !Array.isArray(previousSnapshot.ride_details)
+        ? previousSnapshot.ride_details
+        : {}),
+      ...(incomingSnapshot?.ride_details &&
+      typeof incomingSnapshot.ride_details === "object" &&
+      !Array.isArray(incomingSnapshot.ride_details)
+        ? incomingSnapshot.ride_details
+        : {}),
+    },
+    meta: {
+      ...(previousSnapshot?.meta &&
+      typeof previousSnapshot.meta === "object" &&
+      !Array.isArray(previousSnapshot.meta)
+        ? previousSnapshot.meta
+        : {}),
+      ...(incomingSnapshot?.meta &&
+      typeof incomingSnapshot.meta === "object" &&
+      !Array.isArray(incomingSnapshot.meta)
+        ? incomingSnapshot.meta
+        : {}),
+    },
+    user_details: {
+      ...(previousSnapshot?.user_details &&
+      typeof previousSnapshot.user_details === "object" &&
+      !Array.isArray(previousSnapshot.user_details)
+        ? previousSnapshot.user_details
+        : {}),
+      ...(incomingSnapshot?.user_details &&
+      typeof incomingSnapshot.user_details === "object" &&
+      !Array.isArray(incomingSnapshot.user_details)
+        ? incomingSnapshot.user_details
+        : {}),
+    },
+  };
+};
+
+const applyLockedRidePriceBounds = (snapshot = null, bounds = null) => {
+  if (!snapshot || typeof snapshot !== "object" || !bounds) return snapshot;
+  const min = toNumber(bounds?.min_price);
+  const max = toNumber(bounds?.max_price);
+  if (min === null || max === null) return snapshot;
+
+  const rideDetails =
+    snapshot?.ride_details && typeof snapshot.ride_details === "object" && !Array.isArray(snapshot.ride_details)
+      ? snapshot.ride_details
+      : {};
+  const meta =
+    snapshot?.meta && typeof snapshot.meta === "object" && !Array.isArray(snapshot.meta)
+      ? snapshot.meta
+      : {};
+
+  return {
+    ...snapshot,
+    min_price: min,
+    max_price: max,
+    min_fare: min,
+    max_fare: max,
+    MIN_PRICE: min,
+    MAX_PRICE: max,
+    min_fare_amount: pickFirstValue(toNumber(snapshot?.min_fare_amount), min),
+    max_fare_amount: pickFirstValue(toNumber(snapshot?.max_fare_amount), max),
+    ride_details: {
+      ...rideDetails,
+      min_price: min,
+      max_price: max,
+      min_fare: min,
+      max_fare: max,
+      MIN_PRICE: min,
+      MAX_PRICE: max,
+      min_fare_amount: pickFirstValue(toNumber(rideDetails?.min_fare_amount), min),
+      max_fare_amount: pickFirstValue(toNumber(rideDetails?.max_fare_amount), max),
+    },
+    meta: {
+      ...meta,
+      min_price: min,
+      max_price: max,
+      min_fare: min,
+      max_fare: max,
+      MIN_PRICE: min,
+      MAX_PRICE: max,
+      min_fare_amount: pickFirstValue(toNumber(meta?.min_fare_amount), min),
+      max_fare_amount: pickFirstValue(toNumber(meta?.max_fare_amount), max),
+    },
+  };
+};
+
+const clearRideStoredSnapshot = (rideId) => {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return;
+  rideDetailsMap.delete(safeRideId);
+  rideLockedPriceBoundsByRide.delete(safeRideId);
+};
+
 function saveRideDetails(rideId, rideDetails) {
-  cancelRetryStateCleanup(rideId);
-  rideDetailsMap.set(rideId, rideDetails);
-  touchRideState(rideId);
-  debugLog("ride:details:saved", { ride_id: rideId }, null);
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId || !rideDetails || typeof rideDetails !== "object") return;
+  cancelRetryStateCleanup(safeRideId);
+
+  const previousSnapshot = rideDetailsMap.get(safeRideId) ?? null;
+  const mergedSnapshot = mergeRideSnapshots(previousSnapshot, rideDetails);
+  const previousBounds = extractRidePriceBoundsFromSnapshot(previousSnapshot);
+  const mergedBounds = extractRidePriceBoundsFromSnapshot(mergedSnapshot);
+  const existingLockedBounds = rideLockedPriceBoundsByRide.get(safeRideId) ?? null;
+
+  const lockedBounds = normalizePriceBoundsPair(
+    pickFirstValue(
+      toNumber(existingLockedBounds?.min_price),
+      toNumber(previousBounds?.min_price),
+      toNumber(mergedBounds?.min_price)
+    ),
+    pickFirstValue(
+      toNumber(existingLockedBounds?.max_price),
+      toNumber(previousBounds?.max_price),
+      toNumber(mergedBounds?.max_price)
+    )
+  );
+
+  let snapshotToPersist = mergedSnapshot;
+  if (lockedBounds.min_price !== null && lockedBounds.max_price !== null) {
+    rideLockedPriceBoundsByRide.set(safeRideId, {
+      min_price: lockedBounds.min_price,
+      max_price: lockedBounds.max_price,
+    });
+    snapshotToPersist = applyLockedRidePriceBounds(mergedSnapshot, lockedBounds);
+  }
+
+  rideDetailsMap.set(safeRideId, snapshotToPersist);
+  touchRideState(safeRideId);
+  debugLog("ride:details:saved", { ride_id: safeRideId }, null);
 }
 function getRideDetails(rideId) {
   return rideDetailsMap.get(rideId);
@@ -3412,7 +3600,7 @@ function scheduleRetryStateCleanup(
 
   const timer = setTimeout(() => {
     if (preserveSnapshot) {
-      rideDetailsMap.delete(rideId);
+      clearRideStoredSnapshot(rideId);
     }
     if (preserveUser) {
       clearUserRideByRideId(rideId);
@@ -4099,7 +4287,7 @@ setInterval(() => {
       if (getActiveDriverByRide(rideId)) continue;
       if (cancelledRides.has(rideId)) continue;
 
-      rideDetailsMap.delete(rideId);
+      clearRideStoredSnapshot(rideId);
       rideCandidates.delete(rideId);
       clearRideDriverStates(rideId);
       clearUserRideByRideId(rideId);
@@ -4675,7 +4863,7 @@ function removeRideFromAllInboxes(io, rideId, options = {}) {
     clearUserRideByRideId(rideId);
   }
   if (!preserveSnapshot) {
-    rideDetailsMap.delete(rideId);
+    clearRideStoredSnapshot(rideId);
   }
   if (preserveSnapshot || preserveUser) {
     scheduleRetryStateCleanup(rideId, {
@@ -4737,7 +4925,7 @@ function closeRideBidding(io, rideId, opts = {}) {
   const preserveSnapshot = opts.preserveSnapshot === true;
   if (clearUser) clearUserRideByRideId(rideId);
   if (!preserveSnapshot) {
-    rideDetailsMap.delete(rideId);
+    clearRideStoredSnapshot(rideId);
   }
   acceptLocks.delete(rideId);
 
