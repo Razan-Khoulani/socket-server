@@ -4931,20 +4931,50 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(data?.price) ??
     toNumber(data?.offered_price) ??
     null;
-  const min =
-    toNumber(data?.min_fare_amount) ??
-    toNumber(data?.min_price) ??
-    toNumber(data?.min_fare) ??
-    null;
+  const incomingMinPrice = pickFirstValue(
+    toNumber(data?.min_fare_amount),
+    toNumber(data?.min_price),
+    toNumber(data?.min_fare),
+    toNumber(data?.MIN_PRICE),
+    toNumber(data?.ride_details?.min_fare_amount),
+    toNumber(data?.ride_details?.min_price),
+    toNumber(data?.ride_details?.min_fare),
+    toNumber(data?.ride_details?.MIN_PRICE),
+    toNumber(data?.meta?.min_fare_amount),
+    toNumber(data?.meta?.min_price),
+    toNumber(data?.meta?.min_fare),
+    toNumber(data?.meta?.MIN_PRICE)
+  );
+  const incomingMaxPrice = pickFirstValue(
+    toNumber(data?.max_fare_amount),
+    toNumber(data?.max_price),
+    toNumber(data?.max_fare),
+    toNumber(data?.MAX_PRICE),
+    toNumber(data?.ride_details?.max_fare_amount),
+    toNumber(data?.ride_details?.max_price),
+    toNumber(data?.ride_details?.max_fare),
+    toNumber(data?.ride_details?.MAX_PRICE),
+    toNumber(data?.meta?.max_fare_amount),
+    toNumber(data?.meta?.max_price),
+    toNumber(data?.meta?.max_fare),
+    toNumber(data?.meta?.MAX_PRICE)
+  );
+  const incomingBounds = normalizePriceBoundsPair(incomingMinPrice, incomingMaxPrice);
   let priceBounds = null;
-  if (resolvedBaseFare !== null) {
-    priceBounds = buildPriceBounds(resolvedBaseFare);
+  if (incomingBounds.min_price !== null && incomingBounds.max_price !== null) {
+    priceBounds = {
+      base_fare: resolvedBaseFare !== null ? round2(resolvedBaseFare) : null,
+      min_price: incomingBounds.min_price,
+      max_price: incomingBounds.max_price,
+    };
   } else if (snapshotBounds.min_price !== null && snapshotBounds.max_price !== null) {
     priceBounds = {
-      base_fare: null,
+      base_fare: resolvedBaseFare !== null ? round2(resolvedBaseFare) : null,
       min_price: snapshotBounds.min_price,
       max_price: snapshotBounds.max_price,
     };
+  } else if (resolvedBaseFare !== null) {
+    priceBounds = buildPriceBounds(resolvedBaseFare);
   } else {
     priceBounds = getRidePriceBounds(data);
   }
@@ -4963,7 +4993,7 @@ async function dispatchToNearbyDrivers(io, data) {
   dispatchBidPrice = dispatchBidPrice !== null ? round2(dispatchBidPrice) : null;
   const legacyMinFareAmount =
     toNumber(priceBounds?.min_price) ??
-    (min !== null && min > 0 ? min : 0);
+    (incomingMinPrice !== null && incomingMinPrice > 0 ? incomingMinPrice : 0);
   const legacyMaxFareAmount =
     toNumber(priceBounds?.max_price) ??
     (base !== null && base > 0 ? round2(base * 2) : 0);
