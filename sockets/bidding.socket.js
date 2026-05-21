@@ -5895,116 +5895,6 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
   const pendingDriverIds = [];
 
   candidatesToNotify.forEach((d) => {
-    const bidRequestPayload = sanitizeRidePayloadForClient({
-      ride_id: rideId,
-      event_type: "driver_new_bid_request",
-      ui_action: "show_bid_request",
-      auto_open_running: false,
-      is_running_ride: false,
-
-      pickup_lat: lat,
-      pickup_long: long,
-      pickup_address: data.pickup_address ?? null,
-
-      destination_lat: toNumber(data.destination_lat),
-      destination_long: toNumber(data.destination_long),
-      destination_address: data.destination_address ?? null,
-        additional_remarks: additionalRemarks,
-        additional_remark: additionalRemarks,
-        additional_request: additionalRemarks,
-
-      radius: roadRadius,
-      ...dispatchStagePayload,
-      user_bid_price: dispatchBidPrice,
-      min_fare_amount: legacyMinFareAmount,
-      max_fare_amount: legacyMaxFareAmount,
-      base_fare: priceBounds.base_fare,
-      min_price: priceBounds.min_price,
-      max_price: priceBounds.max_price,
-      MIN_PRICE: priceBounds.min_price,
-      MAX_PRICE: priceBounds.max_price,
-      min_fare: priceBounds.min_price,
-      max_fare: priceBounds.max_price,
-
-      user_id: bidReqUserId,
-      user_name: bidReqUserName,
-      user_gender: bidReqUserGender,
-      user_image: bidReqUserImage,
-      user_phone: bidReqUserPhone,
-      user_country_code: bidReqUserCountryCode,
-      user_phone_full: bidReqUserPhoneFull,
-
-      token: tokenTmp ?? null,
-
-      ...(d.driver_to_pickup_distance_m != null
-        ? { driver_to_pickup_distance_m: d.driver_to_pickup_distance_m }
-        : {}),
-      ...(d.driver_to_pickup_distance_km != null
-        ? { driver_to_pickup_distance_km: d.driver_to_pickup_distance_km }
-        : {}),
-      ...(d.driver_to_pickup_duration_s != null
-        ? { driver_to_pickup_duration_s: d.driver_to_pickup_duration_s }
-        : {}),
-      ...(d.driver_to_pickup_duration_min != null
-        ? {
-            driver_to_pickup_duration_min: d.driver_to_pickup_duration_min,
-            estimated_arrival_min: d.driver_to_pickup_duration_min,
-          }
-        : {}),
-
-      ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
-      duration: finalRouteApiDurationMin,
-      route_api_distance_km: finalRouteApiDistanceKm,
-      ride_details: {
-        ride_id: rideId,
-        pickup_lat: lat,
-        pickup_long: long,
-        pickup_address: data.pickup_address ?? null,
-        destination_lat: toNumber(data.destination_lat),
-        destination_long: toNumber(data.destination_long),
-        destination_address: data.destination_address ?? null,
-        additional_remarks: additionalRemarks,
-        additional_remark: additionalRemarks,
-        additional_request: additionalRemarks,
-        user_bid_price: dispatchBidPrice,
-        min_fare_amount: legacyMinFareAmount,
-        max_fare_amount: legacyMaxFareAmount,
-        base_fare: priceBounds.base_fare,
-        min_price: priceBounds.min_price,
-        max_price: priceBounds.max_price,
-        min_fare: priceBounds.min_price,
-        max_fare: priceBounds.max_price,
-        service_type_id: toNumber(data.service_type_id) ?? null,
-        service_category_id: toNumber(data.service_category_id) ?? null,
-        duration: finalRouteApiDurationMin,
-        route_api_distance_km: finalRouteApiDistanceKm,
-        ...(routeKm !== null ? { route: routeKm } : {}),
-        ...(finalEtaMin !== null ? { eta_min: finalEtaMin } : {}),
-      },
-
-      ...(isPriceUpdated ? { isPriceUpdated: true } : {}),
-      ...(updatedPrice !== null ? { updatedPrice } : {}),
-      ...(updatedAt !== null ? { updatedAt } : {}),
-
-      ...driverOfferTimer,
-    });
-    console.log("[ride:bidRequest] payload", {
-      driver_id: d.driver_id,
-      ride_id: bidRequestPayload?.ride_id ?? null,
-      duration:
-        bidRequestPayload?.ride_details?.duration ?? bidRequestPayload?.duration ?? null,
-      route_api_distance_km: bidRequestPayload?.route_api_distance_km ?? null,
-      min_price:
-        bidRequestPayload?.min_price ?? bidRequestPayload?.ride_details?.min_price ?? null,
-      max_price:
-        bidRequestPayload?.max_price ?? bidRequestPayload?.ride_details?.max_price ?? null,
-      min_fare:
-        bidRequestPayload?.min_fare ?? bidRequestPayload?.ride_details?.min_fare ?? null,
-      max_fare:
-        bidRequestPayload?.max_fare ?? bidRequestPayload?.ride_details?.max_fare ?? null,
-      additional_remarks: resolveAdditionalRemarks(bidRequestPayload),
-    });
-
     const ridePayloadForDriver = attachCustomerFields(
       {
         ...ridePayload,
@@ -6048,6 +5938,31 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       },
       ridePayload?.user_details ?? userDetails ?? null
     );
+    const bidRequestPayload = sanitizeRidePayloadForClient({
+      ...ridePayloadForDriver,
+      event_type: "driver_new_bid_request",
+      ui_action: "show_bid_request",
+      auto_open_running: false,
+      is_running_ride: false,
+    });
+    console.log("[ride:bidRequest] payload", {
+      driver_id: d.driver_id,
+      ride_id: bidRequestPayload?.ride_id ?? null,
+      user_image: bidRequestPayload?.user_image ?? null,
+      customer_image: bidRequestPayload?.customer_image ?? null,
+      duration:
+        bidRequestPayload?.ride_details?.duration ?? bidRequestPayload?.duration ?? null,
+      route_api_distance_km: bidRequestPayload?.route_api_distance_km ?? null,
+      min_price:
+        bidRequestPayload?.min_price ?? bidRequestPayload?.ride_details?.min_price ?? null,
+      max_price:
+        bidRequestPayload?.max_price ?? bidRequestPayload?.ride_details?.max_price ?? null,
+      min_fare:
+        bidRequestPayload?.min_fare ?? bidRequestPayload?.ride_details?.min_fare ?? null,
+      max_fare:
+        bidRequestPayload?.max_fare ?? bidRequestPayload?.ride_details?.max_fare ?? null,
+      additional_remarks: resolveAdditionalRemarks(bidRequestPayload),
+    });
 
     inboxUpsert(d.driver_id, rideId, ridePayloadForDriver);
     emitDispatchDeliverySummary(io, d.driver_id, ridePayloadForDriver);
