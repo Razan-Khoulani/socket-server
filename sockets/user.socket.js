@@ -1497,10 +1497,14 @@ const extractUserDetails = (payload, sourceContext = "extractUserDetails") => {
     src?.contact_number ?? src?.user_phone ?? src?.phone ?? src?.mobile ?? null;
   const imagePick = pickFirstPresentValueWithSource([
     { source: "src.profile_image", value: src?.profile_image },
+    { source: "src.user_profile_image", value: src?.user_profile_image },
+    { source: "src.user_profile", value: src?.user_profile },
     { source: "src.user_image", value: src?.user_image },
     { source: "src.image", value: src?.image },
     { source: "src.avatar", value: src?.avatar },
     { source: "payload.profile_image", value: payload?.profile_image },
+    { source: "payload.user_profile_image", value: payload?.user_profile_image },
+    { source: "payload.user_profile", value: payload?.user_profile },
     { source: "payload.user_image", value: payload?.user_image },
     { source: "payload.customer_image", value: payload?.customer_image },
     { source: "payload.avatar", value: payload?.avatar },

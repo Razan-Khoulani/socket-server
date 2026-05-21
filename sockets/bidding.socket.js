@@ -2773,10 +2773,14 @@ const buildUserDetails = (data) => {
 
   const userImagePick = pickFirstPresentValueWithSource([
     { source: "src.profile_image", value: src?.profile_image },
+    { source: "src.user_profile_image", value: src?.user_profile_image },
+    { source: "src.user_profile", value: src?.user_profile },
     { source: "src.user_image", value: src?.user_image },
     { source: "src.image", value: src?.image },
     { source: "src.avatar", value: src?.avatar },
     { source: "payload.profile_image", value: data?.profile_image },
+    { source: "payload.user_profile_image", value: data?.user_profile_image },
+    { source: "payload.user_profile", value: data?.user_profile },
     { source: "payload.user_image", value: data?.user_image },
     { source: "payload.customer_image", value: data?.customer_image },
   ]);
@@ -2899,13 +2903,20 @@ const buildCustomerPayload = (payload = {}, userDetails = null) => {
     payload?.customer_phone_full ??
     (customerCountryCode && customerPhone ? `${customerCountryCode}${customerPhone}` : null);
 
-  const customerImage =
-    details?.user_image ??
-    payload?.user_image ??
-    payload?.customer_image ??
-    payload?.profile_image ??
-    payload?.avatar ??
-    null;
+  const customerImagePick = pickFirstPresentValueWithSource([
+    { source: "details.user_image", value: details?.user_image },
+    { source: "details.user_profile_image", value: details?.user_profile_image },
+    { source: "details.user_profile", value: details?.user_profile },
+    { source: "details.profile_image", value: details?.profile_image },
+    { source: "details.avatar", value: details?.avatar },
+    { source: "payload.user_image", value: payload?.user_image },
+    { source: "payload.customer_image", value: payload?.customer_image },
+    { source: "payload.profile_image", value: payload?.profile_image },
+    { source: "payload.user_profile_image", value: payload?.user_profile_image },
+    { source: "payload.user_profile", value: payload?.user_profile },
+    { source: "payload.avatar", value: payload?.avatar },
+  ]);
+  const customerImage = customerImagePick.value;
 
   const customerToken =
     details?.user_token ??
@@ -2938,6 +2949,7 @@ const buildCustomerPayload = (payload = {}, userDetails = null) => {
       details?.user_image_source ??
       payload?.user_image_source ??
       payload?.customer_image_source ??
+      customerImagePick.source ??
       null,
     user_token: customerToken ?? null,
     token: customerToken ?? null,
