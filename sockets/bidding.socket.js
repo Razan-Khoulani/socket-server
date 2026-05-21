@@ -1297,14 +1297,7 @@ const getRidePriceBounds = (payload = {}) => {
     toNumber(payload?.meta?.base_fare),
     toNumber(payload?.estimated_fare),
     toNumber(payload?.ride_details?.estimated_fare),
-    toNumber(payload?.meta?.estimated_fare),
-    toNumber(payload?.user_bid_price),
-    toNumber(payload?.ride_details?.user_bid_price),
-    toNumber(payload?.meta?.user_bid_price),
-    toNumber(payload?.price),
-    toNumber(payload?.offered_price),
-    toNumber(payload?.ride_details?.price),
-    toNumber(payload?.ride_details?.offered_price)
+    toNumber(payload?.meta?.estimated_fare)
   );
 
   if (computedBase !== null || explicitEstimated !== null) {
@@ -4964,10 +4957,7 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(data?.meta?.base_fare),
     toNumber(data?.estimated_fare),
     toNumber(data?.ride_details?.estimated_fare),
-    toNumber(data?.meta?.estimated_fare),
-    toNumber(data?.user_bid_price),
-    toNumber(data?.price),
-    toNumber(data?.offered_price)
+    toNumber(data?.meta?.estimated_fare)
   );
   const incomingEstimatedFare = pickFirstValue(
     toNumber(data?.estimated_fare),
