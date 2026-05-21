@@ -8891,6 +8891,8 @@ if (removed) {
 
   dispatch_incremental_only: 1,
   dispatch_expand_reason: "user_response",
+  // Re-open the updated offer for all current candidates, not only newly added drivers.
+  force_rebroadcast: 1,
 
   server_time: timer?.server_time ?? null,
   expires_at: timer?.expires_at ?? null,
