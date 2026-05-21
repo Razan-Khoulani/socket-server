@@ -1290,14 +1290,7 @@ const getRidePriceBounds = (payload = {}) => {
     toNumber(payload?.meta?.base_fare),
     toNumber(payload?.estimated_fare),
     toNumber(payload?.ride_details?.estimated_fare),
-    toNumber(payload?.meta?.estimated_fare),
-    toNumber(payload?.user_bid_price),
-    toNumber(payload?.ride_details?.user_bid_price),
-    toNumber(payload?.meta?.user_bid_price),
-    toNumber(payload?.price),
-    toNumber(payload?.offered_price),
-    toNumber(payload?.ride_details?.price),
-    toNumber(payload?.ride_details?.offered_price)
+    toNumber(payload?.meta?.estimated_fare)
   );
 
   if (computedBase !== null) {
@@ -4920,10 +4913,7 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(data?.meta?.base_fare),
     toNumber(data?.estimated_fare),
     toNumber(data?.ride_details?.estimated_fare),
-    toNumber(data?.meta?.estimated_fare),
-    toNumber(data?.user_bid_price),
-    toNumber(data?.price),
-    toNumber(data?.offered_price)
+    toNumber(data?.meta?.estimated_fare)
   );
   const resolvedBaseFare = pickFirstValue(persistedBaseFare, incomingSystemBaseFare);
   const base =
@@ -4931,20 +4921,61 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(data?.price) ??
     toNumber(data?.offered_price) ??
     null;
-  const min =
-    toNumber(data?.min_fare_amount) ??
-    toNumber(data?.min_price) ??
-    toNumber(data?.min_fare) ??
-    null;
+  const incomingExplicitMin = pickFirstValue(
+    toNumber(data?.min_fare_amount),
+    toNumber(data?.min_price),
+    toNumber(data?.min_fare),
+    toNumber(data?.MIN_PRICE),
+    toNumber(data?.ride_details?.min_fare_amount),
+    toNumber(data?.ride_details?.min_price),
+    toNumber(data?.ride_details?.min_fare),
+    toNumber(data?.ride_details?.MIN_PRICE),
+    toNumber(data?.meta?.min_fare_amount),
+    toNumber(data?.meta?.min_price),
+    toNumber(data?.meta?.min_fare),
+    toNumber(data?.meta?.MIN_PRICE)
+  );
+  const incomingExplicitMax = pickFirstValue(
+    toNumber(data?.max_fare_amount),
+    toNumber(data?.max_price),
+    toNumber(data?.max_fare),
+    toNumber(data?.MAX_PRICE),
+    toNumber(data?.ride_details?.max_fare_amount),
+    toNumber(data?.ride_details?.max_price),
+    toNumber(data?.ride_details?.max_fare),
+    toNumber(data?.ride_details?.MAX_PRICE),
+    toNumber(data?.meta?.max_fare_amount),
+    toNumber(data?.meta?.max_price),
+    toNumber(data?.meta?.max_fare),
+    toNumber(data?.meta?.MAX_PRICE)
+  );
+  const firstDispatchBidSeed = pickFirstValue(
+    toNumber(data?.user_bid_price),
+    toNumber(data?.price),
+    toNumber(data?.offered_price)
+  );
+  const isFirstDispatchForRide = !previousRideSnapshot || typeof previousRideSnapshot !== "object";
   let priceBounds = null;
-  if (resolvedBaseFare !== null) {
-    priceBounds = buildPriceBounds(resolvedBaseFare);
-  } else if (snapshotBounds.min_price !== null && snapshotBounds.max_price !== null) {
+  if (snapshotBounds.min_price !== null && snapshotBounds.max_price !== null) {
     priceBounds = {
       base_fare: null,
       min_price: snapshotBounds.min_price,
       max_price: snapshotBounds.max_price,
     };
+  } else if (incomingExplicitMin !== null && incomingExplicitMax !== null) {
+    const normalizedIncoming = normalizePriceBoundsPair(
+      incomingExplicitMin,
+      incomingExplicitMax
+    );
+    priceBounds = {
+      base_fare: resolvedBaseFare !== null ? round2(resolvedBaseFare) : null,
+      min_price: normalizedIncoming.min_price,
+      max_price: normalizedIncoming.max_price,
+    };
+  } else if (resolvedBaseFare !== null) {
+    priceBounds = buildPriceBounds(resolvedBaseFare);
+  } else if (isFirstDispatchForRide && firstDispatchBidSeed !== null) {
+    priceBounds = buildPriceBounds(firstDispatchBidSeed);
   } else {
     priceBounds = getRidePriceBounds(data);
   }
@@ -4963,7 +4994,7 @@ async function dispatchToNearbyDrivers(io, data) {
   dispatchBidPrice = dispatchBidPrice !== null ? round2(dispatchBidPrice) : null;
   const legacyMinFareAmount =
     toNumber(priceBounds?.min_price) ??
-    (min !== null && min > 0 ? min : 0);
+    (incomingExplicitMin !== null && incomingExplicitMin > 0 ? incomingExplicitMin : 0);
   const legacyMaxFareAmount =
     toNumber(priceBounds?.max_price) ??
     (base !== null && base > 0 ? round2(base * 2) : 0);
