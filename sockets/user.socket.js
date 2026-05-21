@@ -840,6 +840,25 @@ const buildPriceBounds = (baseFare, estimatedFare = null, distanceKm = null) => 
   };
 };
 
+const normalizePriceBoundsPair = (minRaw, maxRaw) => {
+  const min = toNumber(minRaw);
+  const max = toNumber(maxRaw);
+
+  if (min !== null && max !== null && min > max) {
+    return {
+      min_price: roundMoney(max),
+      max_price: roundMoney(min),
+      swapped: true,
+    };
+  }
+
+  return {
+    min_price: min !== null ? roundMoney(min) : null,
+    max_price: max !== null ? roundMoney(max) : null,
+    swapped: false,
+  };
+};
+
 const toBinaryFlag = (v) => {
   if (v === null || v === undefined || v === "") return null;
   if (typeof v === "boolean") return v ? 1 : 0;
@@ -2723,15 +2742,28 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
            item.cost_per_km = roundMoney(toNumber(fare.cost_per_km ?? 0));
 item.distance_km = roundMoney(distanceKm);
 
-const priceBounds = buildPriceBounds(
+const computedBounds = buildPriceBounds(
   fare.base_fare,
   fare.estimated_fare,
   distanceKm
 );
-item.base_fare = priceBounds.base_fare;
-item.estimated_fare = priceBounds.estimated_fare;
-item.min_price = priceBounds.min_price;
-item.max_price = priceBounds.max_price;
+const explicitBounds = normalizePriceBoundsPair(
+  toNumber(fare?.min_price ?? fare?.min_fare ?? fare?.min_fare_amount ?? null),
+  toNumber(fare?.max_price ?? fare?.max_fare ?? fare?.max_fare_amount ?? null)
+);
+const hasExplicitBounds =
+  explicitBounds.min_price !== null && explicitBounds.max_price !== null;
+
+item.base_fare =
+  roundMoney(toNumber(fare?.base_fare ?? null)) ?? computedBounds.base_fare;
+item.estimated_fare =
+  roundMoney(toNumber(fare?.estimated_fare ?? null)) ?? computedBounds.estimated_fare;
+item.min_price = hasExplicitBounds
+  ? explicitBounds.min_price
+  : computedBounds.min_price;
+item.max_price = hasExplicitBounds
+  ? explicitBounds.max_price
+  : computedBounds.max_price;
 
             const driverDistanceM = toNumber(fare.driver_to_pickup_distance_m ?? null);
             const driverDurationS = toNumber(fare.driver_to_pickup_duration_s ?? null);
@@ -2834,30 +2866,48 @@ item.max_price = priceBounds.max_price;
     const pricingTypesSig = buildVehicleTypesSignature(pricingTypes);
 
     const snapshotBaseFare =
+      toNumber(rideDetails?.base_fare) ??
+      toNumber(rideDetails?.ride_details?.base_fare) ??
+      toNumber(rideDetails?.meta?.base_fare) ??
+      toNumber(rideDetails?.estimated_fare) ??
+      toNumber(rideDetails?.ride_details?.estimated_fare) ??
+      toNumber(rideDetails?.meta?.estimated_fare) ??
       toNumber(selectedVehicleType?.base_fare) ??
       toNumber(selectedVehicleType?.estimated_fare) ??
-      toNumber(rideDetails?.base_fare) ??
-      toNumber(rideDetails?.estimated_fare) ??
       toNumber(rideDetails?.user_bid_price) ??
       toNumber(rideDetails?.min_fare_amount) ??
       null;
     const snapshotEstimatedFare =
+      toNumber(rideDetails?.estimated_fare) ??
+      toNumber(rideDetails?.ride_details?.estimated_fare) ??
+      toNumber(rideDetails?.meta?.estimated_fare) ??
+      toNumber(rideDetails?.base_fare) ??
+      toNumber(rideDetails?.ride_details?.base_fare) ??
+      toNumber(rideDetails?.meta?.base_fare) ??
       toNumber(selectedVehicleType?.estimated_fare) ??
       toNumber(selectedVehicleType?.base_fare) ??
-      toNumber(rideDetails?.estimated_fare) ??
-      toNumber(rideDetails?.base_fare) ??
       toNumber(rideDetails?.user_bid_price) ??
       toNumber(rideDetails?.min_fare_amount) ??
       null;
 
     const snapshotMinPrice =
-      toNumber(selectedVehicleType?.min_price) ??
       toNumber(rideDetails?.min_price) ??
+      toNumber(rideDetails?.min_fare) ??
+      toNumber(rideDetails?.ride_details?.min_price) ??
+      toNumber(rideDetails?.ride_details?.min_fare) ??
+      toNumber(rideDetails?.meta?.min_price) ??
+      toNumber(rideDetails?.meta?.min_fare) ??
+      toNumber(selectedVehicleType?.min_price) ??
       null;
 
     const snapshotMaxPrice =
-      toNumber(selectedVehicleType?.max_price) ??
       toNumber(rideDetails?.max_price) ??
+      toNumber(rideDetails?.max_fare) ??
+      toNumber(rideDetails?.ride_details?.max_price) ??
+      toNumber(rideDetails?.ride_details?.max_fare) ??
+      toNumber(rideDetails?.meta?.max_price) ??
+      toNumber(rideDetails?.meta?.max_fare) ??
+      toNumber(selectedVehicleType?.max_price) ??
       null;
 
     const timer = ensureRideTimer(rideId, rideDetails);
