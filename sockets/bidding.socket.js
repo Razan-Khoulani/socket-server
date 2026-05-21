@@ -1289,15 +1289,6 @@ const getRidePriceBounds = (payload = {}) => {
     toNumber(payload?.ride_details?.estimated_fare),
     toNumber(payload?.meta?.estimated_fare)
   );
-  if (explicitMin !== null && explicitMax !== null) {
-    const normalized = normalizePriceBoundsPair(explicitMin, explicitMax);
-    return {
-      base_fare: explicitBase !== null ? round2(explicitBase) : null,
-      estimated_fare: explicitEstimated !== null ? round2(explicitEstimated) : null,
-      min_price: normalized.min_price,
-      max_price: normalized.max_price,
-    };
-  }
 
   const distanceKm = getPayloadDistanceKm(payload);
   const computedBase = pickFirstValue(
@@ -1318,6 +1309,16 @@ const getRidePriceBounds = (payload = {}) => {
 
   if (computedBase !== null || explicitEstimated !== null) {
     return buildPriceBounds(explicitBase ?? computedBase, explicitEstimated, distanceKm);
+  }
+
+  if (explicitMin !== null && explicitMax !== null) {
+    const normalized = normalizePriceBoundsPair(explicitMin, explicitMax);
+    return {
+      base_fare: explicitBase !== null ? round2(explicitBase) : null,
+      estimated_fare: explicitEstimated !== null ? round2(explicitEstimated) : null,
+      min_price: normalized.min_price,
+      max_price: normalized.max_price,
+    };
   }
 
   const normalized = normalizePriceBoundsPair(explicitMin, explicitMax);
@@ -1492,30 +1493,52 @@ const normalizeRideMetrics = (payload = {}) => {
     ride_details: rideDetails,
     meta,
   });
+  const hasComputedBounds =
+    toNumber(computedBounds?.min_price) !== null && toNumber(computedBounds?.max_price) !== null;
   const baseFare = pickFirstValue(
     toNumber(payload?.base_fare),
     toNumber(rideDetails?.base_fare),
     toNumber(meta?.base_fare),
     toNumber(computedBounds?.base_fare)
   );
-  const minPrice = pickFirstValue(
-    toNumber(payload?.min_price),
-    toNumber(payload?.min_fare),
-    toNumber(rideDetails?.min_price),
-    toNumber(rideDetails?.min_fare),
-    toNumber(meta?.min_price),
-    toNumber(meta?.min_fare),
-    toNumber(computedBounds?.min_price)
-  );
-  const maxPrice = pickFirstValue(
-    toNumber(payload?.max_price),
-    toNumber(payload?.max_fare),
-    toNumber(rideDetails?.max_price),
-    toNumber(rideDetails?.max_fare),
-    toNumber(meta?.max_price),
-    toNumber(meta?.max_fare),
-    toNumber(computedBounds?.max_price)
-  );
+  const minPrice = hasComputedBounds
+    ? pickFirstValue(
+        toNumber(computedBounds?.min_price),
+        toNumber(payload?.min_price),
+        toNumber(payload?.min_fare),
+        toNumber(rideDetails?.min_price),
+        toNumber(rideDetails?.min_fare),
+        toNumber(meta?.min_price),
+        toNumber(meta?.min_fare)
+      )
+    : pickFirstValue(
+        toNumber(payload?.min_price),
+        toNumber(payload?.min_fare),
+        toNumber(rideDetails?.min_price),
+        toNumber(rideDetails?.min_fare),
+        toNumber(meta?.min_price),
+        toNumber(meta?.min_fare),
+        toNumber(computedBounds?.min_price)
+      );
+  const maxPrice = hasComputedBounds
+    ? pickFirstValue(
+        toNumber(computedBounds?.max_price),
+        toNumber(payload?.max_price),
+        toNumber(payload?.max_fare),
+        toNumber(rideDetails?.max_price),
+        toNumber(rideDetails?.max_fare),
+        toNumber(meta?.max_price),
+        toNumber(meta?.max_fare)
+      )
+    : pickFirstValue(
+        toNumber(payload?.max_price),
+        toNumber(payload?.max_fare),
+        toNumber(rideDetails?.max_price),
+        toNumber(rideDetails?.max_fare),
+        toNumber(meta?.max_price),
+        toNumber(meta?.max_fare),
+        toNumber(computedBounds?.max_price)
+      );
   const normalizedPriceBounds = normalizePriceBoundsPair(minPrice, maxPrice);
   const resolvedMinPrice = normalizedPriceBounds.min_price;
   const resolvedMaxPrice = normalizedPriceBounds.max_price;
@@ -8299,17 +8322,19 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
         toNumber(payload?.base_fare) ??
         ridePriceBounds.base_fare,
       min_price:
+        toNumber(ridePriceBounds?.min_price) ??
         toNumber(rideSnapshot?.min_price) ??
         toNumber(rideSnapshot?.ride_details?.min_price) ??
         toNumber(rideSnapshot?.meta?.min_price) ??
         toNumber(payload?.min_price) ??
-        ridePriceBounds.min_price,
+        null,
       max_price:
+        toNumber(ridePriceBounds?.max_price) ??
         toNumber(rideSnapshot?.max_price) ??
         toNumber(rideSnapshot?.ride_details?.max_price) ??
         toNumber(rideSnapshot?.meta?.max_price) ??
         toNumber(payload?.max_price) ??
-        ridePriceBounds.max_price,
+        null,
       service_type_id: toNumber(payload.service_type_id) ?? null,
       service_category_id: toNumber(payload.service_category_id) ?? null,
       created_at: payload.created_at ?? null,
