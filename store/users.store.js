@@ -37,10 +37,30 @@ const setUserDetails = (userId, details) => {
   }
 
   const prev = userDetails.get(safeUserId) || {};
+  const incomingImage =
+    details && Object.prototype.hasOwnProperty.call(details, "user_image")
+      ? details.user_image
+      : undefined;
+  const incomingImageText =
+    typeof incomingImage === "string" ? incomingImage.trim() : incomingImage;
+  const preservedUserImage =
+    incomingImageText === undefined || incomingImageText === null || incomingImageText === ""
+      ? prev.user_image ?? null
+      : incomingImageText;
+  const incomingImageSource =
+    details && Object.prototype.hasOwnProperty.call(details, "user_image_source")
+      ? details.user_image_source
+      : undefined;
+  const preservedUserImageSource =
+    incomingImageText === undefined || incomingImageText === null || incomingImageText === ""
+      ? prev.user_image_source ?? null
+      : incomingImageSource ?? prev.user_image_source ?? null;
   const merged = {
     ...prev,
     ...details,
     user_id: safeUserId,
+    user_image: preservedUserImage,
+    user_image_source: preservedUserImageSource,
     ...(resolvedToken
       ? {
           user_token: resolvedToken,

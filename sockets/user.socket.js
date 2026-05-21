@@ -14,6 +14,7 @@ const { getRideStatusSnapshot } = require("../store/rideStatusSnapshots.store");
 const { getActiveDriverByRide, getActiveRideByDriver } = require("../store/activeRides.store");
 
 const biddingSocket = require("./bidding.socket");
+const { normalizePublicAssetUrl: normalizeAssetUrl } = require("../utils/imageUrl.util");
 
 const DEBUG_EVENTS = process.env.DEBUG_SOCKET_EVENTS === "1";
 const debugLog = (event, payload, socketId) => {
@@ -115,6 +116,9 @@ const routeMetricsCache = new Map();
 const routeMetricsInFlight = new Map();
 const VEHICLE_ICON_RELATIVE_DIR = "assets/images/service-category/transport-service-type";
 const DRIVER_IMAGE_RELATIVE_DIR = "assets/images/profile-images/provider";
+const CUSTOMER_IMAGE_RELATIVE_DIR = "assets/images/profile-images/customer";
+const VERBOSE_IMAGE_SOURCE_LOGS = process.env.VERBOSE_IMAGE_SOURCE_LOGS === "1";
+const lastUserImageSignatureByUserId = new Map();
 
 // ? NEW: keep timer unit aligned with bidding.socket (SECONDS)
 const RIDE_TIMEOUT_S = 90;
@@ -973,56 +977,22 @@ const summarizeVehicleTypesForLog = (types) => {
   }));
 };
 
-const normalizePublicAssetUrl = (value, defaultRelativeDir = "") => {
-  if (value == null) return "";
-
-  const raw = String(value).trim().replace(/\\/g, "/");
-  if (!raw) return "";
-
-  if (/^data:/i.test(raw)) return raw;
-
-  const base = String(LARAVEL_BASE_URL || "").trim().replace(/\/+$/, "");
-
-  if (/^https?:\/\//i.test(raw)) {
-    if (base.startsWith("https://") && raw.startsWith("http://")) {
-      try {
-        const baseUrl = new URL(base);
-        const iconUrl = new URL(raw);
-        if (iconUrl.hostname === baseUrl.hostname) {
-          iconUrl.protocol = "https:";
-          return iconUrl.toString();
-        }
-      } catch (_) {}
-    }
-    return raw;
-  }
-
-  if (raw.startsWith("//")) {
-    const protocol = base.startsWith("https://") ? "https:" : "http:";
-    return `${protocol}${raw}`;
-  }
-
-  const cleaned = raw.replace(/^\.\/+/, "");
-  const assetsIndex = cleaned.indexOf("assets/");
-  if (assetsIndex >= 0) {
-    const rel = cleaned.slice(assetsIndex).replace(/^\/+/, "");
-    return base ? `${base}/${rel}` : `/${rel}`;
-  }
-
-  if (!cleaned.includes("/")) {
-    if (!defaultRelativeDir) return base ? `${base}/${cleaned}` : cleaned;
-    return base ? `${base}/${defaultRelativeDir}/${cleaned}` : `${defaultRelativeDir}/${cleaned}`;
-  }
-
-  const rel = cleaned.replace(/^\/+/, "");
-  return base ? `${base}/${rel}` : `/${rel}`;
-};
+const normalizePublicAssetUrl = (value, defaultRelativeDir = "", emptyValue = "") =>
+  normalizeAssetUrl(value, {
+    baseUrl: LARAVEL_BASE_URL,
+    defaultRelativeDir,
+    emptyValue,
+    upgradeSameHostToHttps: true,
+  });
 
 const normalizeVehicleTypeIconUrl = (value) =>
   normalizePublicAssetUrl(value, VEHICLE_ICON_RELATIVE_DIR);
 
 const normalizeDriverImageUrl = (value) =>
   normalizePublicAssetUrl(value, DRIVER_IMAGE_RELATIVE_DIR);
+
+const normalizeCustomerImageUrl = (value) =>
+  normalizePublicAssetUrl(value, CUSTOMER_IMAGE_RELATIVE_DIR);
 
 // ? NEW: build stable signature so we emit only on change
 const buildVehicleTypesSignature = (types) => {
@@ -1462,7 +1432,39 @@ const extractRouteDurationMin = (payload) => {
   return null;
 };
 
-const extractUserDetails = (payload) => {
+const pickFirstPresentValueWithSource = (candidates = []) => {
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const value = candidate.value;
+    if (value === undefined || value === null || value === "") continue;
+    return {
+      value,
+      source: candidate.source ?? null,
+    };
+  }
+  return {
+    value: null,
+    source: null,
+  };
+};
+
+const maybeLogUserImageSource = (userId, imageValue, imageSource, context = "unknown") => {
+  if (!VERBOSE_IMAGE_SOURCE_LOGS) return;
+  const safeUserId = toNumber(userId);
+  if (!safeUserId) return;
+  const normalizedImage = typeof imageValue === "string" ? imageValue.trim() : "";
+  const signature = `${imageSource ?? "none"}|${normalizedImage}`;
+  if (lastUserImageSignatureByUserId.get(safeUserId) === signature) return;
+  lastUserImageSignatureByUserId.set(safeUserId, signature);
+  console.log("[image-source][user]", {
+    user_id: safeUserId,
+    source: imageSource ?? null,
+    image: normalizedImage || null,
+    context,
+  });
+};
+
+const extractUserDetails = (payload, sourceContext = "extractUserDetails") => {
   if (!payload || typeof payload !== "object") return null;
 
   const src =
@@ -1493,8 +1495,20 @@ const extractUserDetails = (payload) => {
   const countryCode = src?.select_country_code ?? src?.country_code ?? null;
   const contactNumber =
     src?.contact_number ?? src?.user_phone ?? src?.phone ?? src?.mobile ?? null;
-  const userImage =
-    src?.profile_image ?? src?.user_image ?? src?.image ?? src?.avatar ?? null;
+  const imagePick = pickFirstPresentValueWithSource([
+    { source: "src.profile_image", value: src?.profile_image },
+    { source: "src.user_image", value: src?.user_image },
+    { source: "src.image", value: src?.image },
+    { source: "src.avatar", value: src?.avatar },
+    { source: "payload.profile_image", value: payload?.profile_image },
+    { source: "payload.user_image", value: payload?.user_image },
+    { source: "payload.customer_image", value: payload?.customer_image },
+    { source: "payload.avatar", value: payload?.avatar },
+  ]);
+  const userImage = normalizeCustomerImageUrl(imagePick.value);
+  const userImageSource = imagePick.source;
+
+  maybeLogUserImageSource(userId, userImage, userImageSource, sourceContext);
 
   return {
     user_id: userId,
@@ -1505,6 +1519,7 @@ const extractUserDetails = (payload) => {
     user_country_code: countryCode,
     user_phone_full: contactNumber && countryCode ? `${countryCode}${contactNumber}` : null,
     user_image: userImage,
+    user_image_source: userImageSource,
   };
 };
 
@@ -2127,7 +2142,7 @@ const registerUser = (payload, source = "user:loginInfo") => {
   debugLog(source, payload, socket.id);
   
   // استخراج تفاصيل المستخدم
-  const details = extractUserDetails(payload);
+  const details = extractUserDetails(payload, source);
   if (!details) {
     console.warn(`[${source}] Missing user_id in payload`);
     return;
@@ -3039,7 +3054,7 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
     applyNearbyFiltersFromPayload(payload, { resetMissing: true });
     syncRideContextFromPayload(payload, "user:findNearbyDrivers");
 
-    const details = extractUserDetails(payload);
+    const details = extractUserDetails(payload, "user:findNearbyDrivers");
     const routeKm = extractRouteDistanceKm(payload);
     const routeDurationMin = extractRouteDurationMin(payload);
     const etaMin = toNumber(payload?.eta_min ?? null) ?? routeDurationMin;
@@ -3136,7 +3151,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     socket.nearbyServiceTypeId = payloadServiceTypeId;
   }
 
-  const details = extractUserDetails(payload);
+  const details = extractUserDetails(payload, "user:getNearbyVehicleTypes");
   const routeKm = extractRouteDistanceKm(payload);
   const routeDurationMin = extractRouteDurationMin(payload);
   const etaMin = toNumber(payload?.eta_min ?? null) ?? routeDurationMin;

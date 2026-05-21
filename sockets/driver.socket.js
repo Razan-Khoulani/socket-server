@@ -14,6 +14,7 @@ const { emitAdminDriverUpdate } = require("../services/adminDriverFeed.service")
 const {
   getDriverAdminProfile,
 } = require("../services/adminDriverProfile.service");
+const { normalizePublicAssetUrl: normalizeAssetUrl } = require("../utils/imageUrl.util");
 const biddingSocket = require("./bidding.socket");
 const ENABLE_RIDE_TRACKING_SERVICE =
   process.env.ENABLE_RIDE_TRACKING_SERVICE === "1";
@@ -28,6 +29,7 @@ const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
   process.env.LARAVEL_URL ||
   "https://api.catch-syria.com";
+const DRIVER_IMAGE_RELATIVE_DIR = "assets/images/profile-images/provider";
 const LARAVEL_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_TIMEOUT_MS))
   ? Math.max(1000, Number(process.env.LARAVEL_TIMEOUT_MS))
   : 7000;
@@ -223,6 +225,28 @@ module.exports = (io, socket) => {
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
   };
+  const pickFirstPresentValueWithSource = (candidates = []) => {
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const value = candidate.value;
+      if (value === undefined || value === null || value === "") continue;
+      return {
+        value,
+        source: candidate.source ?? null,
+      };
+    }
+    return {
+      value: null,
+      source: null,
+    };
+  };
+  const normalizeDriverImageUrl = (value) =>
+    normalizeAssetUrl(value, {
+      baseUrl: LARAVEL_BASE_URL,
+      defaultRelativeDir: DRIVER_IMAGE_RELATIVE_DIR,
+      emptyValue: null,
+      upgradeSameHostToHttps: true,
+    });
 
   const round2 = (value) => {
     const n = toNumber(value);
@@ -612,13 +636,14 @@ module.exports = (io, socket) => {
           d.countryCode ??
           d.mobile_country_code ??
           "";
-        const driver_image =
-          d.driver_image ??
-          d.driver_image_url ??
-          d.profile_image ??
-          d.avatar ??
-          d.image ??
-          null;
+        const driverImagePick = pickFirstPresentValueWithSource([
+          { source: "api.driver_image", value: d.driver_image },
+          { source: "api.driver_image_url", value: d.driver_image_url },
+          { source: "api.profile_image", value: d.profile_image },
+          { source: "api.avatar", value: d.avatar },
+          { source: "api.image", value: d.image },
+        ]);
+        const driver_image = normalizeDriverImageUrl(driverImagePick.value);
         const driver_gender = toNumber(
           d.driver_gender ?? d.gender ?? baseMeta.driver_gender ?? null
         );
@@ -694,7 +719,7 @@ module.exports = (io, socket) => {
           ...(rating != null ? { rating } : {}),
           ...(phone ? { phone } : {}),
           ...(country_code ? { country_code } : {}),
-          ...(driver_image ? { driver_image } : {}),
+          ...(driver_image ? { driver_image, driver_image_source: driverImagePick.source } : {}),
           ...(driver_gender === 1 || driver_gender === 2 ? { driver_gender } : {}),
           ...(child_seat === 0 || child_seat === 1 ? { child_seat } : {}),
           ...(handicap === 0 || handicap === 1 ? { handicap } : {}),
