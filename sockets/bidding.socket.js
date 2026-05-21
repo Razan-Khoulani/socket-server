@@ -2716,6 +2716,16 @@ const normalizeCustomerImageUrl = (value) => {
   return normalized || DEFAULT_CUSTOMER_IMAGE_URL;
 };
 
+const normalizeCustomerImageUrlOrNull = (value) => {
+  const normalized = normalizeAssetUrl(value, {
+    baseUrl: NORMALIZED_LARAVEL_BASE_URL,
+    defaultRelativeDir: CUSTOMER_IMAGE_RELATIVE_DIR,
+    emptyValue: null,
+    upgradeSameHostToHttps: true,
+  });
+  return normalized || null;
+};
+
 function normalizeDriverImageUrl(value) {
   const normalized = normalizeAssetUrl(value, {
     baseUrl: NORMALIZED_LARAVEL_BASE_URL,
@@ -2814,7 +2824,7 @@ const buildUserDetails = (data) => {
       contactNumber && countryCode
         ? `${countryCode}${contactNumber}`
         : stored?.user_phone_full ?? storedByToken?.user_phone_full ?? null,
-    user_image: normalizeCustomerImageUrl(
+    user_image: normalizeCustomerImageUrlOrNull(
       userImagePick.value ?? stored?.user_image ?? storedByToken?.user_image ?? null
     ),
     user_image_source:
@@ -2944,7 +2954,7 @@ const buildCustomerPayload = (payload = {}, userDetails = null) => {
     user_country_code: customerCountryCode ?? null,
     user_phone: customerPhone ?? null,
     user_phone_full: customerPhoneFull ?? null,
-    user_image: normalizeCustomerImageUrl(customerImage ?? null),
+    user_image: normalizeCustomerImageUrlOrNull(customerImage ?? null),
     user_image_source:
       details?.user_image_source ??
       payload?.user_image_source ??
