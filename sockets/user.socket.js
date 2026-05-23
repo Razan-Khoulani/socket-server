@@ -920,6 +920,13 @@ const toBinaryFlag = (v) => {
   return null;
 };
 
+// Nearby filtering should be opt-in: only explicit "1" enables it.
+// Values 0/null/empty mean "no filter".
+const toOptionalBinaryRequirement = (v) => {
+  const flag = toBinaryFlag(v);
+  return flag === 1 ? 1 : null;
+};
+
 const toGenderFilter = (v) => {
   if (v === null || v === undefined || v === "") return null;
   const n = toNumber(v);
@@ -1976,7 +1983,7 @@ const syncNearbyRadius = async (payload = {}) => {
     );
     const hasChildSeat = childSeatInput !== undefined;
     let nextChildSeat = hasChildSeat
-      ? toBinaryFlag(childSeatInput)
+      ? toOptionalBinaryRequirement(childSeatInput)
       : socket.nearbyNeedChildSeat;
 
     const handicapInput = readFirstDefined(
@@ -1990,7 +1997,7 @@ const syncNearbyRadius = async (payload = {}) => {
     );
     const hasHandicap = handicapInput !== undefined;
     let nextHandicap = hasHandicap
-      ? toBinaryFlag(handicapInput)
+      ? toOptionalBinaryRequirement(handicapInput)
       : socket.nearbyNeedHandicap;
 
     const hasAnyFilterKey = hasGender || hasChildSeat || hasHandicap;
@@ -2029,8 +2036,8 @@ const syncNearbyRadius = async (payload = {}) => {
     if (!Array.isArray(drivers) || drivers.length === 0) return [];
 
     const requiredGender = toGenderFilter(socket.nearbyRequiredGender);
-    const requiredChildSeat = toBinaryFlag(socket.nearbyNeedChildSeat);
-    const requiredHandicap = toBinaryFlag(socket.nearbyNeedHandicap);
+    const requiredChildSeat = toOptionalBinaryRequirement(socket.nearbyNeedChildSeat);
+    const requiredHandicap = toOptionalBinaryRequirement(socket.nearbyNeedHandicap);
 
     return drivers.filter((driver) => {
       if (requiredGender === 1 || requiredGender === 2) {
@@ -2040,7 +2047,7 @@ const syncNearbyRadius = async (payload = {}) => {
         if (driverGender !== requiredGender) return false;
       }
 
-      if (requiredChildSeat === 0 || requiredChildSeat === 1) {
+      if (requiredChildSeat === 1) {
         const driverChildSeat = toBinaryFlag(
           driver?.child_seat ??
             driver?.smoking ??
@@ -2051,7 +2058,7 @@ const syncNearbyRadius = async (payload = {}) => {
         if (driverChildSeat !== requiredChildSeat) return false;
       }
 
-      if (requiredHandicap === 0 || requiredHandicap === 1) {
+      if (requiredHandicap === 1) {
         const driverHandicap = toBinaryFlag(
           driver?.handicap ??
             driver?.handicap_accessibility ??
@@ -2534,6 +2541,9 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       DEFAULT_AIR_CANDIDATE_RADIUS_METERS
     );
 
+    const requiredChildSeat = toOptionalBinaryRequirement(socket.nearbyNeedChildSeat);
+    const requiredHandicap = toOptionalBinaryRequirement(socket.nearbyNeedHandicap);
+
     const nearbyAll = driverLocationService.getNearbyDriversFromMemory(
       lat,
       long,
@@ -2542,8 +2552,8 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
         only_online: true,
         max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
         required_gender: socket.nearbyRequiredGender,
-        need_child_seat: socket.nearbyNeedChildSeat,
-        need_handicap: socket.nearbyNeedHandicap,
+        need_child_seat: requiredChildSeat,
+        need_handicap: requiredHandicap,
       }
     );
     const nearbyPreferenceMatched = applyNearbyDriverPreferenceFilters(nearbyAll);
@@ -3011,17 +3021,19 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
     );
 
     const opts = { only_online: true };
+    const requiredChildSeat = toOptionalBinaryRequirement(socket.nearbyNeedChildSeat);
+    const requiredHandicap = toOptionalBinaryRequirement(socket.nearbyNeedHandicap);
     if (socket.nearbyServiceTypeId !== null) {
       opts.service_type_id = socket.nearbyServiceTypeId;
     }
     if (socket.nearbyRequiredGender !== null) {
       opts.required_gender = socket.nearbyRequiredGender;
     }
-    if (socket.nearbyNeedChildSeat !== null) {
-      opts.need_child_seat = socket.nearbyNeedChildSeat;
+    if (requiredChildSeat !== null) {
+      opts.need_child_seat = requiredChildSeat;
     }
-    if (socket.nearbyNeedHandicap !== null) {
-      opts.need_handicap = socket.nearbyNeedHandicap;
+    if (requiredHandicap !== null) {
+      opts.need_handicap = requiredHandicap;
     }
 
     const nearbyAll = driverLocationService.getNearbyDriversFromMemory(
