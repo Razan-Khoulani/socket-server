@@ -5281,6 +5281,8 @@ const incrementalExpansion =
   toNumber(data?.dispatch_incremental_only) === 1;
 const forceNewSearchWindow =
   toNumber(data?.force_new_search_window ?? data?.reset_search_window ?? null) === 1;
+const allowDeclinedDriverReoffer =
+  forcedRebroadcastFromInput || forceNewSearchWindow;
 const shouldResetCandidateHistory =
   forceNewSearchWindow &&
   !incrementalExpansion &&
@@ -5298,12 +5300,21 @@ const eligibleForDispatch = roadFiltered.filter((driver) => {
   const driverId = toNumber(driver?.driver_id);
   if (!driverId) return false;
   const state = getRideDriverState(rideId, driverId);
+  const driverStatus = state?.status ?? null;
 
   // Drivers that already accepted/declined/expired this ride must not be re-dispatched.
-  if (isTerminalDriverRideState(state?.status)) return false;
+  if (
+    isTerminalDriverRideState(driverStatus) &&
+    !(driverStatus === "declined" && allowDeclinedDriverReoffer)
+  ) {
+    return false;
+  }
 
   // إذا كان مرشحًا أصلًا، خليه eligible دائمًا
   if (existingCandidateSet.has(driverId)) return true;
+
+  // Allow previously declined drivers only when rebroadcast/reset is explicitly requested.
+  if (driverStatus === "declined" && allowDeclinedDriverReoffer) return true;
 
   // السائق الجديد فقط: لا تعيده إذا سبق وتم إشعاره قبل
   return !hasRideDriverBeenNotified(rideId, driverId);
