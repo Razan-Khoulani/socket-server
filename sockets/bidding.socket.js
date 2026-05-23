@@ -5314,7 +5314,15 @@ const eligibleForDispatch = roadFiltered.filter((driver) => {
   if (existingCandidateSet.has(driverId)) return true;
 
   // Allow previously declined drivers only when rebroadcast/reset is explicitly requested.
-  if (driverStatus === "declined" && allowDeclinedDriverReoffer) return true;
+  // Reset from terminal declined -> pending_emit so inbox upsert/retry flow can run normally.
+  if (driverStatus === "declined" && allowDeclinedDriverReoffer) {
+    markRideDriverState(rideId, driverId, "pending_emit", {
+      reoffer_reset_at: Date.now(),
+      last_emit_source: toTrimmedText(data?.dispatch_expand_reason) ?? "dispatch",
+      last_emit_reason: "declined_reoffer_reset",
+    });
+    return true;
+  }
 
   // السائق الجديد فقط: لا تعيده إذا سبق وتم إشعاره قبل
   return !hasRideDriverBeenNotified(rideId, driverId);
