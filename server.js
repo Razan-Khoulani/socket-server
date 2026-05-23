@@ -1143,6 +1143,24 @@ const normalizeLegacyRideNewPayload = (incoming = {}) => {
       payload.vehicle_type_id ??
       payload.vehicle_type ??
       null,
+    additional_remarks:
+      payload.additional_remarks ??
+      payload.additional_remark ??
+      payload.additional_request ??
+      payload.pickup_note ??
+      null,
+    additional_remark:
+      payload.additional_remark ??
+      payload.additional_remarks ??
+      payload.additional_request ??
+      payload.pickup_note ??
+      null,
+    additional_request:
+      payload.additional_request ??
+      payload.additional_remarks ??
+      payload.additional_remark ??
+      payload.pickup_note ??
+      null,
     required_gender:
       payload.required_gender ??
       payload.required_driver_gender ??
@@ -1237,6 +1255,11 @@ app.post("/ride/new", async (req, res) => {
     pickup_lat: dispatchPayload?.pickup_lat ?? null,
     pickup_long: dispatchPayload?.pickup_long ?? null,
     service_type_id: dispatchPayload?.service_type_id ?? null,
+    additional_remarks:
+      dispatchPayload?.additional_remarks ??
+      dispatchPayload?.additional_remark ??
+      dispatchPayload?.additional_request ??
+      null,
     driver_ids_count: Array.isArray(dispatchPayload?.driver_ids)
       ? dispatchPayload.driver_ids.length
       : 0,
