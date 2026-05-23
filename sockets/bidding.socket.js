@@ -4922,32 +4922,32 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(data?.offered_price) ??
     null;
   const incomingExplicitMin = pickFirstValue(
-    toNumber(data?.min_fare_amount),
     toNumber(data?.min_price),
     toNumber(data?.min_fare),
     toNumber(data?.MIN_PRICE),
-    toNumber(data?.ride_details?.min_fare_amount),
+    toNumber(data?.min_fare_amount),
     toNumber(data?.ride_details?.min_price),
     toNumber(data?.ride_details?.min_fare),
     toNumber(data?.ride_details?.MIN_PRICE),
-    toNumber(data?.meta?.min_fare_amount),
+    toNumber(data?.ride_details?.min_fare_amount),
     toNumber(data?.meta?.min_price),
     toNumber(data?.meta?.min_fare),
-    toNumber(data?.meta?.MIN_PRICE)
+    toNumber(data?.meta?.MIN_PRICE),
+    toNumber(data?.meta?.min_fare_amount)
   );
   const incomingExplicitMax = pickFirstValue(
-    toNumber(data?.max_fare_amount),
     toNumber(data?.max_price),
     toNumber(data?.max_fare),
     toNumber(data?.MAX_PRICE),
-    toNumber(data?.ride_details?.max_fare_amount),
+    toNumber(data?.max_fare_amount),
     toNumber(data?.ride_details?.max_price),
     toNumber(data?.ride_details?.max_fare),
     toNumber(data?.ride_details?.MAX_PRICE),
-    toNumber(data?.meta?.max_fare_amount),
+    toNumber(data?.ride_details?.max_fare_amount),
     toNumber(data?.meta?.max_price),
     toNumber(data?.meta?.max_fare),
-    toNumber(data?.meta?.MAX_PRICE)
+    toNumber(data?.meta?.MAX_PRICE),
+    toNumber(data?.meta?.max_fare_amount)
   );
   const firstDispatchBidSeed = pickFirstValue(
     toNumber(data?.user_bid_price),
