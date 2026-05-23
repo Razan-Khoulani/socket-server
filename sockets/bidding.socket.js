@@ -4956,13 +4956,7 @@ async function dispatchToNearbyDrivers(io, data) {
   );
   const isFirstDispatchForRide = !previousRideSnapshot || typeof previousRideSnapshot !== "object";
   let priceBounds = null;
-  if (snapshotBounds.min_price !== null && snapshotBounds.max_price !== null) {
-    priceBounds = {
-      base_fare: null,
-      min_price: snapshotBounds.min_price,
-      max_price: snapshotBounds.max_price,
-    };
-  } else if (incomingExplicitMin !== null && incomingExplicitMax !== null) {
+  if (incomingExplicitMin !== null && incomingExplicitMax !== null) {
     const normalizedIncoming = normalizePriceBoundsPair(
       incomingExplicitMin,
       incomingExplicitMax
@@ -4971,6 +4965,12 @@ async function dispatchToNearbyDrivers(io, data) {
       base_fare: resolvedBaseFare !== null ? round2(resolvedBaseFare) : null,
       min_price: normalizedIncoming.min_price,
       max_price: normalizedIncoming.max_price,
+    };
+  } else if (snapshotBounds.min_price !== null && snapshotBounds.max_price !== null) {
+    priceBounds = {
+      base_fare: null,
+      min_price: snapshotBounds.min_price,
+      max_price: snapshotBounds.max_price,
     };
   } else if (resolvedBaseFare !== null) {
     priceBounds = buildPriceBounds(resolvedBaseFare);
@@ -8260,6 +8260,7 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       user_bid_price_final: finalPrice,
       min_fare_amount:
         toNumber(payload?.min_fare_amount) ??
+        toNumber(payload?.min_price) ??
         toNumber(rideSnapshot?.min_fare_amount) ??
         null,
       base_fare:
@@ -8269,16 +8270,16 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
         toNumber(payload?.base_fare) ??
         ridePriceBounds.base_fare,
       min_price:
+        toNumber(payload?.min_price) ??
         toNumber(rideSnapshot?.min_price) ??
         toNumber(rideSnapshot?.ride_details?.min_price) ??
         toNumber(rideSnapshot?.meta?.min_price) ??
-        toNumber(payload?.min_price) ??
         ridePriceBounds.min_price,
       max_price:
+        toNumber(payload?.max_price) ??
         toNumber(rideSnapshot?.max_price) ??
         toNumber(rideSnapshot?.ride_details?.max_price) ??
         toNumber(rideSnapshot?.meta?.max_price) ??
-        toNumber(payload?.max_price) ??
         ridePriceBounds.max_price,
       service_type_id: toNumber(payload.service_type_id) ?? null,
       service_category_id: toNumber(payload.service_category_id) ?? null,
