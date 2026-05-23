@@ -378,9 +378,11 @@ const resolveAdditionalRemarks = (...sources) => {
           scope?.additional_remarks,
           scope?.additional_remark,
           scope?.additional_request,
+          scope?.pickup_note,
           scope?.additionalRemarks,
           scope?.additionalRemark,
-          scope?.additionalRequest
+          scope?.additionalRequest,
+          scope?.pickupNote
         )
       );
       if (resolved !== null) return resolved;
