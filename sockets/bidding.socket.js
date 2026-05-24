@@ -1320,6 +1320,144 @@ const getRidePriceBounds = (payload = {}) => {
   };
 };
 
+const extractRidePriceAnchor = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return null;
+
+  const anchorBase = pickFirstValue(
+    toNumber(payload?.price_anchor_base_fare),
+    toNumber(payload?.ride_details?.price_anchor_base_fare),
+    toNumber(payload?.meta?.price_anchor_base_fare),
+    toNumber(payload?.price_anchor_estimated_price),
+    toNumber(payload?.ride_details?.price_anchor_estimated_price),
+    toNumber(payload?.meta?.price_anchor_estimated_price),
+    getEstimatedPriceFromPayload(payload),
+    getBaseFareFromPayload(payload)
+  );
+
+  const anchorMin = pickFirstValue(
+    toNumber(payload?.price_anchor_min_price),
+    toNumber(payload?.ride_details?.price_anchor_min_price),
+    toNumber(payload?.meta?.price_anchor_min_price),
+    toNumber(payload?.min_price),
+    toNumber(payload?.min_fare),
+    toNumber(payload?.MIN_PRICE),
+    toNumber(payload?.ride_details?.min_price),
+    toNumber(payload?.ride_details?.min_fare),
+    toNumber(payload?.ride_details?.MIN_PRICE),
+    toNumber(payload?.meta?.min_price),
+    toNumber(payload?.meta?.min_fare),
+    toNumber(payload?.meta?.MIN_PRICE)
+  );
+
+  const anchorMax = pickFirstValue(
+    toNumber(payload?.price_anchor_max_price),
+    toNumber(payload?.ride_details?.price_anchor_max_price),
+    toNumber(payload?.meta?.price_anchor_max_price),
+    toNumber(payload?.max_price),
+    toNumber(payload?.max_fare),
+    toNumber(payload?.MAX_PRICE),
+    toNumber(payload?.ride_details?.max_price),
+    toNumber(payload?.ride_details?.max_fare),
+    toNumber(payload?.ride_details?.MAX_PRICE),
+    toNumber(payload?.meta?.max_price),
+    toNumber(payload?.meta?.max_fare),
+    toNumber(payload?.meta?.MAX_PRICE)
+  );
+
+  const normalized = normalizePriceBoundsPair(anchorMin, anchorMax);
+  if (normalized.min_price === null || normalized.max_price === null) return null;
+
+  const lockedAt =
+    pickFirstValue(
+      toNumber(payload?.price_anchor_locked_at),
+      toNumber(payload?.ride_details?.price_anchor_locked_at),
+      toNumber(payload?.meta?.price_anchor_locked_at)
+    ) ?? null;
+
+  return {
+    base_fare: anchorBase !== null ? round2(anchorBase) : null,
+    min_price: normalized.min_price,
+    max_price: normalized.max_price,
+    locked_at: lockedAt,
+  };
+};
+
+const applyRidePriceAnchor = (payload = {}, anchor = null) => {
+  if (!payload || typeof payload !== "object" || !anchor) return payload;
+
+  const minPrice = toNumber(anchor?.min_price);
+  const maxPrice = toNumber(anchor?.max_price);
+  if (minPrice === null || maxPrice === null) return payload;
+
+  const baseFare = toNumber(anchor?.base_fare);
+  const lockedAt = toNumber(anchor?.locked_at) ?? Date.now();
+  const rideDetails =
+    payload?.ride_details && typeof payload.ride_details === "object"
+      ? { ...payload.ride_details }
+      : {};
+  const meta =
+    payload?.meta && typeof payload.meta === "object" ? { ...payload.meta } : {};
+
+  if (baseFare !== null) {
+    rideDetails.base_fare = baseFare;
+    rideDetails.estimated_price = baseFare;
+    rideDetails.estimated_fare = baseFare;
+    meta.base_fare = baseFare;
+    meta.estimated_price = baseFare;
+    meta.estimated_fare = baseFare;
+  }
+
+  rideDetails.min_price = minPrice;
+  rideDetails.max_price = maxPrice;
+  rideDetails.min_fare = minPrice;
+  rideDetails.max_fare = maxPrice;
+  rideDetails.MIN_PRICE = minPrice;
+  rideDetails.MAX_PRICE = maxPrice;
+  rideDetails.price_anchor_min_price = minPrice;
+  rideDetails.price_anchor_max_price = maxPrice;
+  rideDetails.price_anchor_locked_at = lockedAt;
+  if (baseFare !== null) {
+    rideDetails.price_anchor_base_fare = baseFare;
+  }
+
+  meta.min_price = minPrice;
+  meta.max_price = maxPrice;
+  meta.min_fare = minPrice;
+  meta.max_fare = maxPrice;
+  meta.MIN_PRICE = minPrice;
+  meta.MAX_PRICE = maxPrice;
+  meta.price_anchor_min_price = minPrice;
+  meta.price_anchor_max_price = maxPrice;
+  meta.price_anchor_locked_at = lockedAt;
+  if (baseFare !== null) {
+    meta.price_anchor_base_fare = baseFare;
+  }
+
+  return {
+    ...payload,
+    ...(baseFare !== null
+      ? {
+          base_fare: baseFare,
+          estimated_price: baseFare,
+          estimated_fare: baseFare,
+          price_anchor_base_fare: baseFare,
+        }
+      : {}),
+    min_price: minPrice,
+    max_price: maxPrice,
+    min_fare: minPrice,
+    max_fare: maxPrice,
+    MIN_PRICE: minPrice,
+    MAX_PRICE: maxPrice,
+    price_anchor_min_price: minPrice,
+    price_anchor_max_price: maxPrice,
+    price_anchor_locked: 1,
+    price_anchor_locked_at: lockedAt,
+    ride_details: rideDetails,
+    meta,
+  };
+};
+
 const isPriceWithinBounds = (price, bounds) => {
   const p = toNumber(price);
   const min = toNumber(bounds?.min_price);
@@ -3153,7 +3291,23 @@ const rideTimers = new Map(); // rideId -> setTimeout ID
 const rideDetailsMap = new Map();
 function saveRideDetails(rideId, rideDetails) {
   cancelRetryStateCleanup(rideId);
-  rideDetailsMap.set(rideId, rideDetails);
+  const previous = rideDetailsMap.get(rideId);
+  const previousAnchor = extractRidePriceAnchor(previous ?? {});
+  const incomingAnchor = extractRidePriceAnchor(rideDetails ?? {});
+  const resolvedAnchor = previousAnchor ?? incomingAnchor ?? null;
+
+  const anchoredRideDetails =
+    resolvedAnchor && rideDetails && typeof rideDetails === "object"
+      ? applyRidePriceAnchor(rideDetails, {
+          ...resolvedAnchor,
+          locked_at:
+            resolvedAnchor?.locked_at ??
+            incomingAnchor?.locked_at ??
+            Date.now(),
+        })
+      : rideDetails;
+
+  rideDetailsMap.set(rideId, anchoredRideDetails);
   touchRideState(rideId);
   debugLog("ride:details:saved", { ride_id: rideId }, null);
 }
@@ -5417,6 +5571,25 @@ const searchTimer = makeTimer(searchTimeoutSeconds);
 
 console.log("[dispatch][dispatchToNearbyDrivers]", {
   ride_id: rideId,
+  dispatch_base_fare: priceBounds.base_fare ?? null,
+  dispatch_estimated_price: priceBounds.base_fare ?? null,
+  dispatch_min_price: priceBounds.min_price ?? null,
+  dispatch_max_price: priceBounds.max_price ?? null,
+  price_anchor_min_price:
+    toNumber(previousRideSnapshot?.price_anchor_min_price) ??
+    toNumber(previousRideSnapshot?.ride_details?.price_anchor_min_price) ??
+    toNumber(previousRideSnapshot?.meta?.price_anchor_min_price) ??
+    null,
+  price_anchor_max_price:
+    toNumber(previousRideSnapshot?.price_anchor_max_price) ??
+    toNumber(previousRideSnapshot?.ride_details?.price_anchor_max_price) ??
+    toNumber(previousRideSnapshot?.meta?.price_anchor_max_price) ??
+    null,
+  price_anchor_base_fare:
+    toNumber(previousRideSnapshot?.price_anchor_base_fare) ??
+    toNumber(previousRideSnapshot?.ride_details?.price_anchor_base_fare) ??
+    toNumber(previousRideSnapshot?.meta?.price_anchor_base_fare) ??
+    null,
   road_radius_m: roadRadius,
   air_candidate_radius_m: airCandidateRadius,
   dispatch_timeout_s: dispatchTimeoutSeconds,
