@@ -4957,14 +4957,14 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(data?.meta?.MAX_PRICE),
     toNumber(data?.meta?.max_fare_amount)
   );
-  const firstDispatchBidSeed = pickFirstValue(
-    toNumber(data?.user_bid_price),
-    toNumber(data?.price),
-    toNumber(data?.offered_price)
-  );
-  const isFirstDispatchForRide = !previousRideSnapshot || typeof previousRideSnapshot !== "object";
   let priceBounds = null;
-  if (incomingExplicitMin !== null && incomingExplicitMax !== null) {
+  if (snapshotBounds.min_price !== null && snapshotBounds.max_price !== null) {
+    priceBounds = {
+      base_fare: resolvedBaseFare !== null ? round2(resolvedBaseFare) : null,
+      min_price: snapshotBounds.min_price,
+      max_price: snapshotBounds.max_price,
+    };
+  } else if (incomingExplicitMin !== null && incomingExplicitMax !== null) {
     const normalizedIncoming = normalizePriceBoundsPair(
       incomingExplicitMin,
       incomingExplicitMax
@@ -4974,16 +4974,8 @@ async function dispatchToNearbyDrivers(io, data) {
       min_price: normalizedIncoming.min_price,
       max_price: normalizedIncoming.max_price,
     };
-  } else if (snapshotBounds.min_price !== null && snapshotBounds.max_price !== null) {
-    priceBounds = {
-      base_fare: null,
-      min_price: snapshotBounds.min_price,
-      max_price: snapshotBounds.max_price,
-    };
   } else if (resolvedBaseFare !== null) {
     priceBounds = buildPriceBounds(resolvedBaseFare);
-  } else if (isFirstDispatchForRide && firstDispatchBidSeed !== null) {
-    priceBounds = buildPriceBounds(firstDispatchBidSeed);
   } else {
     priceBounds = getRidePriceBounds(data);
   }
