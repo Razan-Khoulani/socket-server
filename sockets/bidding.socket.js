@@ -1591,6 +1591,12 @@ const MAX_DISPATCH_RADIUS_METERS = Number.isFinite(Number(process.env.MAX_DISPAT
 const MAX_DISPATCH_CANDIDATES = Number.isFinite(Number(process.env.MAX_DISPATCH_CANDIDATES))
   ? Math.max(0, Number(process.env.MAX_DISPATCH_CANDIDATES))
   : 0;
+const DISPATCH_WAVE_SIZE = Number.isFinite(Number(process.env.DISPATCH_WAVE_SIZE))
+  ? Math.max(0, Number(process.env.DISPATCH_WAVE_SIZE))
+  : 0;
+const DISPATCH_WAVE_INTERVAL_MS = Number.isFinite(Number(process.env.DISPATCH_WAVE_INTERVAL_MS))
+  ? Math.max(0, Number(process.env.DISPATCH_WAVE_INTERVAL_MS))
+  : 0;
 
 const MAX_DRIVER_LOCATION_AGE_MS = Number.isFinite(Number(process.env.MAX_DRIVER_LOCATION_AGE_MS))
   ? Number(process.env.MAX_DRIVER_LOCATION_AGE_MS)
@@ -5431,6 +5437,9 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   retained_existing_candidates: retainedExistingIds.length,
   new_candidates: newCandidateIds.length,
   final_candidates: nextCandidateIds.length,
+  dispatch_wave_size: DISPATCH_WAVE_SIZE > 0 ? DISPATCH_WAVE_SIZE : null,
+  dispatch_wave_interval_ms: DISPATCH_WAVE_INTERVAL_MS > 0 ? DISPATCH_WAVE_INTERVAL_MS : null,
+  dispatch_wave_enabled: DISPATCH_WAVE_SIZE > 0 && DISPATCH_WAVE_INTERVAL_MS > 0,
   required_gender: applyRequiredGenderFilter ? requiredGender : null,
   required_gender_filter_applied: applyRequiredGenderFilter,
   need_child_seat: applyNeedChildSeatFilter ? needChildSeat : null,
@@ -5967,8 +5976,25 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
 
   const deliveredDriverIds = [];
   const pendingDriverIds = [];
+  const effectiveWaveSize = Math.max(
+    1,
+    DISPATCH_WAVE_SIZE > 0 ? DISPATCH_WAVE_SIZE : candidatesToNotify.length
+  );
+  const waveDispatchEnabled =
+    DISPATCH_WAVE_SIZE > 0 &&
+    DISPATCH_WAVE_INTERVAL_MS > 0 &&
+    candidatesToNotify.length > effectiveWaveSize;
 
-  candidatesToNotify.forEach((d) => {
+  if (waveDispatchEnabled) {
+    console.log("[dispatch][wave][start]", {
+      ride_id: rideId,
+      total_candidates: candidatesToNotify.length,
+      wave_size: effectiveWaveSize,
+      wave_interval_ms: DISPATCH_WAVE_INTERVAL_MS,
+    });
+  }
+
+  const notifyDriverCandidate = (d) => {
     const ridePayloadForDriver = attachCustomerFields(
       {
         ...ridePayload,
@@ -6074,7 +6100,38 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     console.log(
       `[dispatch][delivery] ride ${rideId} -> driver ${d.driver_id} pending (${emitResult.reason})`
     );
-  });
+  };
+
+  for (let offset = 0; offset < candidatesToNotify.length; offset += effectiveWaveSize) {
+    const waveCandidates = candidatesToNotify.slice(offset, offset + effectiveWaveSize);
+    waveCandidates.forEach((d) => notifyDriverCandidate(d));
+
+    if (!waveDispatchEnabled) continue;
+    const remainingCandidates = Math.max(
+      0,
+      candidatesToNotify.length - (offset + waveCandidates.length)
+    );
+    const waveNumber = Math.floor(offset / effectiveWaveSize) + 1;
+    console.log("[dispatch][wave]", {
+      ride_id: rideId,
+      wave_number: waveNumber,
+      wave_size: waveCandidates.length,
+      remaining_candidates: remainingCandidates,
+      sleep_ms: remainingCandidates > 0 ? DISPATCH_WAVE_INTERVAL_MS : 0,
+    });
+    if (remainingCandidates > 0) {
+      await sleep(DISPATCH_WAVE_INTERVAL_MS);
+    }
+  }
+
+  if (waveDispatchEnabled) {
+    console.log("[dispatch][wave][done]", {
+      ride_id: rideId,
+      total_candidates: candidatesToNotify.length,
+      delivered_count: deliveredDriverIds.length,
+      pending_count: pendingDriverIds.length,
+    });
+  }
 
 if (incrementalExpansion) {
   console.log("[dispatch][expand][notify]", {

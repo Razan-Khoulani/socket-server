@@ -1665,6 +1665,38 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       status === 4 && payloadRideCancelledStatus === 0;
     const suppressDriverSelfCancelEvents =
       suppressDriverSelfCancelEventsFromActor || isDriverSelfCancelByFlag;
+    const paymentType = Number.isFinite(Number(payload?.payment_type))
+      ? Number(payload.payment_type)
+      : null;
+    const paymentStatus = Number.isFinite(Number(payload?.payment_status))
+      ? Number(payload.payment_status)
+      : null;
+    const subRideId = Number.isFinite(
+      Number(payload?.sub_ride_id ?? payload?.subRideId)
+    )
+      ? Number(payload?.sub_ride_id ?? payload?.subRideId)
+      : null;
+    const rideNo =
+      payload?.ride_no != null && String(payload.ride_no).trim() !== ""
+        ? String(payload.ride_no).trim()
+        : null;
+    const paymentEvent =
+      typeof payload?.payment_event === "string" &&
+      payload.payment_event.trim() !== ""
+        ? payload.payment_event.trim()
+        : null;
+    const paymentMessage =
+      typeof payload?.payment_message === "string" &&
+      payload.payment_message.trim() !== ""
+        ? payload.payment_message.trim()
+        : null;
+    const walletPaid =
+      paymentType === 3 && paymentStatus === 1
+        ? 1
+        : Number.isFinite(Number(payload?.wallet_paid)) &&
+          Number(payload.wallet_paid) === 1
+        ? 1
+        : null;
     const rating = payload?.rating ?? null;
     const evt = {
       ride_id: rideId,
@@ -1673,8 +1705,14 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
       ...(Number.isFinite(Number(userId)) ? { user_id: Number(userId) } : {}),
       ...(cancelBy ? { cancel_by: cancelBy } : {}),
       ...(cancelReasonId != null ? { reason_id: cancelReasonId } : {}),
-        ...(rating !== null ? { rating: rating } : {}), // إضافة التقييم إذا كان موجودًا
-
+      ...(paymentType != null ? { payment_type: paymentType } : {}),
+      ...(paymentStatus != null ? { payment_status: paymentStatus } : {}),
+      ...(subRideId != null ? { sub_ride_id: subRideId } : {}),
+      ...(rideNo != null ? { ride_no: rideNo } : {}),
+      ...(paymentEvent != null ? { payment_event: paymentEvent } : {}),
+      ...(paymentMessage != null ? { payment_message: paymentMessage } : {}),
+      ...(walletPaid != null ? { wallet_paid: walletPaid } : {}),
+      ...(rating !== null ? { rating: rating } : {}), // إضافة التقييم إذا كان موجودًا
     };
     const wayPointStatus = Number.isFinite(
       Number(payload?.way_point_status ?? payload?.wayPointStatus)
@@ -2494,3 +2532,4 @@ server.listen(SOCKET_BIND_PORT, SOCKET_BIND_HOST, () => {
   );
   console.log("Started at:", new Date().toLocaleString());
 });
+
