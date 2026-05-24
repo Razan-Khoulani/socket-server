@@ -1241,6 +1241,26 @@ const getPayloadDistanceKm = (payload = {}) => {
   return distance !== null && distance >= 0 ? distance : null;
 };
 
+const getEstimatedPriceFromPayload = (payload = {}) =>
+  pickFirstValue(
+    toNumber(payload?.estimated_price),
+    toNumber(payload?.ride_details?.estimated_price),
+    toNumber(payload?.meta?.estimated_price),
+    toNumber(payload?.estimatedPrice),
+    toNumber(payload?.ride_details?.estimatedPrice),
+    toNumber(payload?.meta?.estimatedPrice),
+    toNumber(payload?.estimated_fare),
+    toNumber(payload?.ride_details?.estimated_fare),
+    toNumber(payload?.meta?.estimated_fare)
+  );
+
+const getBaseFareFromPayload = (payload = {}) =>
+  pickFirstValue(
+    toNumber(payload?.base_fare),
+    toNumber(payload?.ride_details?.base_fare),
+    toNumber(payload?.meta?.base_fare)
+  );
+
 const getRidePriceBounds = (payload = {}) => {
   if (!payload || typeof payload !== "object") {
     return { base_fare: null, min_price: null, max_price: null };
@@ -1269,12 +1289,8 @@ const getRidePriceBounds = (payload = {}) => {
     toNumber(payload?.meta?.MAX_PRICE)
   );
   const explicitBase = pickFirstValue(
-    toNumber(payload?.base_fare),
-    toNumber(payload?.ride_details?.base_fare),
-    toNumber(payload?.meta?.base_fare),
-    toNumber(payload?.estimated_fare),
-    toNumber(payload?.ride_details?.estimated_fare),
-    toNumber(payload?.meta?.estimated_fare)
+    getEstimatedPriceFromPayload(payload),
+    getBaseFareFromPayload(payload)
   );
   if (explicitMin !== null && explicitMax !== null) {
     const normalized = normalizePriceBoundsPair(explicitMin, explicitMax);
@@ -1287,12 +1303,8 @@ const getRidePriceBounds = (payload = {}) => {
 
   const distanceKm = getPayloadDistanceKm(payload);
   const computedBase = pickFirstValue(
-    toNumber(payload?.base_fare),
-    toNumber(payload?.ride_details?.base_fare),
-    toNumber(payload?.meta?.base_fare),
-    toNumber(payload?.estimated_fare),
-    toNumber(payload?.ride_details?.estimated_fare),
-    toNumber(payload?.meta?.estimated_fare)
+    getEstimatedPriceFromPayload(payload),
+    getBaseFareFromPayload(payload)
   );
 
   if (computedBase !== null) {
@@ -1471,10 +1483,14 @@ const normalizeRideMetrics = (payload = {}) => {
     ride_details: rideDetails,
     meta,
   });
+  const estimatedPrice = getEstimatedPriceFromPayload({
+    ...payload,
+    ride_details: rideDetails,
+    meta,
+  });
   const baseFare = pickFirstValue(
-    toNumber(payload?.base_fare),
-    toNumber(rideDetails?.base_fare),
-    toNumber(meta?.base_fare),
+    estimatedPrice,
+    getBaseFareFromPayload({ ...payload, ride_details: rideDetails, meta }),
     toNumber(computedBounds?.base_fare)
   );
   const minPrice = pickFirstValue(
@@ -1509,7 +1525,11 @@ const normalizeRideMetrics = (payload = {}) => {
   }
   if (baseFare !== null) {
     rideDetails.base_fare = baseFare;
+    rideDetails.estimated_price = baseFare;
+    rideDetails.estimated_fare = baseFare;
     meta.base_fare = baseFare;
+    meta.estimated_price = baseFare;
+    meta.estimated_fare = baseFare;
   }
   if (resolvedMinPrice !== null) {
     rideDetails.min_price = resolvedMinPrice;
@@ -1536,7 +1556,9 @@ const normalizeRideMetrics = (payload = {}) => {
   : {}),    ...(distanceKm !== null
       ? { distance: distanceKm, route_api_distance_km: distanceKm }
       : {}),
-    ...(baseFare !== null ? { base_fare: baseFare } : {}),
+    ...(baseFare !== null
+      ? { base_fare: baseFare, estimated_price: baseFare, estimated_fare: baseFare }
+      : {}),
     ...(resolvedMinPrice !== null
       ? { min_price: resolvedMinPrice, min_fare: resolvedMinPrice }
       : {}),
@@ -4915,13 +4937,10 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(previousRideSnapshot?.meta?.max_fare)
   );
   const snapshotBounds = normalizePriceBoundsPair(persistedMinPrice, persistedMaxPrice);
+  const incomingEstimatedBaseFare = getEstimatedPriceFromPayload(data);
   const incomingSystemBaseFare = pickFirstValue(
-    toNumber(data?.base_fare),
-    toNumber(data?.ride_details?.base_fare),
-    toNumber(data?.meta?.base_fare),
-    toNumber(data?.estimated_fare),
-    toNumber(data?.ride_details?.estimated_fare),
-    toNumber(data?.meta?.estimated_fare)
+    incomingEstimatedBaseFare,
+    getBaseFareFromPayload(data)
   );
   const resolvedBaseFare = pickFirstValue(persistedBaseFare, incomingSystemBaseFare);
   const base =
@@ -4964,6 +4983,8 @@ async function dispatchToNearbyDrivers(io, data) {
       min_price: snapshotBounds.min_price,
       max_price: snapshotBounds.max_price,
     };
+  } else if (incomingEstimatedBaseFare !== null) {
+    priceBounds = buildPriceBounds(incomingEstimatedBaseFare);
   } else if (incomingExplicitMin !== null && incomingExplicitMax !== null) {
     const normalizedIncoming = normalizePriceBoundsPair(
       incomingExplicitMin,
@@ -5666,6 +5687,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     min_fare_amount: legacyMinFareAmount,
     max_fare_amount: legacyMaxFareAmount,
     base_fare: priceBounds.base_fare,
+    estimated_price: priceBounds.base_fare,
+    estimated_fare: priceBounds.base_fare,
     min_price: priceBounds.min_price,
     max_price: priceBounds.max_price,
     MIN_PRICE: priceBounds.min_price,
@@ -5702,6 +5725,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       min_fare_amount: legacyMinFareAmount,
       max_fare_amount: legacyMaxFareAmount,
       base_fare: priceBounds.base_fare,
+      estimated_price: priceBounds.base_fare,
+      estimated_fare: priceBounds.base_fare,
       min_price: priceBounds.min_price,
       max_price: priceBounds.max_price,
       MIN_PRICE: priceBounds.min_price,
@@ -5734,6 +5759,8 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       duration: finalRouteApiDurationMin,
       route_api_distance_km: finalRouteApiDistanceKm,
       ...(priceBounds.base_fare !== null ? { base_fare: priceBounds.base_fare } : {}),
+      ...(priceBounds.base_fare !== null ? { estimated_price: priceBounds.base_fare } : {}),
+      ...(priceBounds.base_fare !== null ? { estimated_fare: priceBounds.base_fare } : {}),
       ...(priceBounds.min_price !== null ? { min_price: priceBounds.min_price } : {}),
       ...(priceBounds.max_price !== null ? { max_price: priceBounds.max_price } : {}),
       ...(localizedServiceTypeName ? { service_type_name: localizedServiceTypeName } : {}),
@@ -8329,27 +8356,49 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       user_bid_price: offeredPrice,
       user_bid_price_final: finalPrice,
       min_fare_amount:
+        toNumber(rideSnapshot?.min_fare_amount) ??
+        toNumber(rideSnapshot?.min_price) ??
+        toNumber(rideSnapshot?.ride_details?.min_price) ??
+        toNumber(rideSnapshot?.meta?.min_price) ??
         toNumber(payload?.min_fare_amount) ??
         toNumber(payload?.min_price) ??
-        toNumber(rideSnapshot?.min_fare_amount) ??
         null,
       base_fare:
         toNumber(rideSnapshot?.base_fare) ??
         toNumber(rideSnapshot?.ride_details?.base_fare) ??
         toNumber(rideSnapshot?.meta?.base_fare) ??
+        toNumber(rideSnapshot?.estimated_price) ??
+        toNumber(rideSnapshot?.ride_details?.estimated_price) ??
+        toNumber(rideSnapshot?.meta?.estimated_price) ??
         toNumber(payload?.base_fare) ??
+        toNumber(payload?.estimated_price) ??
+        toNumber(payload?.estimated_fare) ??
+        ridePriceBounds.base_fare,
+      estimated_price:
+        toNumber(rideSnapshot?.estimated_price) ??
+        toNumber(rideSnapshot?.ride_details?.estimated_price) ??
+        toNumber(rideSnapshot?.meta?.estimated_price) ??
+        toNumber(payload?.estimated_price) ??
+        toNumber(payload?.estimated_fare) ??
+        ridePriceBounds.base_fare,
+      estimated_fare:
+        toNumber(rideSnapshot?.estimated_fare) ??
+        toNumber(rideSnapshot?.ride_details?.estimated_fare) ??
+        toNumber(rideSnapshot?.meta?.estimated_fare) ??
+        toNumber(payload?.estimated_fare) ??
+        toNumber(payload?.estimated_price) ??
         ridePriceBounds.base_fare,
       min_price:
-        toNumber(payload?.min_price) ??
         toNumber(rideSnapshot?.min_price) ??
         toNumber(rideSnapshot?.ride_details?.min_price) ??
         toNumber(rideSnapshot?.meta?.min_price) ??
+        toNumber(payload?.min_price) ??
         ridePriceBounds.min_price,
       max_price:
-        toNumber(payload?.max_price) ??
         toNumber(rideSnapshot?.max_price) ??
         toNumber(rideSnapshot?.ride_details?.max_price) ??
         toNumber(rideSnapshot?.meta?.max_price) ??
+        toNumber(payload?.max_price) ??
         ridePriceBounds.max_price,
       service_type_id: toNumber(payload.service_type_id) ?? null,
       service_category_id: toNumber(payload.service_category_id) ?? null,
@@ -8973,6 +9022,13 @@ if (removed) {
       io.to(driverRoom(dId)).emit("ride:userResponse", {
         ride_id: rideId,
         price: newPrice,
+        base_fare: ridePriceBounds.base_fare ?? null,
+        estimated_price: ridePriceBounds.base_fare ?? null,
+        estimated_fare: ridePriceBounds.base_fare ?? null,
+        min_price: ridePriceBounds.min_price ?? null,
+        max_price: ridePriceBounds.max_price ?? null,
+        min_fare: ridePriceBounds.min_price ?? null,
+        max_fare: ridePriceBounds.max_price ?? null,
 
         // ✅ timer fields (SECONDS)
         ...(timer ? timer : {}),
@@ -8987,6 +9043,11 @@ if (removed) {
   ...snapshotBase,
   ride_id: rideId,
   user_bid_price: newPrice,
+  base_fare: ridePriceBounds.base_fare ?? snapshotBase?.base_fare ?? null,
+  estimated_price: ridePriceBounds.base_fare ?? snapshotBase?.estimated_price ?? null,
+  estimated_fare: ridePriceBounds.base_fare ?? snapshotBase?.estimated_fare ?? null,
+  min_price: ridePriceBounds.min_price ?? snapshotBase?.min_price ?? null,
+  max_price: ridePriceBounds.max_price ?? snapshotBase?.max_price ?? null,
   isPriceUpdated: true,
   updatedPrice: newPrice,
   updatedAt: Date.now(),
@@ -9012,6 +9073,13 @@ if (removed) {
       {
         ride_id: rideId,
         user_bid_price: newPrice,
+        base_fare: ridePriceBounds.base_fare ?? null,
+        estimated_price: ridePriceBounds.base_fare ?? null,
+        estimated_fare: ridePriceBounds.base_fare ?? null,
+        min_price: ridePriceBounds.min_price ?? null,
+        max_price: ridePriceBounds.max_price ?? null,
+        min_fare: ridePriceBounds.min_price ?? null,
+        max_fare: ridePriceBounds.max_price ?? null,
 
         // ✅ timer fields (SECONDS)
         ...(timer ? timer : {}),
