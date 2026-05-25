@@ -2466,7 +2466,7 @@ app.post("/events/internal/ride-dispatch-retry", async (req, res) => {
     rad !== null
       ? driverLocationService.getNearbyDriversFromMemory(lat, long, rad)
       : [];
-  const ok = await biddingSocket.dispatchToNearbyDrivers(io, {
+  const ok = await biddingSocket.restartRideDispatch(io, {
     ...req.body,
     ride_id: rideId,
     pickup_lat: lat,
