@@ -1265,6 +1265,14 @@ const getRidePriceBounds = (payload = {}) => {
   if (!payload || typeof payload !== "object") {
     return { base_fare: null, min_price: null, max_price: null };
   }
+  const anchorBounds = extractRidePriceAnchor(payload);
+  if (anchorBounds?.min_price !== null && anchorBounds?.max_price !== null) {
+    return {
+      base_fare: toNumber(anchorBounds?.base_fare) !== null ? round2(toNumber(anchorBounds.base_fare)) : null,
+      min_price: round2(toNumber(anchorBounds.min_price)),
+      max_price: round2(toNumber(anchorBounds.max_price)),
+    };
+  }
 
   const explicitMin = pickFirstValue(
     toNumber(payload?.min_price),
@@ -5136,6 +5144,11 @@ async function dispatchToNearbyDrivers(io, data) {
     toNumber(data?.meta?.MAX_PRICE),
     toNumber(data?.meta?.max_fare_amount)
   );
+  const priceAnchorLockedAt =
+    toNumber(previousRideSnapshot?.price_anchor_locked_at) ??
+    toNumber(previousRideSnapshot?.ride_details?.price_anchor_locked_at) ??
+    toNumber(previousRideSnapshot?.meta?.price_anchor_locked_at) ??
+    Date.now();
   let priceBounds = null;
   if (snapshotBounds.min_price !== null && snapshotBounds.max_price !== null) {
     priceBounds = {
@@ -5158,6 +5171,12 @@ async function dispatchToNearbyDrivers(io, data) {
   } else {
     priceBounds = getRidePriceBounds(data);
   }
+  const lockedBaseFare =
+    toNumber(resolvedBaseFare) ??
+    toNumber(priceBounds?.base_fare) ??
+    null;
+  const lockedMinPrice = toNumber(priceBounds?.min_price);
+  const lockedMaxPrice = toNumber(priceBounds?.max_price);
   const minBound = toNumber(priceBounds?.min_price);
   const maxBound = toNumber(priceBounds?.max_price);
   let dispatchBidPrice = base;
@@ -5872,6 +5891,11 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     MAX_PRICE: priceBounds.max_price,
     min_fare: priceBounds.min_price,
     max_fare: priceBounds.max_price,
+    price_anchor_locked: 1,
+    price_anchor_locked_at: priceAnchorLockedAt,
+    ...(lockedBaseFare !== null ? { price_anchor_base_fare: lockedBaseFare } : {}),
+    ...(lockedMinPrice !== null ? { price_anchor_min_price: lockedMinPrice } : {}),
+    ...(lockedMaxPrice !== null ? { price_anchor_max_price: lockedMaxPrice } : {}),
 
     service_type_id: toNumber(data.service_type_id) ?? null,
     service_category_id: toNumber(data.service_category_id) ?? null,
@@ -5912,6 +5936,11 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       max_fare: priceBounds.max_price,
       min_fare: priceBounds.min_price,
       max_fare: priceBounds.max_price,
+      price_anchor_locked: 1,
+      price_anchor_locked_at: priceAnchorLockedAt,
+      ...(lockedBaseFare !== null ? { price_anchor_base_fare: lockedBaseFare } : {}),
+      ...(lockedMinPrice !== null ? { price_anchor_min_price: lockedMinPrice } : {}),
+      ...(lockedMaxPrice !== null ? { price_anchor_max_price: lockedMaxPrice } : {}),
       service_type_id: toNumber(data.service_type_id) ?? null,
       service_category_id: toNumber(data.service_category_id) ?? null,
       service_type_name: localizedServiceTypeName ?? null,
@@ -5940,6 +5969,11 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       ...(priceBounds.base_fare !== null ? { estimated_fare: priceBounds.base_fare } : {}),
       ...(priceBounds.min_price !== null ? { min_price: priceBounds.min_price } : {}),
       ...(priceBounds.max_price !== null ? { max_price: priceBounds.max_price } : {}),
+      price_anchor_locked: 1,
+      price_anchor_locked_at: priceAnchorLockedAt,
+      ...(lockedBaseFare !== null ? { price_anchor_base_fare: lockedBaseFare } : {}),
+      ...(lockedMinPrice !== null ? { price_anchor_min_price: lockedMinPrice } : {}),
+      ...(lockedMaxPrice !== null ? { price_anchor_max_price: lockedMaxPrice } : {}),
       ...(localizedServiceTypeName ? { service_type_name: localizedServiceTypeName } : {}),
       ...(localizedServiceTypeName ? { vehicle_type_name: localizedServiceTypeName } : {}),
       ...(serviceTypeNameEn ? { service_type_name_en: serviceTypeNameEn, vehicle_type_name_en: serviceTypeNameEn } : {}),
@@ -5993,12 +6027,19 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         min_fare_amount: legacyMinFareAmount,
         max_fare_amount: legacyMaxFareAmount,
         base_fare: priceBounds.base_fare,
+        estimated_price: priceBounds.base_fare,
+        estimated_fare: priceBounds.base_fare,
         min_price: priceBounds.min_price,
         max_price: priceBounds.max_price,
         MIN_PRICE: priceBounds.min_price,
         MAX_PRICE: priceBounds.max_price,
         min_fare: priceBounds.min_price,
         max_fare: priceBounds.max_price,
+        price_anchor_locked: 1,
+        price_anchor_locked_at: priceAnchorLockedAt,
+        ...(lockedBaseFare !== null ? { price_anchor_base_fare: lockedBaseFare } : {}),
+        ...(lockedMinPrice !== null ? { price_anchor_min_price: lockedMinPrice } : {}),
+        ...(lockedMaxPrice !== null ? { price_anchor_max_price: lockedMaxPrice } : {}),
         service_type_id: serviceTypeId,
         service_category_id: toNumber(data.service_category_id) ?? null,
         service_type_name: localizedServiceTypeName ?? null,
@@ -6061,8 +6102,15 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
           duration: finalRouteApiDurationMin,
           route_api_distance_km: finalRouteApiDistanceKm,
           ...(priceBounds.base_fare !== null ? { base_fare: priceBounds.base_fare } : {}),
+          ...(priceBounds.base_fare !== null ? { estimated_price: priceBounds.base_fare } : {}),
+          ...(priceBounds.base_fare !== null ? { estimated_fare: priceBounds.base_fare } : {}),
           ...(priceBounds.min_price !== null ? { min_price: priceBounds.min_price } : {}),
           ...(priceBounds.max_price !== null ? { max_price: priceBounds.max_price } : {}),
+          price_anchor_locked: 1,
+          price_anchor_locked_at: priceAnchorLockedAt,
+          ...(lockedBaseFare !== null ? { price_anchor_base_fare: lockedBaseFare } : {}),
+          ...(lockedMinPrice !== null ? { price_anchor_min_price: lockedMinPrice } : {}),
+          ...(lockedMaxPrice !== null ? { price_anchor_max_price: lockedMaxPrice } : {}),
           ...(localizedServiceTypeName ? { service_type_name: localizedServiceTypeName } : {}),
           ...(localizedServiceTypeName ? { vehicle_type_name: localizedServiceTypeName } : {}),
           ...(serviceTypeNameEn
@@ -9060,7 +9108,16 @@ if (removed) {
     const fallbackUserId =
       toNumber(payload?.user_id) ?? toNumber(snapshot?.user_id) ?? toNumber(getUserIdForRide(rideId));
 
-    const ridePriceBounds = getRidePriceBounds(snapshot ?? {});
+    const lockedBounds =
+      extractRidePriceAnchor(snapshot ?? {}) ??
+      null;
+    const ridePriceBounds = lockedBounds
+      ? {
+          base_fare: lockedBounds.base_fare ?? null,
+          min_price: lockedBounds.min_price,
+          max_price: lockedBounds.max_price,
+        }
+      : getRidePriceBounds(snapshot ?? {});
     if (!isPriceWithinBounds(newPrice, ridePriceBounds)) {
       const validationPayload = {
         ride_id: rideId,
