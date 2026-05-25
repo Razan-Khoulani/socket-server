@@ -774,6 +774,23 @@ module.exports = (io, socket) => {
       now
     );
     if (!locationCheck.ok) {
+      const rejectedReason = String(locationCheck.reason || "");
+      if (["duplicate-jitter", "jump", "speed"].includes(rejectedReason)) {
+        const lastAccepted = lastAcceptedLocationByDriver.get(socket.driverId);
+        const stableLat = toNumber(lastAccepted?.lat);
+        const stableLong = toNumber(lastAccepted?.long);
+        if (stableLat !== null && stableLong !== null) {
+          // Keep presence/location freshness alive even when a noisy GPS point is rejected.
+          driverLocationService.updateMemory(socket.driverId, stableLat, stableLong);
+          driverLocationService.updateMeta(socket.driverId, {
+            is_online: true,
+            dashboard_is_online: true,
+            socket_disconnected: false,
+            last_activity_at: now,
+            updatedAt: now,
+          });
+        }
+      }
       locationLog("[update-location][filtered]", {
         driver_id: socket.driverId,
         lat: la,
