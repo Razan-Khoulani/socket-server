@@ -1292,6 +1292,15 @@ const getRidePriceBounds = (payload = {}) => {
     getEstimatedPriceFromPayload(payload),
     getBaseFareFromPayload(payload)
   );
+  const distanceKm = getPayloadDistanceKm(payload);
+  const computedBase = pickFirstValue(
+    getEstimatedPriceFromPayload(payload),
+    getBaseFareFromPayload(payload)
+  );
+  if (computedBase !== null) {
+    return buildPriceBounds(computedBase, distanceKm);
+  }
+
   if (explicitMin !== null && explicitMax !== null) {
     const normalized = normalizePriceBoundsPair(explicitMin, explicitMax);
     return {
@@ -1299,16 +1308,6 @@ const getRidePriceBounds = (payload = {}) => {
       min_price: normalized.min_price,
       max_price: normalized.max_price,
     };
-  }
-
-  const distanceKm = getPayloadDistanceKm(payload);
-  const computedBase = pickFirstValue(
-    getEstimatedPriceFromPayload(payload),
-    getBaseFareFromPayload(payload)
-  );
-
-  if (computedBase !== null) {
-    return buildPriceBounds(computedBase, distanceKm);
   }
 
   const normalized = normalizePriceBoundsPair(explicitMin, explicitMax);
@@ -1364,7 +1363,14 @@ const extractRidePriceAnchor = (payload = {}) => {
     toNumber(payload?.meta?.MAX_PRICE)
   );
 
-  const normalized = normalizePriceBoundsPair(anchorMin, anchorMax);
+  const computedFromBase =
+    anchorBase !== null ? buildPriceBounds(anchorBase) : { min_price: null, max_price: null };
+  const normalizedExplicit = normalizePriceBoundsPair(anchorMin, anchorMax);
+  const resolvedMin =
+    toNumber(computedFromBase?.min_price) ?? toNumber(normalizedExplicit?.min_price);
+  const resolvedMax =
+    toNumber(computedFromBase?.max_price) ?? toNumber(normalizedExplicit?.max_price);
+  const normalized = normalizePriceBoundsPair(resolvedMin, resolvedMax);
   if (normalized.min_price === null || normalized.max_price === null) return null;
 
   const lockedAt =
@@ -5137,8 +5143,8 @@ async function dispatchToNearbyDrivers(io, data) {
       min_price: snapshotBounds.min_price,
       max_price: snapshotBounds.max_price,
     };
-  } else if (incomingEstimatedBaseFare !== null) {
-    priceBounds = buildPriceBounds(incomingEstimatedBaseFare);
+  } else if (resolvedBaseFare !== null) {
+    priceBounds = buildPriceBounds(resolvedBaseFare);
   } else if (incomingExplicitMin !== null && incomingExplicitMax !== null) {
     const normalizedIncoming = normalizePriceBoundsPair(
       incomingExplicitMin,
@@ -5149,8 +5155,6 @@ async function dispatchToNearbyDrivers(io, data) {
       min_price: normalizedIncoming.min_price,
       max_price: normalizedIncoming.max_price,
     };
-  } else if (resolvedBaseFare !== null) {
-    priceBounds = buildPriceBounds(resolvedBaseFare);
   } else {
     priceBounds = getRidePriceBounds(data);
   }
