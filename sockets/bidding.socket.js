@@ -5485,13 +5485,10 @@ const shouldResetCandidateHistory =
   forceNewSearchWindow &&
   !incrementalExpansion &&
   radiusPlan.currentStageIndex === 0;
-if (shouldResetCandidateHistory) {
-  rideCandidates.delete(rideId);
-  clearRideDriverStates(rideId);
-}
+const previousCandidateSet = rideCandidates.get(rideId) ?? new Set();
 const shouldRetainExistingCandidates = incrementalExpansion;
 const existingCandidateSet = shouldRetainExistingCandidates
-  ? (rideCandidates.get(rideId) ?? new Set())
+  ? previousCandidateSet
   : new Set();
 
 const eligibleForDispatch = roadFiltered.filter((driver) => {
@@ -5577,10 +5574,28 @@ const newCandidateIds = candidateDriversRaw
   .filter((driverId) => !!driverId);
 
 // الدمج بين القدامى المحتفظ فيهم + الجدد
-const nextCandidateIds = Array.from(new Set([
+let nextCandidateIds = Array.from(new Set([
   ...retainedExistingIds,
   ...newCandidateIds,
 ]));
+
+if (shouldResetCandidateHistory) {
+  if (nextCandidateIds.length > 0) {
+    rideCandidates.delete(rideId);
+    clearRideDriverStates(rideId);
+  } else if (previousCandidateSet.size > 0) {
+    // Guard against wiping an already-published inbox when a follow-up dispatch
+    // pass returns no candidates for the same ride window.
+    nextCandidateIds = Array.from(previousCandidateSet);
+    console.log("[dispatch][reset-guard][kept-existing-candidates]", {
+      ride_id: rideId,
+      previous_candidates: previousCandidateSet.size,
+      planned_new_candidates: newCandidateIds.length,
+      force_new_search_window: forceNewSearchWindow,
+      dispatch_stage_number: radiusPlan.currentStageIndex + 1,
+    });
+  }
+}
 
 // هذا المتغير منخليه فقط للـ log والتوافق مع بقية المنطق
 
