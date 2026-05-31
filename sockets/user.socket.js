@@ -737,10 +737,6 @@ const inferServiceCategoryIdFromNearbyMemory = (
   if (la === null || lo === null) return null;
 
   const st = toNumber(serviceTypeId);
-  // Never infer category without an explicit service type.
-  if (st === null) {
-    return null;
-  }
   const nearbyWithType =
     typeof driverLocationService.getNearbyDriversFromMemory === "function"
       ? driverLocationService.getNearbyDriversFromMemory(
@@ -760,8 +756,24 @@ const inferServiceCategoryIdFromNearbyMemory = (
     return inferred;
   }
 
-  // Never infer category from mixed nearby pools.
-  // Only a service-type-scoped inference is allowed to avoid wrong pricing category.
+  const nearbyAnyType =
+    typeof driverLocationService.getNearbyDriversFromMemory === "function"
+      ? driverLocationService.getNearbyDriversFromMemory(
+          la,
+          lo,
+          DEFAULT_AIR_CANDIDATE_RADIUS_METERS,
+          {
+            only_online: true,
+            max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
+          }
+        )
+      : [];
+
+  inferred = pickDominantServiceCategoryId(nearbyAnyType);
+  if (inferred !== null) {
+    return inferred;
+  }
+
   return null;
 };
 
