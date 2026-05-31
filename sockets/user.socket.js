@@ -2905,6 +2905,13 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     const result = Array.from(typesMap.values()).sort(
       (a, b) => (b.drivers_count ?? 0) - (a.drivers_count ?? 0)
     );
+    const derivedServiceTypeId =
+      toPositiveId(socket.nearbyServiceTypeId) ??
+      toPositiveId(resolveEconomyVehicleTypeId(result)) ??
+      toPositiveId(result[0]?.service_type_id);
+    if (toPositiveId(socket.nearbyServiceTypeId) === null && derivedServiceTypeId !== null) {
+      socket.nearbyServiceTypeId = derivedServiceTypeId;
+    }
 
     const distanceKm = toNumber(socket.nearbyRouteDistanceKm);
     const nearbyServiceCategorySource = String(
@@ -2922,12 +2929,40 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       snapshotServiceCatId;
     const pickupLat = toNumber(lat);
     const pickupLong = toNumber(long);
+    const inferredCategoryByType = new Map();
+    const resolveTypeScopedCategory = (serviceTypeId) => {
+      const safeTypeId = toPositiveId(serviceTypeId);
+      if (safeTypeId === null) return null;
+      if (inferredCategoryByType.has(safeTypeId)) {
+        return inferredCategoryByType.get(safeTypeId);
+      }
+
+      const inferred = inferServiceCategoryIdFromNearbyMemory(lat, long, safeTypeId);
+      const normalized = normalizeServiceCategoryId(inferred);
+      inferredCategoryByType.set(safeTypeId, normalized);
+      if (normalized !== null) {
+        setNearbyServiceCategoryId(
+          normalized,
+          "user:getNearbyVehicleTypes:type-scoped-memory"
+        );
+      }
+      return normalized;
+    };
 
     if (distanceKm !== null) {
       try {
         const groups = new Map();
         for (const item of result) {
-          const serviceCatId = fixedServiceCatId ?? toNumber(item.service_category_id);
+          const itemTypeId = toPositiveId(item?.service_type_id);
+          let serviceCatId =
+            fixedServiceCatId ??
+            normalizeServiceCategoryId(toNumber(item.service_category_id));
+          if (serviceCatId === null && itemTypeId !== null) {
+            serviceCatId = resolveTypeScopedCategory(itemTypeId);
+            if (serviceCatId !== null) {
+              item.service_category_id = serviceCatId;
+            }
+          }
           if (!serviceCatId) continue;
           if (!groups.has(serviceCatId)) groups.set(serviceCatId, new Set());
           groups.get(serviceCatId).add(item.service_type_id);
@@ -3006,11 +3041,20 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
           }
 
           for (const item of result) {
-            const itemCatId = fixedServiceCatId ?? toNumber(item.service_category_id);
+            const itemTypeId = toPositiveId(item?.service_type_id);
+            let itemCatId =
+              fixedServiceCatId ??
+              normalizeServiceCategoryId(toNumber(item.service_category_id));
+            if (itemCatId === null && itemTypeId !== null) {
+              itemCatId = resolveTypeScopedCategory(itemTypeId);
+              if (itemCatId !== null) {
+                item.service_category_id = itemCatId;
+              }
+            }
             if (itemCatId !== serviceCatId) continue;
-            const itemTypeId = toNumber(item.service_type_id);
-            if (!itemTypeId) continue;
-            const fare = cacheEntry.map.get(itemTypeId);
+            const itemTypeIdNumeric = toNumber(item.service_type_id);
+            if (!itemTypeIdNumeric) continue;
+            const fare = cacheEntry.map.get(itemTypeIdNumeric);
             if (!fare) continue;
 
             item.service_category_id = serviceCatId;
