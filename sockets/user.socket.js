@@ -77,6 +77,7 @@ const NEARBY_FARE_CACHE_TTL_MS = Number.isFinite(
   : 5000;
 const serviceSearchRadiusCache = new Map();
 const nearbyFareVersionCache = new Map();
+const vehicleTypeCategoryHintCache = new Map();
 
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
@@ -405,6 +406,19 @@ const normalizeServiceCategoryId = (value) => {
   if (parsed === null) return null;
   const normalized = Math.trunc(parsed);
   return normalized > 0 ? normalized : null;
+};
+
+const setVehicleTypeCategoryHint = (serviceTypeId, serviceCategoryId) => {
+  const typeId = toPositiveId(serviceTypeId);
+  const categoryId = normalizeServiceCategoryId(serviceCategoryId);
+  if (typeId === null || categoryId === null) return;
+  vehicleTypeCategoryHintCache.set(typeId, categoryId);
+};
+
+const getVehicleTypeCategoryHint = (serviceTypeId) => {
+  const typeId = toPositiveId(serviceTypeId);
+  if (typeId === null) return null;
+  return normalizeServiceCategoryId(vehicleTypeCategoryHintCache.get(typeId));
 };
 
 const extractIdFromObject = (value, keys = []) => {
@@ -1304,6 +1318,7 @@ const fetchVehicleFaresFromApi = async (
       const id = toNumber(item?.vehicle_type_id);
       if (!id) continue;
       map.set(id, item);
+      setVehicleTypeCategoryHint(id, serviceCategoryId);
     }
     return map;
   } catch (e) {
@@ -1314,6 +1329,66 @@ const fetchVehicleFaresFromApi = async (
     );
     return new Map();
   }
+};
+
+const fetchVehicleFaresByTypeFallback = async (
+  distanceKm,
+  vehicleTypeIds = [],
+  pickupLat = null,
+  pickupLong = null
+) => {
+  const safeDistance = toNumber(distanceKm);
+  if (safeDistance === null) return new Map();
+
+  const unresolvedTypeIds = Array.from(
+    new Set(
+      (Array.isArray(vehicleTypeIds) ? vehicleTypeIds : [])
+        .map((value) => toPositiveId(value))
+        .filter((value) => value !== null)
+    )
+  );
+  if (unresolvedTypeIds.length === 0) return new Map();
+
+  const hintedCategories = Array.from(
+    new Set(
+      unresolvedTypeIds
+        .map((typeId) => getVehicleTypeCategoryHint(typeId))
+        .filter((categoryId) => categoryId !== null)
+    )
+  );
+  const trialCategories = [
+    ...hintedCategories,
+    ...Array.from(KNOWN_SERVICE_CATEGORY_IDS).filter(
+      (categoryId) => !hintedCategories.includes(categoryId)
+    ),
+  ];
+
+  const resolvedMap = new Map();
+  for (const categoryId of trialCategories) {
+    const pending = unresolvedTypeIds.filter((typeId) => !resolvedMap.has(typeId));
+    if (pending.length === 0) break;
+
+    const fareMap = await fetchVehicleFaresFromApi(
+      categoryId,
+      safeDistance,
+      pending,
+      pickupLat,
+      pickupLong
+    );
+    if (!fareMap || fareMap.size === 0) continue;
+
+    for (const [typeId, fare] of fareMap.entries()) {
+      const safeTypeId = toPositiveId(typeId);
+      if (safeTypeId === null || !pending.includes(safeTypeId)) continue;
+      resolvedMap.set(safeTypeId, {
+        ...fare,
+        __resolved_service_category_id: categoryId,
+      });
+      setVehicleTypeCategoryHint(safeTypeId, categoryId);
+    }
+  }
+
+  return resolvedMap;
 };
 
 // ? NEW: helper extracts road distance from route API response
@@ -2905,6 +2980,13 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     const result = Array.from(typesMap.values()).sort(
       (a, b) => (b.drivers_count ?? 0) - (a.drivers_count ?? 0)
     );
+    for (const item of result) {
+      if (toNumber(item?.service_category_id) !== null) continue;
+      const hintedCategoryId = getVehicleTypeCategoryHint(item?.service_type_id);
+      if (hintedCategoryId !== null) {
+        item.service_category_id = hintedCategoryId;
+      }
+    }
 
     const distanceKm = toNumber(socket.nearbyRouteDistanceKm);
     const nearbyServiceCategorySource = String(
@@ -2922,6 +3004,52 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       snapshotServiceCatId;
     const pickupLat = toNumber(lat);
     const pickupLong = toNumber(long);
+    const shouldIncludePickupForFareLookup = nearbyDrivers.length === 0;
+
+    const applyFareToItem = (item, fare, resolvedServiceCategoryId = null) => {
+      if (!item || !fare) return;
+      const finalCategoryId = normalizeServiceCategoryId(resolvedServiceCategoryId);
+      if (finalCategoryId !== null) {
+        item.service_category_id = finalCategoryId;
+      }
+
+      item.cost_per_km = roundMoney(toNumber(fare.cost_per_km ?? 0));
+      item.distance_km = roundMoney(distanceKm);
+
+      const computedBounds = buildPriceBounds(
+        fare.base_fare,
+        fare.estimated_fare,
+        distanceKm
+      );
+      const explicitBounds = normalizePriceBoundsPair(
+        toNumber(fare?.min_price ?? fare?.min_fare ?? fare?.min_fare_amount ?? null),
+        toNumber(fare?.max_price ?? fare?.max_fare ?? fare?.max_fare_amount ?? null)
+      );
+      const hasExplicitBounds =
+        explicitBounds.min_price !== null && explicitBounds.max_price !== null;
+
+      item.base_fare =
+        roundMoney(toNumber(fare?.base_fare ?? null)) ?? computedBounds.base_fare;
+      item.estimated_fare =
+        roundMoney(toNumber(fare?.estimated_fare ?? null)) ?? computedBounds.estimated_fare;
+      item.min_price = hasExplicitBounds
+        ? explicitBounds.min_price
+        : computedBounds.min_price;
+      item.max_price = hasExplicitBounds
+        ? explicitBounds.max_price
+        : computedBounds.max_price;
+
+      const driverDistanceM = toNumber(fare.driver_to_pickup_distance_m ?? null);
+      const driverDurationS = toNumber(fare.driver_to_pickup_duration_s ?? null);
+      if (driverDistanceM !== null) {
+        item.driver_to_pickup_distance_m = driverDistanceM;
+        item.driver_to_pickup_distance_km = roundMoney(driverDistanceM / 1000);
+      }
+      if (driverDurationS !== null) {
+        item.driver_to_pickup_duration_s = driverDurationS;
+        item.driver_to_pickup_duration_min = roundMoney(driverDurationS / 60);
+      }
+    };
 
     if (distanceKm !== null) {
       try {
@@ -2933,7 +3061,6 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
           groups.get(serviceCatId).add(item.service_type_id);
         }
 
-        const shouldIncludePickupForFareLookup = nearbyDrivers.length === 0;
         for (const [serviceCatId, typeSet] of groups.entries()) {
           let cacheEntry = socket.nearbyFareCache.get(serviceCatId);
           const cacheKeyChanged =
@@ -3012,50 +3139,45 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
             if (!itemTypeId) continue;
             const fare = cacheEntry.map.get(itemTypeId);
             if (!fare) continue;
-
-            item.service_category_id = serviceCatId;
-           item.cost_per_km = roundMoney(toNumber(fare.cost_per_km ?? 0));
-item.distance_km = roundMoney(distanceKm);
-
-const computedBounds = buildPriceBounds(
-  fare.base_fare,
-  fare.estimated_fare,
-  distanceKm
-);
-const explicitBounds = normalizePriceBoundsPair(
-  toNumber(fare?.min_price ?? fare?.min_fare ?? fare?.min_fare_amount ?? null),
-  toNumber(fare?.max_price ?? fare?.max_fare ?? fare?.max_fare_amount ?? null)
-);
-const hasExplicitBounds =
-  explicitBounds.min_price !== null && explicitBounds.max_price !== null;
-
-item.base_fare =
-  roundMoney(toNumber(fare?.base_fare ?? null)) ?? computedBounds.base_fare;
-item.estimated_fare =
-  roundMoney(toNumber(fare?.estimated_fare ?? null)) ?? computedBounds.estimated_fare;
-item.min_price = hasExplicitBounds
-  ? explicitBounds.min_price
-  : computedBounds.min_price;
-item.max_price = hasExplicitBounds
-  ? explicitBounds.max_price
-  : computedBounds.max_price;
-
-            const driverDistanceM = toNumber(fare.driver_to_pickup_distance_m ?? null);
-            const driverDurationS = toNumber(fare.driver_to_pickup_duration_s ?? null);
-
-            // prefer fare API values if present, otherwise keep road-filter values
-            if (driverDistanceM !== null) {
-              item.driver_to_pickup_distance_m = driverDistanceM;
-              item.driver_to_pickup_distance_km = roundMoney(driverDistanceM / 1000);
-            }
-            if (driverDurationS !== null) {
-              item.driver_to_pickup_duration_s = driverDurationS;
-              item.driver_to_pickup_duration_min = roundMoney(driverDurationS / 60);
-            }
+            applyFareToItem(item, fare, serviceCatId);
           }
         }
       } catch (e) {
         console.warn("[nearbyVehicleTypes] fare lookup failed:", e?.message || e);
+      }
+
+      const unresolvedTypeIds = result
+        .filter((item) => {
+          return (
+            toNumber(item?.base_fare) === null &&
+            toNumber(item?.estimated_fare) === null &&
+            toNumber(item?.min_price) === null &&
+            toNumber(item?.max_price) === null
+          );
+        })
+        .map((item) => toPositiveId(item?.service_type_id))
+        .filter((value) => value !== null);
+
+      if (unresolvedTypeIds.length > 0) {
+        const fallbackFareMap = await fetchVehicleFaresByTypeFallback(
+          distanceKm,
+          unresolvedTypeIds,
+          shouldIncludePickupForFareLookup ? pickupLat : null,
+          shouldIncludePickupForFareLookup ? pickupLong : null
+        );
+        if (fallbackFareMap.size > 0) {
+          for (const item of result) {
+            const itemTypeId = toPositiveId(item?.service_type_id);
+            if (itemTypeId === null) continue;
+            const fallbackFare = fallbackFareMap.get(itemTypeId);
+            if (!fallbackFare) continue;
+
+            const resolvedServiceCategoryId =
+              toNumber(fallbackFare?.__resolved_service_category_id) ??
+              getVehicleTypeCategoryHint(itemTypeId);
+            applyFareToItem(item, fallbackFare, resolvedServiceCategoryId);
+          }
+        }
       }
     }
 
