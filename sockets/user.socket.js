@@ -1356,6 +1356,12 @@ const fetchVehicleFaresFromApi = async (
       payload.pickup_lat = pickupLat;
       payload.pickup_long = pickupLong;
     }
+    console.log("[vehicle-fares-api][request]", {
+      service_category_id: payload.service_category_id ?? null,
+      vehicle_type_ids: payload.vehicle_type_ids ?? [],
+      distance_km: payload.distance_km ?? null,
+      has_pickup_coords: payload.pickup_lat != null && payload.pickup_long != null,
+    });
     const res = await axios.post(
       `${LARAVEL_BASE_URL}/api/customer/transport/vehicle-fares`,
       payload,
@@ -2970,7 +2976,15 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     );
 
     const distanceKm = toNumber(socket.nearbyRouteDistanceKm);
-    const fixedServiceCatIdRaw = toNumber(socket.nearbyServiceCategoryId);
+    const nearbyServiceCategorySource = String(
+      socket.nearbyServiceCategorySource ?? ""
+    ).toLowerCase();
+    const canUseSocketServiceCategoryForFareLookup =
+      nearbyServiceCategorySource !== "" &&
+      !nearbyServiceCategorySource.includes("nearby-memory");
+    const fixedServiceCatIdRaw = canUseSocketServiceCategoryForFareLookup
+      ? toNumber(socket.nearbyServiceCategoryId)
+      : null;
     const snapshotServiceCatId = getNearbyServiceCategoryFromRideSnapshot();
     const fixedServiceCatId =
       (fixedServiceCatIdRaw !== null && fixedServiceCatIdRaw > 0 ? fixedServiceCatIdRaw : null) ??
