@@ -58,6 +58,16 @@ const resolveServiceTypeId = (profile = {}) => {
   return direct;
 };
 
+const resolvePrimaryServiceCategoryId = (profile = {}) => {
+  const direct = toNumber(profile.service_category_id ?? profile.service_cat_id);
+  if (direct) return direct;
+
+  const ids = parseServiceCategoryIds(
+    profile.service_category_ids ?? profile.driver_vehicle_service_lists
+  );
+  return ids.length > 0 ? toNumber(ids[0]) : null;
+};
+
 const getCachedProfile = (key) => {
   const cached = profileCache.get(key);
   if (!cached) return null;
@@ -74,6 +84,10 @@ const setCachedProfile = (profile = {}) => {
   const safeDriverDetailId = toNumber(
     profile.driver_detail_id ?? profile.driver_details_id
   );
+  const serviceCategoryIds = parseServiceCategoryIds(
+    profile.service_category_ids ?? profile.driver_vehicle_service_lists
+  );
+  const primaryServiceCategoryId = resolvePrimaryServiceCategoryId(profile);
   const payload = {
     driver_id: safeDriverId,
     provider_id: safeDriverId,
@@ -89,13 +103,9 @@ const setCachedProfile = (profile = {}) => {
     driver_current_status: toNumber(
       profile.driver_current_status ?? profile.current_status ?? profile.new_status
     ),
-    service_category_id: toNumber(
-      profile.service_category_id ?? profile.service_cat_id
-    ),
-    service_cat_id: toNumber(profile.service_category_id ?? profile.service_cat_id),
-    service_category_ids: parseServiceCategoryIds(
-      profile.service_category_ids ?? profile.driver_vehicle_service_lists
-    ),
+    service_category_id: primaryServiceCategoryId,
+    service_cat_id: primaryServiceCategoryId,
+    service_category_ids: serviceCategoryIds,
     service_type_id: resolveServiceTypeId(profile),
     vehicle_type_id: toNumber(profile.vehicle_type_id),
     driver_name: String(profile.driver_name ?? profile.name ?? "").trim(),

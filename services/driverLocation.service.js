@@ -10,6 +10,34 @@ const toNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const parseServiceCategoryIds = (value) => {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => toNumber(item))
+      .filter((item, index, arr) => item && arr.indexOf(item) === index);
+  }
+
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => toNumber(item.trim()))
+      .filter((item, index, arr) => item && arr.indexOf(item) === index);
+  }
+
+  const safeValue = toNumber(value);
+  return safeValue ? [safeValue] : [];
+};
+
+const resolveDriverServiceCategoryId = (data = {}) => {
+  const direct = toNumber(data?.service_category_id ?? data?.service_cat_id);
+  if (direct) return direct;
+
+  const ids = parseServiceCategoryIds(
+    data?.service_category_ids ?? data?.driver_vehicle_service_lists
+  );
+  return ids.length > 0 ? ids[0] : null;
+};
+
 const normalizeToken = (value) => {
   if (value === null || value === undefined) return "";
   return String(value)
@@ -241,7 +269,7 @@ exports.getNearbyDriversFromMemory = (lat, long, radius = 5000, opts = null) => 
         is_online: data.is_online ?? true,
 
         service_type_id: data.service_type_id ?? null,
-        service_category_id: data.service_category_id ?? null,
+        service_category_id: resolveDriverServiceCategoryId(data),
         driver_service_id: data.driver_service_id ?? null,
 
         vehicle_type_name: data.vehicle_type_name ?? "",
