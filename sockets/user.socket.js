@@ -534,6 +534,113 @@ const extractServiceTypeIdFromPayload = (payload = {}) => {
   return null;
 };
 
+const extractNearbyPriceAnchorFromPayload = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return null;
+
+  const candidates = [
+    payload,
+    payload?.ride_details,
+    payload?.meta,
+    payload?.data,
+    payload?.ride,
+    payload?.filter,
+    payload?.preferences,
+    payload?.selected_service_type,
+    payload?.selectedServiceType,
+    payload?.service_type,
+    payload?.selected_vehicle_type,
+    payload?.selectedVehicleType,
+    payload?.vehicle_type,
+  ].filter((item) => item && typeof item === "object");
+
+  let serviceTypeId = extractServiceTypeIdFromPayload(payload);
+  let baseFare = null;
+  let estimatedFare = null;
+  let minPrice = null;
+  let maxPrice = null;
+  let anchorPrice = null;
+
+  for (const candidate of candidates) {
+    if (serviceTypeId === null) {
+      serviceTypeId = extractServiceTypeIdFromPayload(candidate);
+    }
+    if (baseFare === null) {
+      baseFare = getFirstNumber(
+        candidate?.base_fare,
+        candidate?.baseFare,
+        candidate?.fare_base,
+        candidate?.fareBase,
+        candidate?.estimated_price,
+        candidate?.estimatedPrice
+      );
+    }
+    if (estimatedFare === null) {
+      estimatedFare = getFirstNumber(
+        candidate?.estimated_fare,
+        candidate?.estimatedFare,
+        candidate?.estimated_price,
+        candidate?.estimatedPrice,
+        candidate?.expected_price,
+        candidate?.expectedPrice
+      );
+    }
+    if (minPrice === null) {
+      minPrice = getFirstNumber(
+        candidate?.min_price,
+        candidate?.minPrice,
+        candidate?.min_fare,
+        candidate?.minFare,
+        candidate?.min_fare_amount
+      );
+    }
+    if (maxPrice === null) {
+      maxPrice = getFirstNumber(
+        candidate?.max_price,
+        candidate?.maxPrice,
+        candidate?.max_fare,
+        candidate?.maxFare,
+        candidate?.max_fare_amount
+      );
+    }
+    if (anchorPrice === null) {
+      anchorPrice = getFirstNumber(
+        candidate?.user_bid_price,
+        candidate?.updatedPrice,
+        candidate?.offer_price,
+        candidate?.offerPrice,
+        candidate?.price,
+        candidate?.fare,
+        candidate?.estimated_price,
+        candidate?.estimated_fare
+      );
+    }
+  }
+
+  if (estimatedFare === null && anchorPrice !== null) {
+    estimatedFare = anchorPrice;
+  }
+  if (baseFare === null && estimatedFare !== null) {
+    baseFare = estimatedFare;
+  }
+
+  const hasAny =
+    toNumber(baseFare) !== null ||
+    toNumber(estimatedFare) !== null ||
+    toNumber(minPrice) !== null ||
+    toNumber(maxPrice) !== null ||
+    toNumber(anchorPrice) !== null;
+  if (!hasAny) return null;
+
+  return {
+    service_type_id: serviceTypeId,
+    base_fare: baseFare,
+    estimated_fare: estimatedFare,
+    min_price: minPrice,
+    max_price: maxPrice,
+    anchor_price: anchorPrice,
+  };
+};
+
 const pickDominantServiceCategoryId = (drivers = []) => {
   const counts = new Map();
   for (const item of Array.isArray(drivers) ? drivers : []) {
@@ -1772,6 +1879,9 @@ module.exports = (io, socket) => {
   socket.nearbyRequiredGender = null;
   socket.nearbyNeedChildSeat = null;
   socket.nearbyNeedHandicap = null;
+  socket.nearbyPayloadPriceAnchor = null;
+  socket.nearbyPayloadPriceAnchorSig = null;
+  socket.lastNearbyPricingGapSig = null;
 
   socket.lastVehicleTypesSig = null;
   socket.currentRideId = null;
@@ -2213,6 +2323,29 @@ const syncNearbyRadius = async (payload = {}) => {
     }
   };
 
+  const setNearbyPayloadPriceAnchor = (payload = {}, source = "payload") => {
+    const extracted = extractNearbyPriceAnchorFromPayload(payload);
+    if (!extracted) return false;
+
+    const normalized = {
+      service_type_id: toPositiveId(extracted.service_type_id),
+      base_fare: roundMoney(toNumber(extracted.base_fare)),
+      estimated_fare: roundMoney(toNumber(extracted.estimated_fare)),
+      min_price: roundMoney(toNumber(extracted.min_price)),
+      max_price: roundMoney(toNumber(extracted.max_price)),
+      anchor_price: roundMoney(toNumber(extracted.anchor_price)),
+      source,
+      at: Date.now(),
+    };
+    const sig = JSON.stringify(normalized);
+    if (socket.nearbyPayloadPriceAnchorSig === sig) return false;
+
+    socket.nearbyPayloadPriceAnchor = normalized;
+    socket.nearbyPayloadPriceAnchorSig = sig;
+    socket.lastVehicleTypesSig = null;
+    return true;
+  };
+
   const resetNearbyStateForUserSwitch = () => {
     stopNearby();
     socket.nearbyCenter = null;
@@ -2224,6 +2357,9 @@ const syncNearbyRadius = async (payload = {}) => {
     socket.nearbyRequiredGender = null;
     socket.nearbyNeedChildSeat = null;
     socket.nearbyNeedHandicap = null;
+    socket.nearbyPayloadPriceAnchor = null;
+    socket.nearbyPayloadPriceAnchorSig = null;
+    socket.lastNearbyPricingGapSig = null;
     socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
     socket.nearbyDispatchStagesMeters = [DEFAULT_NEARBY_RADIUS_METERS];
     socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
@@ -2923,6 +3059,93 @@ item.max_price = hasExplicitBounds
       }
     }
 
+    const fallbackAnchor = socket.nearbyPayloadPriceAnchor;
+    if (fallbackAnchor) {
+      const anchorTypeId = toPositiveId(fallbackAnchor.service_type_id);
+      const explicitBounds = normalizePriceBoundsPair(
+        toNumber(fallbackAnchor.min_price),
+        toNumber(fallbackAnchor.max_price)
+      );
+      const hasExplicitBounds =
+        explicitBounds.min_price !== null && explicitBounds.max_price !== null;
+      const fallbackBase = toNumber(
+        fallbackAnchor.base_fare ??
+          fallbackAnchor.estimated_fare ??
+          fallbackAnchor.anchor_price ??
+          null
+      );
+      const fallbackEstimated = toNumber(
+        fallbackAnchor.estimated_fare ??
+          fallbackAnchor.base_fare ??
+          fallbackAnchor.anchor_price ??
+          null
+      );
+      const computedBounds = buildPriceBounds(fallbackBase, fallbackEstimated, distanceKm);
+
+      for (const item of result) {
+        const itemTypeId = toPositiveId(item?.service_type_id);
+        const allowForType =
+          anchorTypeId === null || itemTypeId === anchorTypeId || result.length === 1;
+        if (!allowForType) continue;
+
+        if (toNumber(item.base_fare) === null) {
+          item.base_fare = computedBounds.base_fare;
+        }
+        if (toNumber(item.estimated_fare) === null) {
+          item.estimated_fare = computedBounds.estimated_fare;
+        }
+        if (toNumber(item.min_price) === null) {
+          item.min_price = hasExplicitBounds
+            ? explicitBounds.min_price
+            : computedBounds.min_price;
+        }
+        if (toNumber(item.max_price) === null) {
+          item.max_price = hasExplicitBounds
+            ? explicitBounds.max_price
+            : computedBounds.max_price;
+        }
+        if (distanceKm !== null && toNumber(item.distance_km) === null) {
+          item.distance_km = roundMoney(distanceKm);
+        }
+      }
+    }
+
+    const missingPricingTypeIds = result
+      .filter((item) => {
+        return (
+          toNumber(item?.base_fare) === null &&
+          toNumber(item?.estimated_fare) === null &&
+          toNumber(item?.min_price) === null &&
+          toNumber(item?.max_price) === null
+        );
+      })
+      .map((item) => toPositiveId(item?.service_type_id))
+      .filter((value) => value !== null);
+
+    if (missingPricingTypeIds.length > 0) {
+      const gapSig = JSON.stringify({
+        missing: missingPricingTypeIds,
+        category: fixedServiceCatId ?? null,
+        category_source: socket.nearbyServiceCategorySource ?? null,
+        distance: distanceKm,
+        fallback_source: fallbackAnchor?.source ?? null,
+      });
+      if (socket.lastNearbyPricingGapSig !== gapSig) {
+        socket.lastNearbyPricingGapSig = gapSig;
+        console.warn("[nearbyVehicleTypes][pricing-missing]", {
+          socket_id: socket.id,
+          service_type_id: socket.nearbyServiceTypeId ?? null,
+          service_category_id: fixedServiceCatId ?? null,
+          service_category_source: socket.nearbyServiceCategorySource ?? null,
+          distance_km: distanceKm,
+          missing_service_type_ids: missingPricingTypeIds,
+          fallback_anchor_source: fallbackAnchor?.source ?? null,
+        });
+      }
+    } else {
+      socket.lastNearbyPricingGapSig = null;
+    }
+
     return result;
   };
 
@@ -3248,6 +3471,7 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
       toNumber(user_id) ?? resolvePayloadUserId(payload) ?? toNumber(socket.userId);
 
     switchSocketUserSession(resolvedUserId, nearbyToken, "user:findNearbyDrivers");
+    setNearbyPayloadPriceAnchor(payload, "user:findNearbyDrivers");
     applyNearbyFiltersFromPayload(payload, { resetMissing: true });
     syncRideContextFromPayload(payload, "user:findNearbyDrivers");
 
@@ -3322,6 +3546,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   const resolvedUserId =
     resolvePayloadUserId(payload) ?? toNumber(payload?.user_id) ?? toNumber(socket.userId);
   switchSocketUserSession(resolvedUserId, nearbyTypesToken, "user:getNearbyVehicleTypes");
+  setNearbyPayloadPriceAnchor(payload, "user:getNearbyVehicleTypes");
 
   const la = toNumber(lat);
   const lo = toNumber(long);
@@ -3468,6 +3693,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
       centerShiftMeters === null ||
       centerShiftMeters > NEARBY_CENTER_RESET_THRESHOLD_M;
     applyNearbyFiltersFromPayload(payload, { resetMissing: false });
+    setNearbyPayloadPriceAnchor(payload, "user:updateNearbyCenter");
     syncRideContextFromPayload(payload, "user:updateNearbyCenter");
 
     socket.nearbyCenter = nextCenter;
@@ -3551,6 +3777,9 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     socket.nearbyRequiredGender = null;
     socket.nearbyNeedChildSeat = null;
     socket.nearbyNeedHandicap = null;
+    socket.nearbyPayloadPriceAnchor = null;
+    socket.nearbyPayloadPriceAnchorSig = null;
+    socket.lastNearbyPricingGapSig = null;
     socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
     socket.nearbyDispatchStagesMeters = [DEFAULT_NEARBY_RADIUS_METERS];
     socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
@@ -3603,6 +3832,9 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
       : null;
     stopNearby();
     socket.lastPricingSnapshotSigByRide.clear();
+    socket.nearbyPayloadPriceAnchor = null;
+    socket.nearbyPayloadPriceAnchorSig = null;
+    socket.lastNearbyPricingGapSig = null;
     socket.userToken = null;
     socket.currentRideId = null;
     socket.isUser = false;
