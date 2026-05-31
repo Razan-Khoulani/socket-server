@@ -3552,8 +3552,12 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   let sc = extractServiceCategoryIdFromPayload(payload);
   if (sc === null && socket.nearbyServiceTypeId !== null) {
     sc = normalizeServiceCategoryId(socket.nearbyServiceTypeId);
+    if (sc !== null) {
+      setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes:from-service-type");
+    }
+  } else if (sc !== null) {
+    setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes");
   }
-  if (sc !== null) setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes");
   if (sc === null && normalizeServiceCategoryId(socket.nearbyServiceCategoryId) === null) {
     const inferredSc = inferServiceCategoryIdFromNearbyMemory(
       la,
@@ -3576,6 +3580,13 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   }
 
   // نمرر الـ payload هنا إلى `syncNearbyRadius` للحصول على الراديوس من API
+  console.log("[user:getNearbyVehicleTypes][category-resolve]", {
+    payload_service_category_id: extractServiceCategoryIdFromPayload(payload),
+    payload_service_type_id: extractServiceTypeIdFromPayload(payload),
+    socket_service_type_id: socket.nearbyServiceTypeId ?? null,
+    socket_service_category_id: normalizeServiceCategoryId(socket.nearbyServiceCategoryId),
+    socket_service_category_source: socket.nearbyServiceCategorySource ?? null,
+  });
   await syncNearbyRadius(payload);
 
   if (routeKm !== null) {
