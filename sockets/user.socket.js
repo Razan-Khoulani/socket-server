@@ -563,6 +563,10 @@ const inferServiceCategoryIdFromNearbyMemory = (
   if (la === null || lo === null) return null;
 
   const st = toNumber(serviceTypeId);
+  // Never infer category without an explicit service type.
+  if (st === null) {
+    return null;
+  }
   const nearbyWithType =
     typeof driverLocationService.getNearbyDriversFromMemory === "function"
       ? driverLocationService.getNearbyDriversFromMemory(
