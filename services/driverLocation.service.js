@@ -10,7 +10,82 @@ const toNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const parseServiceCategoryEntries = (value) => {
+  const entries = [];
+  const seen = new Set();
+  const pushEntry = (serviceCategoryId, serviceTypeId = null) => {
+    const safeCategoryId = toNumber(serviceCategoryId);
+    if (!safeCategoryId || safeCategoryId <= 0) return;
+    const safeTypeId = toNumber(serviceTypeId);
+    const normalizedTypeId = safeTypeId && safeTypeId > 0 ? safeTypeId : null;
+    const key = `${safeCategoryId}:${normalizedTypeId ?? "null"}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push({
+      service_category_id: safeCategoryId,
+      service_type_id: normalizedTypeId,
+    });
+  };
+
+  const visit = (input) => {
+    if (input === null || input === undefined || input === "") return;
+
+    if (Array.isArray(input)) {
+      for (const item of input) visit(item);
+      return;
+    }
+
+    if (typeof input === "string") {
+      const raw = input.trim();
+      if (!raw) return;
+      if (raw.startsWith("[") || raw.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(raw);
+          visit(parsed);
+          return;
+        } catch (_) {
+          // Not JSON, continue with CSV fallback.
+        }
+      }
+      if (raw.includes(",")) {
+        raw.split(",").forEach((item) => visit(item));
+        return;
+      }
+      pushEntry(raw, null);
+      return;
+    }
+
+    if (typeof input === "object") {
+      pushEntry(
+        input.service_category_id ??
+          input.service_cat_id ??
+          input.category_id ??
+          input.id ??
+          null,
+        input.service_type_id ??
+          input.vehicle_type_id ??
+          input.transport_vehicle_type_id ??
+          input.type_id ??
+          null
+      );
+      return;
+    }
+
+    pushEntry(input, null);
+  };
+
+  visit(value);
+  return entries;
+};
+
 const parseServiceCategoryIds = (value) => {
+  const fromEntries = parseServiceCategoryEntries(value)
+    .map((item) => toNumber(item?.service_category_id))
+    .filter((item, index, arr) => item && arr.indexOf(item) === index);
+  if (fromEntries.length > 0) {
+    return fromEntries;
+  }
+
   if (Array.isArray(value)) {
     return value
       .map((item) => toNumber(item))
@@ -28,9 +103,24 @@ const parseServiceCategoryIds = (value) => {
   return safeValue ? [safeValue] : [];
 };
 
-const resolveDriverServiceCategoryId = (data = {}) => {
+const resolveDriverServiceCategoryId = (data = {}, serviceTypeId = null) => {
   const direct = toNumber(data?.service_category_id ?? data?.service_cat_id);
   if (direct) return direct;
+
+  const requestedTypeId = toNumber(serviceTypeId ?? data?.service_type_id ?? null);
+  const serviceEntries = parseServiceCategoryEntries(
+    data?.driver_vehicle_service_lists ?? data?.service_category_ids
+  );
+  if (requestedTypeId && requestedTypeId > 0) {
+    const matched = serviceEntries.find(
+      (item) =>
+        toNumber(item?.service_type_id) &&
+        Number(item.service_type_id) === Number(requestedTypeId)
+    );
+    if (matched?.service_category_id) {
+      return toNumber(matched.service_category_id);
+    }
+  }
 
   const ids = parseServiceCategoryIds(
     data?.service_category_ids ?? data?.driver_vehicle_service_lists
@@ -220,8 +310,8 @@ exports.getNearbyDriversFromMemory = (lat, long, radius = 5000, opts = null) => 
 
   for (const [driverId, data] of driverLocations.entries()) {
     if (onlyOnline && data.is_online === false) continue;
+    const dataServiceType = Number(data.service_type_id);
     if (filterTypeId) {
-      const dataServiceType = Number(data.service_type_id);
       if (!Number.isFinite(dataServiceType) || dataServiceType !== Number(filterTypeId)) continue;
     }
     if (Number(data.not_valid_wallet_balance ?? 0) === 1) continue;
@@ -268,8 +358,13 @@ exports.getNearbyDriversFromMemory = (lat, long, radius = 5000, opts = null) => 
         distance,
         is_online: data.is_online ?? true,
 
-        service_type_id: data.service_type_id ?? null,
-        service_category_id: resolveDriverServiceCategoryId(data),
+        service_type_id: Number.isFinite(dataServiceType)
+          ? dataServiceType
+          : data.service_type_id ?? null,
+        service_category_id: resolveDriverServiceCategoryId(
+          data,
+          Number.isFinite(dataServiceType) ? dataServiceType : filterTypeId
+        ),
         driver_service_id: data.driver_service_id ?? null,
 
         vehicle_type_name: data.vehicle_type_name ?? "",

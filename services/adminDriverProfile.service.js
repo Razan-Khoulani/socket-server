@@ -30,7 +30,82 @@ const toNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const parseServiceCategoryEntries = (value) => {
+  const entries = [];
+  const seen = new Set();
+  const pushEntry = (serviceCategoryId, serviceTypeId = null) => {
+    const safeCategoryId = toNumber(serviceCategoryId);
+    if (!safeCategoryId || safeCategoryId <= 0) return;
+    const safeTypeId = toNumber(serviceTypeId);
+    const normalizedTypeId = safeTypeId && safeTypeId > 0 ? safeTypeId : null;
+    const key = `${safeCategoryId}:${normalizedTypeId ?? "null"}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push({
+      service_category_id: safeCategoryId,
+      service_type_id: normalizedTypeId,
+    });
+  };
+
+  const visit = (input) => {
+    if (input === null || input === undefined || input === "") return;
+
+    if (Array.isArray(input)) {
+      for (const item of input) visit(item);
+      return;
+    }
+
+    if (typeof input === "string") {
+      const raw = input.trim();
+      if (!raw) return;
+      if (raw.startsWith("[") || raw.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(raw);
+          visit(parsed);
+          return;
+        } catch (_) {
+          // Not JSON, continue with CSV fallback.
+        }
+      }
+      if (raw.includes(",")) {
+        raw.split(",").forEach((item) => visit(item));
+        return;
+      }
+      pushEntry(raw, null);
+      return;
+    }
+
+    if (typeof input === "object") {
+      pushEntry(
+        input.service_category_id ??
+          input.service_cat_id ??
+          input.category_id ??
+          input.id ??
+          null,
+        input.service_type_id ??
+          input.vehicle_type_id ??
+          input.transport_vehicle_type_id ??
+          input.type_id ??
+          null
+      );
+      return;
+    }
+
+    pushEntry(input, null);
+  };
+
+  visit(value);
+  return entries;
+};
+
 const parseServiceCategoryIds = (value) => {
+  const fromEntries = parseServiceCategoryEntries(value)
+    .map((item) => toNumber(item?.service_category_id))
+    .filter((item, index, arr) => item && arr.indexOf(item) === index);
+  if (fromEntries.length > 0) {
+    return fromEntries;
+  }
+
   if (Array.isArray(value)) {
     return value
       .map((item) => toNumber(item))
@@ -61,6 +136,21 @@ const resolveServiceTypeId = (profile = {}) => {
 const resolvePrimaryServiceCategoryId = (profile = {}) => {
   const direct = toNumber(profile.service_category_id ?? profile.service_cat_id);
   if (direct) return direct;
+
+  const preferredTypeId = resolveServiceTypeId(profile);
+  const entries = parseServiceCategoryEntries(
+    profile.driver_vehicle_service_lists ?? profile.service_category_ids
+  );
+  if (preferredTypeId && preferredTypeId > 0) {
+    const matched = entries.find(
+      (item) =>
+        toNumber(item?.service_type_id) &&
+        Number(item.service_type_id) === Number(preferredTypeId)
+    );
+    if (matched?.service_category_id) {
+      return toNumber(matched.service_category_id);
+    }
+  }
 
   const ids = parseServiceCategoryIds(
     profile.service_category_ids ?? profile.driver_vehicle_service_lists
