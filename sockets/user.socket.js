@@ -2992,11 +2992,22 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     const pickupLat = toNumber(lat);
     const pickupLong = toNumber(long);
 
+    const scopedResult =
+      fixedServiceCatId !== null
+        ? result.filter((item) => normalizeServiceCategoryId(item?.service_category_id) === fixedServiceCatId)
+        : result;
+
     if (distanceKm !== null) {
       try {
         const groups = new Map();
-        for (const item of result) {
-          const serviceCatId = fixedServiceCatId ?? toNumber(item.service_category_id);
+        for (const item of scopedResult) {
+          const itemServiceCatId = normalizeServiceCategoryId(item.service_category_id);
+          if (fixedServiceCatId !== null) {
+            if (itemServiceCatId === null || itemServiceCatId !== fixedServiceCatId) {
+              continue;
+            }
+          }
+          const serviceCatId = fixedServiceCatId ?? itemServiceCatId;
           if (!serviceCatId) continue;
           if (!groups.has(serviceCatId)) groups.set(serviceCatId, new Set());
           groups.get(serviceCatId).add(item.service_type_id);
@@ -3066,8 +3077,14 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
             }
           }
 
-          for (const item of result) {
-            const itemCatId = fixedServiceCatId ?? toNumber(item.service_category_id);
+          for (const item of scopedResult) {
+            const itemServiceCatId = normalizeServiceCategoryId(item.service_category_id);
+            if (fixedServiceCatId !== null) {
+              if (itemServiceCatId === null || itemServiceCatId !== fixedServiceCatId) {
+                continue;
+              }
+            }
+            const itemCatId = fixedServiceCatId ?? itemServiceCatId;
             if (itemCatId !== serviceCatId) continue;
             const itemTypeId = toNumber(item.service_type_id);
             if (!itemTypeId) continue;
@@ -3107,7 +3124,7 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       }
     }
 
-    return result;
+    return scopedResult;
   };
 
   const emitNearbyVehicleTypes = async () => {
