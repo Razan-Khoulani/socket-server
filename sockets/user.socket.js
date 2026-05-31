@@ -410,24 +410,76 @@ const normalizeServiceCategoryId = (value) => {
 const extractServiceCategoryIdFromPayload = (payload = {}) => {
   if (!payload || typeof payload !== "object") return null;
 
-  const explicit = getFirstNumber(
-    payload?.service_category_id,
-    payload?.service_cat_id,
-    payload?.sub_service_cat_id,
-    payload?.selected_service_category_id,
-    payload?.selectedServiceCategoryId,
-    payload?.service_category,
-    payload?.serviceCategoryId,
-    payload?.category_id,
-    payload?.categoryId
-  );
-  const normalizedExplicit = normalizeServiceCategoryId(explicit);
-  if (normalizedExplicit !== null) return normalizedExplicit;
+  const categoryKeyList = [
+    "service_category_id",
+    "service_cat_id",
+    "sub_service_cat_id",
+    "selected_service_category_id",
+    "selectedServiceCategoryId",
+    "service_category",
+    "serviceCategoryId",
+    "category_id",
+    "categoryId",
+  ];
+  const candidates = [
+    payload,
+    payload?.ride_details,
+    payload?.meta,
+    payload?.filter,
+    payload?.preferences,
+    payload?.data,
+    payload?.ride,
+  ].filter((item) => item && typeof item === "object");
+
+  for (const candidate of candidates) {
+    const explicit = getFirstNumber(...categoryKeyList.map((key) => candidate?.[key]));
+    const normalizedExplicit = normalizeServiceCategoryId(explicit);
+    if (normalizedExplicit !== null) return normalizedExplicit;
+  }
 
   // Some clients send service_id/serviceId for category. Guard with known category ids.
   const ambiguous = normalizeServiceCategoryId(payload?.service_id ?? payload?.serviceId ?? null);
   if (ambiguous !== null && KNOWN_SERVICE_CATEGORY_IDS.has(ambiguous)) {
     return ambiguous;
+  }
+
+  return null;
+};
+
+const extractServiceTypeIdFromPayload = (payload = {}) => {
+  if (payload === null || payload === undefined) return null;
+  if (typeof payload === "number" || typeof payload === "string") {
+    return toPositiveId(payload);
+  }
+  if (typeof payload !== "object") return null;
+
+  const serviceTypeKeyList = [
+    "service_type_id",
+    "serviceTypeId",
+    "selected_service_type_id",
+    "selectedServiceTypeId",
+    "vehicle_type_id",
+    "vehicleTypeId",
+    "vehicle_type",
+    "vehicleType",
+    "transport_vehicle_type_id",
+    "transportVehicleTypeId",
+  ];
+
+  const candidates = [
+    payload,
+    payload?.ride_details,
+    payload?.meta,
+    payload?.filter,
+    payload?.preferences,
+    payload?.data,
+    payload?.ride,
+  ].filter((item) => item && typeof item === "object");
+
+  for (const candidate of candidates) {
+    const raw = getFirstNumber(...serviceTypeKeyList.map((key) => candidate?.[key]));
+    const normalized = toPositiveId(raw);
+    if (normalized !== null) return normalized;
   }
 
   return null;
@@ -3156,7 +3208,7 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
   socket.on("user:findNearbyDrivers", async (payload = {}) => {
     debugLog("user:findNearbyDrivers", payload, socket.id);
     nearbyLog("?? payload from frontend:", payload);
-    const { user_id, lat, long, service_type_id } = payload;
+    const { user_id, lat, long } = payload;
     const nearbyToken = normalizeToken(
       payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
     );
@@ -3199,7 +3251,7 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
 
     socket.nearbyCenter = { lat: la, long: lo };
 
-    const st = toPositiveId(service_type_id);
+    const st = extractServiceTypeIdFromPayload(payload);
     socket.nearbyServiceTypeId = st === null ? null : st;
 
     const sc = extractServiceCategoryIdFromPayload(payload);
@@ -3253,13 +3305,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   applyNearbyFiltersFromPayload(payload, { resetMissing: false });
   syncRideContextFromPayload(payload, "user:getNearbyVehicleTypes");
 
-  const payloadServiceTypeId = toPositiveId(
-    payload?.service_type_id ??
-      payload?.serviceTypeId ??
-      payload?.selected_service_type_id ??
-      payload?.selectedServiceTypeId ??
-      null
-  );
+  const payloadServiceTypeId = extractServiceTypeIdFromPayload(payload);
   if (payloadServiceTypeId !== null) {
     socket.nearbyServiceTypeId = payloadServiceTypeId;
   }
@@ -3407,6 +3453,10 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
 
     const sc = extractServiceCategoryIdFromPayload(payload);
     if (sc !== null) setNearbyServiceCategoryId(sc, "user:updateNearbyCenter");
+    const st = extractServiceTypeIdFromPayload(payload);
+    if (st !== null) {
+      socket.nearbyServiceTypeId = st;
+    }
 
     await syncNearbyRadius(payload);
 
@@ -3426,9 +3476,9 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     await emitNearbyVehicleTypesGuarded();
   });
 
-  socket.on("user:setNearbyServiceType", async ({ service_type_id }) => {
-    debugLog("user:setNearbyServiceType", { service_type_id }, socket.id);
-    const st = toPositiveId(service_type_id);
+  socket.on("user:setNearbyServiceType", async (payload = {}) => {
+    debugLog("user:setNearbyServiceType", payload, socket.id);
+    const st = extractServiceTypeIdFromPayload(payload);
     socket.nearbyServiceTypeId = st === null ? null : st;
 
     socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
