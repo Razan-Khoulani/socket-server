@@ -1,8 +1,12 @@
 // sockets/driver100.socket.js 
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios");
-const { getActiveRideByDriver } = require("../store/activeRides.store");
+const {
+  getActiveRideByDriver,
+  clearActiveRideByDriver,
+} = require("../store/activeRides.store");
 const { getUserDetails, getUserDetailsByToken } = require("../store/users.store");
+const { getRideStatusSnapshot } = require("../store/rideStatusSnapshots.store");
 const {
   startRideRoute,
   appendRidePoint,
@@ -44,6 +48,11 @@ const DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS = Number.isFinite(
 )
   ? Math.max(10_000, Number(process.env.DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS))
   : 60_000;
+const DRIVER_PRESENCE_HEARTBEAT_MS = Number.isFinite(
+  Number(process.env.DRIVER_PRESENCE_HEARTBEAT_MS)
+)
+  ? Math.max(5_000, Number(process.env.DRIVER_PRESENCE_HEARTBEAT_MS))
+  : 25_000;
 const extraDistanceSessions = new Map(); // rideId -> { driverId, acceptedAt, baselineRoutePointCount, baselineTotalDistanceKm, acceptedLat, acceptedLong, settled }
 const STATUS_DEDUPE_TTL_MS = Number.isFinite(
   Number(process.env.STATUS_DEDUPE_TTL_MS)
@@ -72,6 +81,7 @@ const LOCATION_DUPLICATE_WINDOW_MS = Number.isFinite(
   : 1500;
 // Keep status=6 active for extra-distance tracking until status=7 settlement.
 const FINAL_RIDE_STATUSES = new Set([4, 6, 7, 8, 9, 10]);
+const ACTIVE_RIDE_TERMINAL_STATUSES = new Set([4, 7, 8, 9, 10, 11]);
 
 const lastRideStatusByKey = new Map(); // key -> { status, at }
 const lastAcceptedLocationByDriver = new Map(); // driverId -> { lat, long, at }
@@ -284,6 +294,22 @@ module.exports = (io, socket) => {
         updatedAt: Date.now(),
       };
       driverLocationService.updateMeta(safeDriverId, mergedMeta);
+
+      const profileLat = toNumber(
+        profile.lat ?? profile.current_lat ?? mergedMeta.lat ?? mergedMeta.current_lat ?? null
+      );
+      const profileLong = toNumber(
+        profile.long ?? profile.current_long ?? mergedMeta.long ?? mergedMeta.current_long ?? null
+      );
+      if (profileLat !== null && profileLong !== null) {
+        driverLocationService.updateMemory(safeDriverId, profileLat, profileLong);
+        lastAcceptedLocationByDriver.set(safeDriverId, {
+          lat: profileLat,
+          long: profileLong,
+          at: Date.now(),
+        });
+      }
+
       return mergedMeta;
     } catch (error) {
       console.warn("[driver-wallet-sync] admin profile sync failed", {
@@ -423,6 +449,151 @@ module.exports = (io, socket) => {
   };
 
   const driverRoom = (driverId) => `driver:${driverId}`;
+  const clearDriverPresenceHeartbeat = () => {
+    if (!socket.presenceHeartbeatInterval) return;
+    clearInterval(socket.presenceHeartbeatInterval);
+    socket.presenceHeartbeatInterval = null;
+  };
+
+  const reconcileDriverActiveRideState = (driverId, meta = {}, source = "unknown") => {
+    const safeDriverId = toNumber(driverId ?? socket.driverId);
+    if (!safeDriverId) return false;
+
+    const activeRideId =
+      getActiveRideByDriver(safeDriverId) ?? toNumber(socket.activeRideId) ?? null;
+    if (!activeRideId) return false;
+
+    const profileStatus = toNumber(
+      meta?.current_status ??
+        meta?.driver_current_status ??
+        meta?.new_status ??
+        meta?.provider_current_status ??
+        null
+    );
+    const metaRideId = toNumber(meta?.current_ride_id ?? null);
+    const metaRideStatus = toNumber(
+      meta?.current_ride_status ?? meta?.latest_ride_status ?? meta?.raw_ride_status ?? null
+    );
+    const snapshotRideStatus = toNumber(
+      getRideStatusSnapshot(activeRideId)?.ride_status ?? null
+    );
+    const snapshotShowsActiveRide = [1, 2, 3, 5, 6].includes(snapshotRideStatus);
+
+    const shouldClearBecauseTerminal =
+      (metaRideStatus !== null &&
+        ACTIVE_RIDE_TERMINAL_STATUSES.has(metaRideStatus)) ||
+      (snapshotRideStatus !== null &&
+        ACTIVE_RIDE_TERMINAL_STATUSES.has(snapshotRideStatus));
+
+    const shouldClearBecauseAvailable =
+      profileStatus === 1 &&
+      !snapshotShowsActiveRide &&
+      (metaRideId === null || metaRideId !== activeRideId);
+
+    if (!shouldClearBecauseTerminal && !shouldClearBecauseAvailable) {
+      return false;
+    }
+
+    clearActiveRideByDriver(safeDriverId);
+    if (toNumber(socket.activeRideId) === activeRideId) {
+      socket.activeRideId = null;
+    }
+
+    const now = Date.now();
+    driverLocationService.updateMeta(safeDriverId, {
+      current_ride_id: null,
+      current_ride_status: shouldClearBecauseTerminal ? metaRideStatus ?? snapshotRideStatus : null,
+      raw_ride_status: shouldClearBecauseTerminal ? metaRideStatus ?? snapshotRideStatus : null,
+      latest_ride_status: shouldClearBecauseTerminal ? metaRideStatus ?? snapshotRideStatus : null,
+      updatedAt: now,
+      last_activity_at: now,
+    });
+
+    console.log("[driver-active-ride-self-heal]", {
+      driver_id: safeDriverId,
+      active_ride_id_cleared: activeRideId,
+      profile_status: profileStatus,
+      meta_ride_id: metaRideId,
+      meta_ride_status: metaRideStatus,
+      snapshot_ride_status: snapshotRideStatus,
+      source,
+    });
+
+    return true;
+  };
+
+  const refreshDriverPresenceHeartbeat = (driverId, reason = "interval") => {
+    const safeDriverId = toNumber(driverId ?? socket.driverId);
+    if (!safeDriverId) return false;
+
+    const lastAccepted = lastAcceptedLocationByDriver.get(safeDriverId);
+    const storedLocation = driverLocationService.getDriver(safeDriverId) || {};
+    const lat = toNumber(lastAccepted?.lat ?? storedLocation?.lat);
+    const long = toNumber(lastAccepted?.long ?? storedLocation?.long);
+    if (lat === null || long === null) return false;
+
+    const now = Date.now();
+    driverLocationService.updateMemory(safeDriverId, lat, long);
+
+    const currentMeta = driverLocationService.getMeta(safeDriverId) || {};
+    reconcileDriverActiveRideState(safeDriverId, currentMeta, `presence:${reason}`);
+    const resolvedMeta = driverLocationService.getMeta(safeDriverId) || currentMeta;
+    const profileStatus = Number(
+      resolvedMeta.current_status ??
+        resolvedMeta.driver_current_status ??
+        resolvedMeta.new_status ??
+        resolvedMeta.provider_current_status ??
+        1
+    );
+    const walletBlocked = Number(resolvedMeta.not_valid_wallet_balance ?? 0) === 1;
+    const driverRoomSockets =
+      io?.sockets?.adapter?.rooms?.get(driverRoom(safeDriverId))?.size ?? 0;
+    const hasActiveSocketRoom = driverRoomSockets > 0;
+    const shouldStayOnline = profileStatus === 1 || hasActiveSocketRoom || walletBlocked;
+
+    driverLocationService.updateMeta(safeDriverId, {
+      is_online: shouldStayOnline,
+      dashboard_is_online: shouldStayOnline,
+      socket_disconnected: !shouldStayOnline,
+      can_receive_new_requests: walletBlocked ? 0 : 1,
+      last_activity_at: now,
+      updatedAt: now,
+    });
+
+    locationLog("[driver-presence-heartbeat]", {
+      driver_id: safeDriverId,
+      reason,
+      lat,
+      long,
+      room_sockets: driverRoomSockets,
+      online: shouldStayOnline,
+    });
+
+    return true;
+  };
+
+  const startDriverPresenceHeartbeat = (driverId) => {
+    clearDriverPresenceHeartbeat();
+    if (DRIVER_PRESENCE_HEARTBEAT_MS <= 0) return;
+    const safeDriverId = toNumber(driverId ?? socket.driverId);
+    if (!safeDriverId) return;
+
+    refreshDriverPresenceHeartbeat(safeDriverId, "driver-online");
+    socket.presenceHeartbeatInterval = setInterval(() => {
+      if (!socket.connected) return;
+      const roomName = driverRoom(safeDriverId);
+      if (!socket.rooms?.has(roomName)) {
+        socket.join(roomName);
+        console.log(
+          `[driver-presence-heartbeat] rejoined room ${roomName} (socket:${socket.id})`
+        );
+      }
+      const driverRoomSockets =
+        io?.sockets?.adapter?.rooms?.get(roomName)?.size ?? 0;
+      if (driverRoomSockets <= 0) return;
+      refreshDriverPresenceHeartbeat(safeDriverId, "interval");
+    }, DRIVER_PRESENCE_HEARTBEAT_MS);
+  };
 
   const bindDriverOnce = (newDriverId) => {
     if (!socket.driverId) {
@@ -462,6 +633,7 @@ module.exports = (io, socket) => {
   // State per socket
   // ─────────────────────────────
   socket.laravelLocationInterval = null;
+  socket.presenceHeartbeatInterval = null;
   socket.activeRideId = null;
 
   // ─────────────────────────────
@@ -486,14 +658,14 @@ module.exports = (io, socket) => {
     } = payload || {};
 
     const driverId = toNumber(driver_id);
-    const la = toNumber(lat);
-    const lo = toNumber(long);
+    let la = toNumber(lat);
+    let lo = toNumber(long);
     const normalizedAccessToken =
       access_token ??
       payload?.accessToken ??
       payload?.token ??
       null;
-    if (!driverId || la === null || lo === null) return;
+    if (!driverId) return;
     if (!bindDriverOnce(driverId)) return;
 
     const payloadServiceTypeId = toNumber(
@@ -505,6 +677,55 @@ module.exports = (io, socket) => {
     socket.driverDetailId = toNumber(payload?.driver_detail_id ?? null);
     socket.driverAccessToken = normalizedAccessToken ?? null;
     socket.driverServiceCategoryId = payloadServiceCategoryId ?? null;
+    let bootstrapProfileMeta = null;
+
+    if (la === null || lo === null) {
+      const existing = driverLocationService.getDriver(driverId) || {};
+      const existingMeta = driverLocationService.getMeta(driverId) || {};
+      la = toNumber(
+        existing.lat ??
+          existing.current_lat ??
+          existingMeta.lat ??
+          existingMeta.current_lat ??
+          null
+      );
+      lo = toNumber(
+        existing.long ??
+          existing.current_long ??
+          existingMeta.long ??
+          existingMeta.current_long ??
+          null
+      );
+    }
+
+    if (la === null || lo === null) {
+      const bootstrapMeta = await syncDriverAdminWalletMeta(driverId, {
+        driverServiceId: socket.driverServiceId ?? driver_service_id ?? null,
+        forceRefresh: true,
+      });
+      bootstrapProfileMeta = bootstrapMeta;
+      if (bootstrapMeta && typeof bootstrapMeta === "object") {
+        la = toNumber(
+          bootstrapMeta.lat ??
+            bootstrapMeta.current_lat ??
+            null
+        );
+        lo = toNumber(
+          bootstrapMeta.long ??
+            bootstrapMeta.current_long ??
+            null
+        );
+      }
+    }
+
+    if (la === null || lo === null) {
+      console.warn("[driver-online] missing usable location after fallbacks", {
+        driver_id: driverId,
+        has_payload_lat: lat != null,
+        has_payload_long: long != null,
+      });
+      return;
+    }
 
     socket.join(driverRoom(driverId));
     console.log("✅ driver joined room", driverRoom(driverId), "socket:", socket.id);
@@ -548,6 +769,7 @@ module.exports = (io, socket) => {
     if (hc === 0 || hc === 1) baseMeta.handicap = hc;
 
     driverLocationService.updateMeta(driverId, baseMeta);
+    startDriverPresenceHeartbeat(driverId);
 
     // ✅ جيب معلومات النوع + كل بيانات السيارة من Laravel وخزّنها بالميموري (كما هو)
     if (!normalizedAccessToken) {
@@ -726,6 +948,7 @@ module.exports = (io, socket) => {
         };
 
         driverLocationService.updateMeta(driverId, metaUpdate);
+        reconcileDriverActiveRideState(driverId, metaUpdate, "driver-online:update-current-status");
 
         console.log("✅ Driver online stored:", {
           driverId,
@@ -739,10 +962,15 @@ module.exports = (io, socket) => {
     // ✅ ابعث المرشحين مباشرة عند أونلاين
     // Sync wallet/block flags from Laravel even when update-current-status
     // was skipped because access_token was missing in driver-online payload.
-    await syncDriverAdminWalletMeta(driverId, {
-      driverServiceId: socket.driverServiceId ?? driver_service_id ?? null,
-      forceRefresh: true,
-    });
+    const syncedMeta =
+      bootstrapProfileMeta ??
+      (await syncDriverAdminWalletMeta(driverId, {
+        driverServiceId: socket.driverServiceId ?? driver_service_id ?? null,
+        forceRefresh: true,
+      }));
+    if (syncedMeta && typeof syncedMeta === "object") {
+      reconcileDriverActiveRideState(driverId, syncedMeta, "driver-online:admin-profile-sync");
+    }
 
     if (typeof biddingSocket.recoverDriverPendingDispatch === "function") {
       biddingSocket.recoverDriverPendingDispatch(io, driverId, "driver-online");
@@ -815,6 +1043,11 @@ module.exports = (io, socket) => {
     )
       .then((freshMeta) => {
         if (!freshMeta || typeof freshMeta !== "object") return;
+        reconcileDriverActiveRideState(
+          socket.driverId,
+          freshMeta,
+          "update-location:admin-profile-sync"
+        );
         const profileStatus = Number(
           freshMeta.current_status ??
             freshMeta.driver_current_status ??
@@ -843,15 +1076,21 @@ module.exports = (io, socket) => {
       .catch(() => {});
 
     const currentMeta = driverLocationService.getMeta(socket.driverId) || {};
+    reconcileDriverActiveRideState(
+      socket.driverId,
+      currentMeta,
+      "update-location:current-meta"
+    );
+    const resolvedMeta = driverLocationService.getMeta(socket.driverId) || currentMeta;
     const profileStatusNow = Number(
-      currentMeta.current_status ??
-        currentMeta.driver_current_status ??
-        currentMeta.new_status ??
-        currentMeta.provider_current_status ??
+      resolvedMeta.current_status ??
+        resolvedMeta.driver_current_status ??
+        resolvedMeta.new_status ??
+        resolvedMeta.provider_current_status ??
         1
     );
     const walletBlockedNow =
-      Number(currentMeta.not_valid_wallet_balance ?? 0) === 1;
+      Number(resolvedMeta.not_valid_wallet_balance ?? 0) === 1;
     const driverRoomSocketsNow =
       io?.sockets?.adapter?.rooms?.get(driverRoom(socket.driverId))?.size ?? 0;
     const hasActiveSocketRoomNow = driverRoomSocketsNow > 0;
@@ -1594,6 +1833,7 @@ const acceptExtraPayload = {
       clearInterval(socket.laravelLocationInterval);
       socket.laravelLocationInterval = null;
     }
+    clearDriverPresenceHeartbeat();
 
     if (socket.driverId) {
       const now = Date.now();

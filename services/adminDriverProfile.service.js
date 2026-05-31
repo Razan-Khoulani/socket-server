@@ -48,6 +48,16 @@ const parseServiceCategoryIds = (value) => {
   return safeValue ? [safeValue] : [];
 };
 
+const resolveServiceTypeId = (profile = {}) => {
+  const direct = toNumber(
+    profile.service_type_id ??
+      profile.vehicle_type_id ??
+      profile.transport_vehicle_type?.service_type_id ??
+      profile.transport_vehicle_type?.id
+  );
+  return direct;
+};
+
 const getCachedProfile = (key) => {
   const cached = profileCache.get(key);
   if (!cached) return null;
@@ -86,6 +96,7 @@ const setCachedProfile = (profile = {}) => {
     service_category_ids: parseServiceCategoryIds(
       profile.service_category_ids ?? profile.driver_vehicle_service_lists
     ),
+    service_type_id: resolveServiceTypeId(profile),
     vehicle_type_id: toNumber(profile.vehicle_type_id),
     driver_name: String(profile.driver_name ?? profile.name ?? "").trim(),
     name: String(profile.name ?? profile.driver_name ?? "").trim(),
@@ -117,6 +128,8 @@ const setCachedProfile = (profile = {}) => {
     ),
     current_lat: toNumber(profile.current_lat ?? profile.lat),
     current_long: toNumber(profile.current_long ?? profile.lng ?? profile.long),
+    lat: toNumber(profile.current_lat ?? profile.lat),
+    long: toNumber(profile.current_long ?? profile.lng ?? profile.long),
     remaining_balance: toNumber(profile.remaining_balance),
     not_valid_wallet_balance: toNumber(profile.not_valid_wallet_balance) ?? 0,
     not_valid_wallet_balance_msg: String(

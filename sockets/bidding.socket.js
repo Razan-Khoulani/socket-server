@@ -3436,6 +3436,27 @@ function canDriverReceiveNewRideRequests(driverId) {
     toNumber(getRideStatusSnapshot(activeRideId)?.ride_status) ??
     null;
 
+  if (activeRideStatus !== null && isTerminalRideStatus(activeRideStatus)) {
+    clearActiveRideByDriver(driverId);
+    return true;
+  }
+
+  if (activeRideStatus === null) {
+    const metaRideId = toNumber(meta?.current_ride_id ?? null);
+    const metaRideStatus = toNumber(
+      meta?.current_ride_status ?? meta?.latest_ride_status ?? meta?.raw_ride_status ?? null
+    );
+
+    if (
+      (metaRideId === null || metaRideId !== activeRideId) &&
+      metaRideStatus !== null &&
+      isTerminalRideStatus(metaRideStatus)
+    ) {
+      clearActiveRideByDriver(driverId);
+      return true;
+    }
+  }
+
   // إذا الرحلة الحالية لساتها accepted / arrived / started
   // لا تبعتلو أي رحلة ثانية نهائياً
   if ([1, 2, 3].includes(activeRideStatus)) {
