@@ -1,5 +1,6 @@
 // sockets/user.socket.js
 const driverLocationService = require("../services/driverLocation.service");
+const db = require("../db");
 const axios = require("axios");
 const { getDistanceMeters } = require("../utils/geo.util");
 const routeCacheL2 = require("../services/routeCacheL2.service");
@@ -75,8 +76,14 @@ const NEARBY_FARE_CACHE_TTL_MS = Number.isFinite(
 )
   ? Math.max(0, Number(process.env.NEARBY_FARE_CACHE_TTL_MS))
   : 5000;
+const SERVICE_TYPE_CATEGORY_CACHE_TTL_MS = Number.isFinite(
+  Number(process.env.SERVICE_TYPE_CATEGORY_CACHE_TTL_MS)
+)
+  ? Math.max(10 * 1000, Number(process.env.SERVICE_TYPE_CATEGORY_CACHE_TTL_MS))
+  : 5 * 60 * 1000;
 const serviceSearchRadiusCache = new Map();
 const nearbyFareVersionCache = new Map();
+const serviceTypeCategoryCache = new Map();
 
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
@@ -405,6 +412,98 @@ const normalizeServiceCategoryId = (value) => {
   if (parsed === null) return null;
   const normalized = Math.trunc(parsed);
   return normalized > 0 ? normalized : null;
+};
+
+const queryDb = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.query(sql, params, (error, rows) => {
+      if (error) return reject(error);
+      resolve(Array.isArray(rows) ? rows : []);
+    });
+  });
+
+const getCachedServiceCategoryByTypeId = (serviceTypeId) => {
+  const safeTypeId = toPositiveId(serviceTypeId);
+  if (safeTypeId === null) return null;
+
+  const cached = serviceTypeCategoryCache.get(safeTypeId);
+  if (!cached) return null;
+  if (Date.now() - cached.cached_at > SERVICE_TYPE_CATEGORY_CACHE_TTL_MS) {
+    serviceTypeCategoryCache.delete(safeTypeId);
+    return null;
+  }
+  return {
+    found: true,
+    value: normalizeServiceCategoryId(cached.service_category_id),
+  };
+};
+
+const setCachedServiceCategoryByTypeId = (serviceTypeId, serviceCategoryId) => {
+  const safeTypeId = toPositiveId(serviceTypeId);
+  if (safeTypeId === null) return;
+  serviceTypeCategoryCache.set(safeTypeId, {
+    service_category_id: normalizeServiceCategoryId(serviceCategoryId),
+    cached_at: Date.now(),
+  });
+};
+
+const resolveServiceCategoryIdFromServiceTypeId = async (serviceTypeId) => {
+  const safeTypeId = toPositiveId(serviceTypeId);
+  if (safeTypeId === null) return null;
+
+  const cached = getCachedServiceCategoryByTypeId(safeTypeId);
+  if (cached?.found) {
+    return cached.value;
+  }
+
+  try {
+    const fareRows = await queryDb(
+      `SELECT sub_service_cat_id AS service_category_id
+       FROM transport_vehicle_type_wise_fare
+       WHERE vehicle_type_id = ?
+         AND sub_service_cat_id IS NOT NULL
+       ORDER BY id DESC
+       LIMIT 1`,
+      [safeTypeId]
+    );
+    const fareCategory = normalizeServiceCategoryId(
+      fareRows?.[0]?.service_category_id ?? null
+    );
+    if (fareCategory !== null) {
+      setCachedServiceCategoryByTypeId(safeTypeId, fareCategory);
+      return fareCategory;
+    }
+  } catch (error) {
+    warnThrottled(
+      `service-type-category-fare:${safeTypeId}`,
+      "[service-type-category][fare-query] failed:",
+      { service_type_id: safeTypeId, error: error?.message || error }
+    );
+  }
+
+  try {
+    const typeRows = await queryDb(
+      `SELECT service_cat_id AS service_category_id
+       FROM transport_vehicle_type
+       WHERE id = ?
+       LIMIT 1`,
+      [safeTypeId]
+    );
+    const typeCategory = normalizeServiceCategoryId(
+      typeRows?.[0]?.service_category_id ?? null
+    );
+    setCachedServiceCategoryByTypeId(safeTypeId, typeCategory);
+    return typeCategory;
+  } catch (error) {
+    warnThrottled(
+      `service-type-category-type:${safeTypeId}`,
+      "[service-type-category][type-query] failed:",
+      { service_type_id: safeTypeId, error: error?.message || error }
+    );
+  }
+
+  setCachedServiceCategoryByTypeId(safeTypeId, null);
+  return null;
 };
 
 const extractIdFromObject = (value, keys = []) => {
@@ -2063,6 +2162,55 @@ const syncNearbyRadius = async (payload = {}) => {
   const snapshotServiceCategoryId = getNearbyServiceCategoryFromRideSnapshot();
   if (snapshotServiceCategoryId !== null) {
     setNearbyServiceCategoryId(snapshotServiceCategoryId, "ride-snapshot");
+  }
+
+  if (normalizeServiceCategoryId(socket.nearbyServiceCategoryId) === null) {
+    const payloadServiceTypeId = extractServiceTypeIdFromPayload(payload);
+    const effectiveServiceTypeId = toPositiveId(
+      payloadServiceTypeId ?? socket.nearbyServiceTypeId
+    );
+    if (effectiveServiceTypeId !== null) {
+      const centerLat = toNumber(
+        payload?.lat ??
+          payload?.pickup_lat ??
+          socket?.nearbyCenter?.lat ??
+          null
+      );
+      const centerLong = toNumber(
+        payload?.long ??
+          payload?.pickup_long ??
+          socket?.nearbyCenter?.long ??
+          null
+      );
+
+      const inferredFromNearby = inferServiceCategoryIdFromNearbyMemory(
+        centerLat,
+        centerLong,
+        effectiveServiceTypeId
+      );
+      if (inferredFromNearby !== null) {
+        setNearbyServiceCategoryId(
+          inferredFromNearby,
+          "syncNearbyRadius:nearby-memory"
+        );
+      }
+
+      if (normalizeServiceCategoryId(socket.nearbyServiceCategoryId) === null) {
+        const resolvedFromServiceType =
+          await resolveServiceCategoryIdFromServiceTypeId(effectiveServiceTypeId);
+        if (resolvedFromServiceType !== null) {
+          setNearbyServiceCategoryId(
+            resolvedFromServiceType,
+            "syncNearbyRadius:service-type"
+          );
+          nearbyLog("[syncNearbyRadius] resolved service_category_id from service_type_id", {
+            socket_id: socket.id,
+            service_type_id: effectiveServiceTypeId,
+            service_category_id: resolvedFromServiceType,
+          });
+        }
+      }
+    }
   }
 
   const nearbyServiceCategorySource = String(
