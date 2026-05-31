@@ -1354,34 +1354,88 @@ const fetchVehicleFaresFromApi = async (
       payload.pickup_lat = pickupLat;
       payload.pickup_long = pickupLong;
     }
-    console.log("[vehicle-fares-api][request]", {
-      service_category_id: payload.service_category_id ?? null,
-      service_type_id: payload.service_type_id ?? null,
-      service_type_ids: payload.service_type_ids ?? [],
-      distance_km: payload.distance_km ?? null,
-      has_pickup_coords: payload.pickup_lat != null && payload.pickup_long != null,
-    });
+    const requestVehicleFares = async (
+      requestPayload,
+      attempt = "primary"
+    ) => {
+      console.log("[vehicle-fares-api][request]", {
+        attempt,
+        service_category_id: requestPayload.service_category_id ?? null,
+        service_type_id: requestPayload.service_type_id ?? null,
+        service_type_ids: requestPayload.service_type_ids ?? [],
+        distance_km: requestPayload.distance_km ?? null,
+        has_pickup_coords:
+          requestPayload.pickup_lat != null && requestPayload.pickup_long != null,
+      });
 
-    const res = await axios.post(
-      `${LARAVEL_BASE_URL}/api/customer/transport/vehicle-fares`,
-      payload,
-      { timeout: LARAVEL_TIMEOUT_MS }
-    );
+      const res = await axios.post(
+        `${LARAVEL_BASE_URL}/api/customer/transport/vehicle-fares`,
+        requestPayload,
+        { timeout: LARAVEL_TIMEOUT_MS }
+      );
 
-    let data = res?.data;
-    if (typeof data === "string") {
-      try {
-        data = JSON.parse(data);
-      } catch (_) {}
+      let data = res?.data;
+      if (typeof data === "string") {
+        try {
+          data = JSON.parse(data);
+        } catch (_) {}
+      }
+
+      console.log("[vehicle-fares-api][response]", {
+        attempt,
+        status: data?.status ?? null,
+        message_code: data?.message_code ?? null,
+        items_count: Array.isArray(data?.items) ? data.items.length : 0,
+        service_category_id: requestPayload.service_category_id ?? null,
+        service_type_id: requestPayload.service_type_id ?? null,
+        distance_km: requestPayload.distance_km ?? null,
+      });
+
+      return data;
+    };
+
+    let data = await requestVehicleFares(payload, "primary");
+    const primaryItemsCount = Array.isArray(data?.items) ? data.items.length : 0;
+    const primaryCategoryId = toPositiveId(payload.service_category_id);
+    const retryCategoryId = toPositiveId(payload.service_type_id);
+    const canRetryWithTypeAsCategory =
+      primaryTypeId !== null &&
+      retryCategoryId !== null &&
+      primaryCategoryId !== null &&
+      retryCategoryId !== primaryCategoryId &&
+      data?.status === 1 &&
+      primaryItemsCount === 0;
+
+    if (canRetryWithTypeAsCategory) {
+      const retryPayload = {
+        ...payload,
+        service_category_id: retryCategoryId,
+        service_cat_id: retryCategoryId,
+        sub_service_cat_id: retryCategoryId,
+      };
+      console.warn("[vehicle-fares-api][retry-with-type-as-category]", {
+        from_service_category_id: primaryCategoryId,
+        to_service_category_id: retryCategoryId,
+        service_type_id: retryCategoryId,
+        distance_km: payload.distance_km ?? null,
+      });
+      const retryData = await requestVehicleFares(
+        retryPayload,
+        "fallback-type-as-category"
+      );
+      const retryItemsCount = Array.isArray(retryData?.items)
+        ? retryData.items.length
+        : 0;
+      if (retryData?.status === 1 && retryItemsCount > 0) {
+        data = retryData;
+        rememberServiceTypeCategoryMapping(
+          retryCategoryId,
+          retryCategoryId,
+          "vehicle-fares-api:retry-success"
+        );
+      }
     }
-    console.log("[vehicle-fares-api][response]", {
-      status: data?.status ?? null,
-      message_code: data?.message_code ?? null,
-      items_count: Array.isArray(data?.items) ? data.items.length : 0,
-      service_category_id: payload.service_category_id ?? null,
-      service_type_id: payload.service_type_id ?? null,
-      distance_km: payload.distance_km ?? null,
-    });
+
     if (data?.status === 1 && Array.isArray(data.items)) {
       const first = data.items[0] || null;
       nearbyLog("[vehicle-fares-api] ok", {
@@ -3727,8 +3781,6 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
 
     const sc = extractServiceCategoryIdFromPayload(payload);
     if (sc !== null) setNearbyServiceCategoryId(sc, "user:findNearbyDrivers");
-    rememberServiceTypeCategoryMapping(st, sc, "user:findNearbyDrivers");
-
     await syncNearbyRadius(payload);
 
     if (routeKm !== null) {
@@ -3804,11 +3856,6 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
 
   const sc = extractServiceCategoryIdFromPayload(payload);
   if (sc !== null) setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes");
-  rememberServiceTypeCategoryMapping(
-    payloadServiceTypeId ?? socket.nearbyServiceTypeId,
-    sc,
-    "user:getNearbyVehicleTypes"
-  );
   if (sc === null && normalizeServiceCategoryId(socket.nearbyServiceCategoryId) === null) {
     const inferredSc = inferServiceCategoryIdFromNearbyMemory(
       la,
@@ -3936,8 +3983,6 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     if (st !== null) {
       socket.nearbyServiceTypeId = st;
     }
-    rememberServiceTypeCategoryMapping(st ?? socket.nearbyServiceTypeId, sc, "user:updateNearbyCenter");
-
     await syncNearbyRadius(payload);
 
     const routeKm = extractRouteDistanceKm(payload);
