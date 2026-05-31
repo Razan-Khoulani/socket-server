@@ -1268,11 +1268,21 @@ const fetchVehicleFaresFromApi = async (
 ) => {
   if (!serviceCategoryId || distanceKm === null) return new Map();
   try {
+    const normalizedTypeIds = (Array.isArray(vehicleTypeIds) ? vehicleTypeIds : [])
+      .map((value) => toPositiveId(value))
+      .filter((value, index, arr) => value !== null && arr.indexOf(value) === index);
+    const primaryTypeId = normalizedTypeIds.length === 1 ? normalizedTypeIds[0] : null;
+
     const payload = {
       service_category_id: serviceCategoryId,
       distance_km: distanceKm,
-      vehicle_type_ids: vehicleTypeIds,
+      vehicle_type_ids: normalizedTypeIds,
+      service_type_ids: normalizedTypeIds,
     };
+    if (primaryTypeId !== null) {
+      payload.vehicle_type_id = primaryTypeId;
+      payload.service_type_id = primaryTypeId;
+    }
     if (pickupLat !== null && pickupLong !== null) {
       payload.pickup_lat = pickupLat;
       payload.pickup_long = pickupLong;
