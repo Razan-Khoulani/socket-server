@@ -407,6 +407,15 @@ const normalizeServiceCategoryId = (value) => {
   return normalized > 0 ? normalized : null;
 };
 
+const extractIdFromObject = (value, keys = []) => {
+  if (!value || typeof value !== "object") return null;
+  for (const key of keys) {
+    const parsed = toPositiveId(value?.[key]);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+};
+
 const extractServiceCategoryIdFromPayload = (payload = {}) => {
   if (!payload || typeof payload !== "object") return null;
 
@@ -429,10 +438,25 @@ const extractServiceCategoryIdFromPayload = (payload = {}) => {
     payload?.preferences,
     payload?.data,
     payload?.ride,
+    payload?.service_category,
+    payload?.selected_service_category,
+    payload?.selectedServiceCategory,
   ].filter((item) => item && typeof item === "object");
 
   for (const candidate of candidates) {
-    const explicit = getFirstNumber(...categoryKeyList.map((key) => candidate?.[key]));
+    const explicit = getFirstNumber(
+      ...categoryKeyList.map((key) => {
+        const value = candidate?.[key];
+        const direct = toPositiveId(value);
+        if (direct !== null) return direct;
+        return extractIdFromObject(value, [
+          "id",
+          "service_category_id",
+          "service_cat_id",
+          "category_id",
+        ]);
+      })
+    );
     const normalizedExplicit = normalizeServiceCategoryId(explicit);
     if (normalizedExplicit !== null) return normalizedExplicit;
   }
@@ -455,9 +479,15 @@ const extractServiceTypeIdFromPayload = (payload = {}) => {
 
   const serviceTypeKeyList = [
     "service_type_id",
+    "service_type",
     "serviceTypeId",
+    "serviceType",
+    "type_id",
+    "typeId",
     "selected_service_type_id",
     "selectedServiceTypeId",
+    "selected_type_id",
+    "selectedTypeId",
     "vehicle_type_id",
     "vehicleTypeId",
     "vehicle_type",
@@ -474,10 +504,29 @@ const extractServiceTypeIdFromPayload = (payload = {}) => {
     payload?.preferences,
     payload?.data,
     payload?.ride,
+    payload?.service_type,
+    payload?.selected_service_type,
+    payload?.selectedServiceType,
+    payload?.vehicle_type,
+    payload?.selected_vehicle_type,
+    payload?.selectedVehicleType,
   ].filter((item) => item && typeof item === "object");
 
   for (const candidate of candidates) {
-    const raw = getFirstNumber(...serviceTypeKeyList.map((key) => candidate?.[key]));
+    const raw = getFirstNumber(
+      ...serviceTypeKeyList.map((key) => {
+        const value = candidate?.[key];
+        const direct = toPositiveId(value);
+        if (direct !== null) return direct;
+        return extractIdFromObject(value, [
+          "id",
+          "service_type_id",
+          "vehicle_type_id",
+          "type_id",
+          "transport_vehicle_type_id",
+        ]);
+      })
+    );
     const normalized = toPositiveId(raw);
     if (normalized !== null) return normalized;
   }
@@ -533,29 +582,8 @@ const inferServiceCategoryIdFromNearbyMemory = (
     return inferred;
   }
 
-  // If service type is explicitly selected, do not infer from mixed nearby pool.
-  if (st !== null) {
-    return null;
-  }
-
-  const nearbyAnyType =
-    typeof driverLocationService.getNearbyDriversFromMemory === "function"
-      ? driverLocationService.getNearbyDriversFromMemory(
-          la,
-          lo,
-          DEFAULT_AIR_CANDIDATE_RADIUS_METERS,
-          {
-            only_online: true,
-            max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
-          }
-        )
-      : [];
-
-  inferred = pickDominantServiceCategoryId(nearbyAnyType);
-  if (inferred !== null) {
-    return inferred;
-  }
-
+  // Never infer category from mixed nearby pools.
+  // Only a service-type-scoped inference is allowed to avoid wrong pricing category.
   return null;
 };
 
