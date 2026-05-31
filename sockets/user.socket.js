@@ -3111,11 +3111,29 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     const result = Array.from(typesMap.values()).sort(
       (a, b) => (b.drivers_count ?? 0) - (a.drivers_count ?? 0)
     );
-    const derivedServiceTypeId =
-      toPositiveId(socket.nearbyServiceTypeId) ??
+    const availableServiceTypeIds = new Set(
+      result
+        .map((item) => toPositiveId(item?.service_type_id))
+        .filter((item) => item !== null)
+    );
+    const requestedServiceTypeId = toPositiveId(socket.nearbyServiceTypeId);
+    const normalizedRequestedServiceTypeId =
+      requestedServiceTypeId !== null && availableServiceTypeIds.has(requestedServiceTypeId)
+        ? requestedServiceTypeId
+        : null;
+    const fallbackAvailableServiceTypeId =
       toPositiveId(resolveEconomyVehicleTypeId(result)) ??
       toPositiveId(result[0]?.service_type_id);
-    if (toPositiveId(socket.nearbyServiceTypeId) === null && derivedServiceTypeId !== null) {
+    const derivedServiceTypeId =
+      normalizedRequestedServiceTypeId ?? fallbackAvailableServiceTypeId;
+    if (requestedServiceTypeId !== null && normalizedRequestedServiceTypeId === null) {
+      console.warn("[nearby-service-type][corrected]", {
+        requested_service_type_id: requestedServiceTypeId,
+        corrected_service_type_id: derivedServiceTypeId ?? null,
+        available_service_type_ids: Array.from(availableServiceTypeIds.values()),
+      });
+    }
+    if (derivedServiceTypeId !== null) {
       socket.nearbyServiceTypeId = derivedServiceTypeId;
     }
 
