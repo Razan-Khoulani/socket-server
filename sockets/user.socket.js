@@ -481,6 +481,11 @@ const inferServiceCategoryIdFromNearbyMemory = (
     return inferred;
   }
 
+  // If service type is explicitly selected, do not infer from mixed nearby pool.
+  if (st !== null) {
+    return null;
+  }
+
   const nearbyAnyType =
     typeof driverLocationService.getNearbyDriversFromMemory === "function"
       ? driverLocationService.getNearbyDriversFromMemory(
@@ -1663,6 +1668,7 @@ module.exports = (io, socket) => {
 
   socket.nearbyServiceTypeId = null;
   socket.nearbyServiceCategoryId = null;
+  socket.nearbyServiceCategorySource = null;
   socket.nearbyRouteDistanceKm = null;
   socket.nearbyRouteDurationMin = null;
   socket.nearbyRequiredGender = null;
@@ -1780,6 +1786,7 @@ module.exports = (io, socket) => {
 
     if (socket.nearbyServiceCategoryId !== normalized) {
       socket.nearbyServiceCategoryId = normalized;
+      socket.nearbyServiceCategorySource = source;
       socket.nearbyFareCache.clear();
       socket.lastVehicleTypesSig = null;
       console.log("[nearby-service-category] updated", {
@@ -1789,6 +1796,8 @@ module.exports = (io, socket) => {
       return true;
     }
 
+    // Keep the latest source marker even when category id did not change.
+    socket.nearbyServiceCategorySource = source;
     return false;
   };
 
@@ -1838,9 +1847,16 @@ const syncNearbyRadius = async (payload = {}) => {
     setNearbyServiceCategoryId(snapshotServiceCategoryId, "ride-snapshot");
   }
 
+  const nearbyServiceCategorySource = String(
+    socket.nearbyServiceCategorySource ?? ""
+  ).toLowerCase();
+  const canUseSocketServiceCategoryForRadiusApi =
+    nearbyServiceCategorySource !== "" &&
+    !nearbyServiceCategorySource.includes("nearby-memory");
   const serviceCategoryId =
-    normalizeServiceCategoryId(socket.nearbyServiceCategoryId) ??
-    snapshotServiceCategoryId;
+    (canUseSocketServiceCategoryForRadiusApi
+      ? normalizeServiceCategoryId(socket.nearbyServiceCategoryId)
+      : null) ?? snapshotServiceCategoryId;
 
   let nextRadius = null;
   let nextDispatchStagesMeters = null;
@@ -2104,6 +2120,7 @@ const syncNearbyRadius = async (payload = {}) => {
     socket.nearbyCenter = null;
     socket.nearbyServiceTypeId = null;
     socket.nearbyServiceCategoryId = null;
+    socket.nearbyServiceCategorySource = null;
     socket.nearbyRouteDistanceKm = null;
     socket.nearbyRouteDurationMin = null;
     socket.nearbyRequiredGender = null;
@@ -2656,7 +2673,15 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     );
 
     const distanceKm = toNumber(socket.nearbyRouteDistanceKm);
-    const fixedServiceCatIdRaw = toNumber(socket.nearbyServiceCategoryId);
+    const nearbyServiceCategorySource = String(
+      socket.nearbyServiceCategorySource ?? ""
+    ).toLowerCase();
+    const canUseSocketServiceCategoryForFareLookup =
+      nearbyServiceCategorySource !== "" &&
+      !nearbyServiceCategorySource.includes("nearby-memory");
+    const fixedServiceCatIdRaw = canUseSocketServiceCategoryForFareLookup
+      ? toNumber(socket.nearbyServiceCategoryId)
+      : null;
     const snapshotServiceCatId = getNearbyServiceCategoryFromRideSnapshot();
     const fixedServiceCatId =
       (fixedServiceCatIdRaw !== null && fixedServiceCatIdRaw > 0 ? fixedServiceCatIdRaw : null) ??
@@ -3424,6 +3449,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     socket.nearbyCenter = null;
     socket.nearbyServiceTypeId = null;
     socket.nearbyServiceCategoryId = null;
+    socket.nearbyServiceCategorySource = null;
     socket.nearbyRouteDistanceKm = null;
     socket.nearbyRouteDurationMin = null;
     socket.nearbyRequiredGender = null;
