@@ -3445,7 +3445,10 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
     const st = extractServiceTypeIdFromPayload(payload);
     socket.nearbyServiceTypeId = st === null ? null : st;
 
-    const sc = extractServiceCategoryIdFromPayload(payload);
+    let sc = extractServiceCategoryIdFromPayload(payload);
+    if (sc === null && st !== null) {
+      sc = normalizeServiceCategoryId(st);
+    }
     if (sc !== null) setNearbyServiceCategoryId(sc, "user:findNearbyDrivers");
     await syncNearbyRadius(payload);
 
@@ -3520,7 +3523,10 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   persistRideRouteMetrics(payload, routeKm, routeDurationMin, etaMin);
   emitRouteEtaToDriver(routeKm, etaMin, payload);
 
-  const sc = extractServiceCategoryIdFromPayload(payload);
+  let sc = extractServiceCategoryIdFromPayload(payload);
+  if (sc === null && socket.nearbyServiceTypeId !== null) {
+    sc = normalizeServiceCategoryId(socket.nearbyServiceTypeId);
+  }
   if (sc !== null) setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes");
   if (sc === null && normalizeServiceCategoryId(socket.nearbyServiceCategoryId) === null) {
     const inferredSc = inferServiceCategoryIdFromNearbyMemory(
