@@ -1005,6 +1005,122 @@ app.post("/events/internal/driver-status-updated", async (req, res) => {
 
 });
 
+app.post("/events/internal/driver-profile-updated", async (req, res) => {
+  const safeDriverId = toFiniteNumber(req.body?.driver_id);
+  const safeDriverServiceId = toFiniteNumber(req.body?.driver_service_id);
+
+  if (!safeDriverId || safeDriverId <= 0) {
+    return res.status(400).json({ status: 0, message: "driver_id required" });
+  }
+
+  const room = `driver:${safeDriverId}`;
+  const currentMeta = driverLocationService.getMeta(safeDriverId) || {};
+  const roomSize = io?.sockets?.adapter?.rooms?.get(room)?.size ?? 0;
+  const hasActiveRoomSockets = roomSize > 0;
+
+  try {
+    const profile = await getDriverAdminProfile({
+      driverId: safeDriverId,
+      driverServiceId:
+        Number.isFinite(safeDriverServiceId) && safeDriverServiceId > 0
+          ? safeDriverServiceId
+          : null,
+      forceRefresh: true,
+    });
+
+    if (!profile || typeof profile !== "object") {
+      console.warn("[driver-profile-updated] profile not found", {
+        driver_id: safeDriverId,
+        driver_service_id: safeDriverServiceId,
+      });
+      return res.status(404).json({ status: 0, message: "driver profile not found" });
+    }
+
+    const profileLat = toFiniteNumber(profile?.current_lat ?? profile?.lat);
+    const profileLong = toFiniteNumber(profile?.current_long ?? profile?.long);
+    if (profileLat !== null && profileLong !== null) {
+      driverLocationService.updateMemory(safeDriverId, profileLat, profileLong);
+    }
+
+    const profileStatus = toFiniteNumber(
+      profile?.current_status ??
+        profile?.driver_current_status ??
+        profile?.new_status ??
+        profile?.provider_current_status
+    );
+    const fallbackStatus = toFiniteNumber(
+      currentMeta?.current_status ??
+        currentMeta?.driver_current_status ??
+        currentMeta?.new_status ??
+        currentMeta?.provider_current_status
+    );
+
+    const resolvedIsOnline =
+      typeof currentMeta.is_online === "boolean"
+        ? currentMeta.is_online
+        : hasActiveRoomSockets || profileStatus === 1 || fallbackStatus === 1;
+
+    const now = Date.now();
+    const nextMeta = {
+      ...currentMeta,
+      ...profile,
+      is_online: resolvedIsOnline,
+      dashboard_is_online:
+        typeof currentMeta.dashboard_is_online === "boolean"
+          ? currentMeta.dashboard_is_online
+          : resolvedIsOnline,
+      socket_disconnected:
+        typeof currentMeta.socket_disconnected === "boolean"
+          ? currentMeta.socket_disconnected
+          : !resolvedIsOnline,
+      updatedAt: now,
+      ...(resolvedIsOnline ? { last_activity_at: now } : { lastSeen: now }),
+    };
+
+    driverLocationService.updateMeta(safeDriverId, nextMeta);
+
+    if (resolvedIsOnline) {
+      io.in(room).socketsJoin("drivers:online");
+    } else {
+      io.in(room).socketsLeave("drivers:online");
+    }
+
+    emitAdminDriverUpdate(io, safeDriverId);
+
+    io.to(room).emit("driver:profile-updated", {
+      driver_id: safeDriverId,
+      provider_id: safeDriverId,
+      driver_service_id: toFiniteNumber(
+        nextMeta?.driver_service_id ?? safeDriverServiceId
+      ),
+      driver_name: nextMeta?.driver_name ?? "",
+      phone: nextMeta?.phone ?? "",
+      country_code: nextMeta?.country_code ?? "",
+      driver_image: nextMeta?.driver_image ?? nextMeta?.image ?? null,
+      driver_gender: toFiniteNumber(nextMeta?.driver_gender),
+      child_seat: toFiniteNumber(nextMeta?.child_seat ?? nextMeta?.child_seat_accessibility) ?? 0,
+      handicap: toFiniteNumber(nextMeta?.handicap ?? nextMeta?.handicap_accessibility) ?? 0,
+      service_category_id: toFiniteNumber(
+        nextMeta?.service_category_id ?? nextMeta?.service_cat_id
+      ),
+      service_type_id: toFiniteNumber(nextMeta?.service_type_id),
+      vehicle_type_id: toFiniteNumber(nextMeta?.vehicle_type_id),
+      vehicle_type_name: nextMeta?.vehicle_type_name ?? "",
+      vehicle_type_icon: nextMeta?.vehicle_type_icon ?? "",
+      is_online: resolvedIsOnline,
+    });
+
+    return res.json({ status: 1, driver_id: safeDriverId });
+  } catch (error) {
+    console.warn("[driver-profile-updated] sync failed", {
+      driver_id: safeDriverId,
+      driver_service_id: safeDriverServiceId,
+      error: error?.message || error,
+    });
+    return res.status(500).json({ status: 0, message: "driver profile sync failed" });
+  }
+});
+
 app.post("/events/internal/driver-location", async (req, res) => {
   const { driver_id, lat, lng, long } = req.body;
 
