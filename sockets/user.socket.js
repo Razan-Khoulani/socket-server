@@ -1382,15 +1382,29 @@ const extractRouteDistanceKm = (payload) => {
   const directKm = toNumber(
     route.distance_km ??
       route.distanceKm ??
+      route.route_api_distance_km ??
+      route.routeApiDistanceKm ??
+      route.estimated_distance_km ??
+      route.estimatedDistanceKm ??
       route.total_distance_km ??
       route.totalDistanceKm ??
       route.distance_in_km ??
+      route.route_api_distance ??
+      route.routeApiDistance ??
       route.total_distance ??
       null
   );
   if (directKm !== null) return roundMoney(directKm);
 
-  let meters = route.distanceMeters ?? route.distance_m ?? route.distance_meters ?? null;
+  let meters =
+    route.distanceMeters ??
+    route.distance_m ??
+    route.distance_meters ??
+    route.route_api_distance_m ??
+    route.routeApiDistanceM ??
+    route.route_api_distance_meters ??
+    route.routeApiDistanceMeters ??
+    null;
   if (meters === null && route?.routes?.[0]?.distanceMeters != null) {
     meters = route.routes[0].distanceMeters;
   }
