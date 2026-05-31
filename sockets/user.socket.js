@@ -502,6 +502,11 @@ const resolveServiceCategoryIdFromServiceTypeId = async (serviceTypeId) => {
     );
   }
 
+  warnThrottled(
+    `service-type-category-missing:${safeTypeId}`,
+    "[service-type-category] no category mapping found",
+    { service_type_id: safeTypeId }
+  );
   setCachedServiceCategoryByTypeId(safeTypeId, null);
   return null;
 };
@@ -3082,9 +3087,20 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       ? toNumber(socket.nearbyServiceCategoryId)
       : null;
     const snapshotServiceCatId = getNearbyServiceCategoryFromRideSnapshot();
-    const fixedServiceCatId =
+    let fixedServiceCatId =
       (fixedServiceCatIdRaw !== null && fixedServiceCatIdRaw > 0 ? fixedServiceCatIdRaw : null) ??
       snapshotServiceCatId;
+    if (fixedServiceCatId === null && derivedServiceTypeId !== null) {
+      const resolvedFromServiceType =
+        await resolveServiceCategoryIdFromServiceTypeId(derivedServiceTypeId);
+      if (resolvedFromServiceType !== null) {
+        fixedServiceCatId = resolvedFromServiceType;
+        setNearbyServiceCategoryId(
+          resolvedFromServiceType,
+          "user:getNearbyVehicleTypes:service-type"
+        );
+      }
+    }
     const pickupLat = toNumber(lat);
     const pickupLong = toNumber(long);
     const inferredCategoryByType = new Map();
