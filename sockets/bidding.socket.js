@@ -109,6 +109,12 @@ const toNumber = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
+const toPositiveId = (v) => {
+  const n = toNumber(v);
+  if (n === null) return null;
+  const parsed = Math.floor(n);
+  return parsed > 0 ? parsed : null;
+};
 const toBinaryFlag = (v) => {
   if (v === null || v === undefined || v === "") return null;
   if (typeof v === "boolean") return v ? 1 : 0;
@@ -5101,10 +5107,15 @@ async function dispatchToNearbyDrivers(io, data) {
   const lat = toNumber(data?.pickup_lat);
   const long = toNumber(data?.pickup_long);
 
-  const serviceTypeId = toNumber(data?.service_type_id) ?? null;
   const previousRideSnapshot =
     getRideDetails(rideId) ??
     getRideSnapshotForRedispatch(rideId) ??
+    null;
+  const serviceTypeId =
+    toPositiveId(data?.service_type_id) ??
+    toPositiveId(data?.vehicle_type_id) ??
+    toPositiveId(previousRideSnapshot?.service_type_id ?? null) ??
+    toPositiveId(previousRideSnapshot?.vehicle_type_id ?? null) ??
     null;
   const persistedBaseFare = pickFirstValue(
     toNumber(previousRideSnapshot?.base_fare),
@@ -5933,7 +5944,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     ...(lockedMinPrice !== null ? { price_anchor_min_price: lockedMinPrice } : {}),
     ...(lockedMaxPrice !== null ? { price_anchor_max_price: lockedMaxPrice } : {}),
 
-    service_type_id: toNumber(data.service_type_id) ?? null,
+    service_type_id: serviceTypeId,
     service_category_id: toNumber(data.service_category_id) ?? null,
     service_type_name: localizedServiceTypeName ?? null,
     vehicle_type_name: localizedServiceTypeName ?? null,
@@ -5977,7 +5988,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       ...(lockedBaseFare !== null ? { price_anchor_base_fare: lockedBaseFare } : {}),
       ...(lockedMinPrice !== null ? { price_anchor_min_price: lockedMinPrice } : {}),
       ...(lockedMaxPrice !== null ? { price_anchor_max_price: lockedMaxPrice } : {}),
-      service_type_id: toNumber(data.service_type_id) ?? null,
+      service_type_id: serviceTypeId,
       service_category_id: toNumber(data.service_category_id) ?? null,
       service_type_name: localizedServiceTypeName ?? null,
       vehicle_type_name: localizedServiceTypeName ?? null,
@@ -8661,7 +8672,12 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
         toNumber(rideSnapshot?.meta?.max_price) ??
         toNumber(payload?.max_price) ??
         ridePriceBounds.max_price,
-      service_type_id: toNumber(payload.service_type_id) ?? null,
+      service_type_id:
+        toPositiveId(payload.service_type_id) ??
+        toPositiveId(payload.vehicle_type_id) ??
+        toPositiveId(rideSnapshot?.service_type_id ?? null) ??
+        toPositiveId(rideSnapshot?.vehicle_type_id ?? null) ??
+        null,
       service_category_id: toNumber(payload.service_category_id) ?? null,
       created_at: payload.created_at ?? null,
 

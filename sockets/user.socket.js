@@ -133,6 +133,12 @@ const toNumber = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
+const toPositiveId = (v) => {
+  const n = toNumber(v);
+  if (n === null) return null;
+  const parsed = Math.floor(n);
+  return parsed > 0 ? parsed : null;
+};
 const normalizeCoordForRouteKey = (value) => {
   const safe = toNumber(value);
   if (safe === null) return null;
@@ -2862,7 +2868,9 @@ item.max_price = hasExplicitBounds
       rideDetails?.min_fare_amount ??
       null;
 
-    const selectedVehicleTypeId = toNumber(rideDetails?.service_type_id ?? null);
+    const selectedVehicleTypeId =
+      toPositiveId(rideDetails?.service_type_id ?? null) ??
+      toPositiveId(rideDetails?.vehicle_type_id ?? null);
     const pricingTypes = decorateNearbyVehicleTypes(
       rawTypes,
       selectedVehicleTypeId ?? socket.nearbyServiceTypeId
@@ -3152,7 +3160,7 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
 
     socket.nearbyCenter = { lat: la, long: lo };
 
-    const st = toNumber(service_type_id);
+    const st = toPositiveId(service_type_id);
     socket.nearbyServiceTypeId = st === null ? null : st;
 
     const sc = extractServiceCategoryIdFromPayload(payload);
@@ -3206,7 +3214,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   applyNearbyFiltersFromPayload(payload, { resetMissing: false });
   syncRideContextFromPayload(payload, "user:getNearbyVehicleTypes");
 
-  const payloadServiceTypeId = toNumber(
+  const payloadServiceTypeId = toPositiveId(
     payload?.service_type_id ??
       payload?.serviceTypeId ??
       payload?.selected_service_type_id ??
@@ -3381,7 +3389,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
 
   socket.on("user:setNearbyServiceType", async ({ service_type_id }) => {
     debugLog("user:setNearbyServiceType", { service_type_id }, socket.id);
-    const st = toNumber(service_type_id);
+    const st = toPositiveId(service_type_id);
     socket.nearbyServiceTypeId = st === null ? null : st;
 
     socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;

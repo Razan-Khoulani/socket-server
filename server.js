@@ -142,6 +142,12 @@ const toFiniteNumber = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
+const toPositiveInt = (v) => {
+  const n = toFiniteNumber(v);
+  if (n == null) return null;
+  const parsed = Math.floor(n);
+  return parsed > 0 ? parsed : null;
+};
 
 const statusOrder = (status) => {
   const s = toFiniteNumber(status);
@@ -1234,6 +1240,10 @@ app.post("/events/internal/driver-location", async (req, res) => {
 
 const normalizeLegacyRideNewPayload = (incoming = {}) => {
   const payload = incoming && typeof incoming === "object" ? incoming : {};
+  const resolvedServiceTypeId =
+    toPositiveInt(payload.service_type_id) ??
+    toPositiveInt(payload.vehicle_type_id) ??
+    toPositiveInt(payload.vehicle_type);
   const legacyDriverIds = Array.isArray(payload.driver_ids)
     ? payload.driver_ids
         .map((value) => Number(value))
@@ -1254,11 +1264,7 @@ const normalizeLegacyRideNewPayload = (incoming = {}) => {
       payload.destination_address ?? payload.dropoff_address ?? null,
     service_category_id:
       payload.service_category_id ?? payload.service_cat_id ?? null,
-    service_type_id:
-      payload.service_type_id ??
-      payload.vehicle_type_id ??
-      payload.vehicle_type ??
-      null,
+    service_type_id: resolvedServiceTypeId,
     additional_remarks:
       payload.additional_remarks ??
       payload.additional_remark ??
@@ -1395,6 +1401,16 @@ app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
     req.body && typeof req.body === "object"
       ? { ...req.body, force_new_search_window: 1 }
       : { force_new_search_window: 1 };
+  const resolvedServiceTypeId =
+    toPositiveInt(dispatchPayload?.service_type_id) ??
+    toPositiveInt(dispatchPayload?.vehicle_type_id) ??
+    null;
+  if (resolvedServiceTypeId !== null) {
+    dispatchPayload.service_type_id = resolvedServiceTypeId;
+    if (!toPositiveInt(dispatchPayload?.vehicle_type_id)) {
+      dispatchPayload.vehicle_type_id = resolvedServiceTypeId;
+    }
+  }
 
   console.log(
     "[ride-bid-dispatch] Incoming request from Laravel",
