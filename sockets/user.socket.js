@@ -3705,14 +3705,37 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
         max_results: 20,
       }
     );
-    const inferredTypeId = (Array.isArray(fallbackNearby) ? fallbackNearby : [])
-      .map((item) => toPositiveId(item?.service_type_id))
-      .find((item) => item !== null);
+    const typeStats = new Map();
+    for (const item of Array.isArray(fallbackNearby) ? fallbackNearby : []) {
+      const typeId = toPositiveId(item?.service_type_id);
+      if (typeId === null) continue;
+      const current = typeStats.get(typeId) ?? {
+        service_type_id: typeId,
+        vehicle_type_name: item?.vehicle_type_name ?? "",
+        drivers_count: 0,
+      };
+      current.drivers_count += 1;
+      if (!current.vehicle_type_name && item?.vehicle_type_name) {
+        current.vehicle_type_name = item.vehicle_type_name;
+      }
+      typeStats.set(typeId, current);
+    }
+
+    let inferredTypeId = null;
+    let bestCount = -1;
+    for (const [typeId, stats] of typeStats.entries()) {
+      const count = toNumber(stats?.drivers_count) ?? 0;
+      if (count > bestCount) {
+        bestCount = count;
+        inferredTypeId = typeId;
+      }
+    }
     if (inferredTypeId !== null) {
       socket.nearbyServiceTypeId = inferredTypeId;
       nearbyLog("[user:getNearbyVehicleTypes] inferred service_type_id from nearby", {
         socket_id: socket.id,
         service_type_id: inferredTypeId,
+        available_service_type_ids: Array.from(typeStats.keys()),
       });
     }
   }
