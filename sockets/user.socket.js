@@ -433,10 +433,6 @@ const setCachedServiceCategoryByTypeId = (serviceTypeId, serviceCategoryId) => {
   const safeTypeId = toPositiveId(serviceTypeId);
   if (safeTypeId === null) return;
   const normalizedCategory = normalizeServiceCategoryId(serviceCategoryId);
-  if (normalizedCategory === null) {
-    serviceTypeCategoryCache.delete(safeTypeId);
-    return;
-  }
   serviceTypeCategoryCache.set(safeTypeId, {
     service_category_id: normalizedCategory,
     cached_at: Date.now(),
@@ -451,7 +447,7 @@ const resolveServiceCategoryIdFromServiceTypeId = async (
   if (safeTypeId === null) return null;
 
   const cached = getCachedServiceCategoryByTypeId(safeTypeId);
-  if (cached?.found && cached.value !== null) {
+  if (cached?.found) {
     return cached.value;
   }
 
@@ -488,6 +484,7 @@ const resolveServiceCategoryIdFromServiceTypeId = async (
     } catch (_) {}
   }
 
+  setCachedServiceCategoryByTypeId(safeTypeId, null);
   return null;
 };
 
@@ -3131,15 +3128,18 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
               pickupLat,
               pickupLong
             );
+            for (const typeId of typeIdsToRefresh) {
+              if (!fareMap.has(typeId)) {
+                cacheEntry.map.set(typeId, null);
+              }
+            }
             for (const [id, item] of fareMap.entries()) {
               cacheEntry.map.set(id, item);
             }
-            if (fareMap.size > 0) {
-              if (fareConfigVersion !== null) {
-                cacheEntry.configVersion = fareConfigVersion;
-              }
-              cacheEntry.cachedAt = Date.now();
+            if (fareConfigVersion !== null) {
+              cacheEntry.configVersion = fareConfigVersion;
             }
+            cacheEntry.cachedAt = Date.now();
           }
 
           for (const item of scopedResult) {
@@ -3193,6 +3193,33 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       } catch (e) {
         console.warn("[nearbyVehicleTypes] fare lookup failed:", e?.message || e);
       }
+
+      const hasValidFare = (item) => {
+        const candidates = [
+          toNumber(item?.estimated_fare),
+          toNumber(item?.base_fare),
+          toNumber(item?.min_price),
+          toNumber(item?.max_price),
+        ];
+        return candidates.some((value) => value !== null && value > 0);
+      };
+
+      const pricedItems = scopedResult.filter(hasValidFare);
+      if (pricedItems.length !== scopedResult.length) {
+        const prunedTypeIds = scopedResult
+          .filter((item) => !hasValidFare(item))
+          .map((item) => toPositiveId(item?.service_type_id))
+          .filter((value) => value !== null);
+
+        console.log("[nearbyVehicleTypes][pricing-pruned]", {
+          socket_id: socket.id,
+          distance_km: distanceKm,
+          total_types: scopedResult.length,
+          kept_types: pricedItems.length,
+          pruned_service_type_ids: prunedTypeIds,
+        });
+      }
+      return pricedItems;
     }
 
     return scopedResult;
