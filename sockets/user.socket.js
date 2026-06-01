@@ -443,7 +443,10 @@ const setCachedServiceCategoryByTypeId = (serviceTypeId, serviceCategoryId) => {
   });
 };
 
-const resolveServiceCategoryIdFromServiceTypeId = async (serviceTypeId) => {
+const resolveServiceCategoryIdFromServiceTypeId = async (
+  serviceTypeId,
+  options = {}
+) => {
   const safeTypeId = toPositiveId(serviceTypeId);
   if (safeTypeId === null) return null;
 
@@ -452,9 +455,40 @@ const resolveServiceCategoryIdFromServiceTypeId = async (serviceTypeId) => {
     return cached.value;
   }
 
-  // No DB fallback by design: when category is missing, use service_type_id
-  // as a safe non-null fallback so pricing flow keeps working.
-  return safeTypeId;
+  const preferredCategoryId = normalizeServiceCategoryId(
+    options?.preferredCategoryId
+  );
+  const distanceKm = toNumber(options?.distanceKm);
+  const probeDistanceKm = distanceKm !== null && distanceKm > 0 ? distanceKm : 1;
+  const pickupLat = toNumber(options?.pickupLat);
+  const pickupLong = toNumber(options?.pickupLong);
+
+  const categoryCandidates = [
+    preferredCategoryId,
+    ...Array.from(KNOWN_SERVICE_CATEGORY_IDS.values()),
+  ].filter((value, index, arr) => value !== null && arr.indexOf(value) === index);
+
+  for (const categoryId of categoryCandidates) {
+    try {
+      const fareMap = await fetchVehicleFaresFromApi(
+        categoryId,
+        probeDistanceKm,
+        [safeTypeId],
+        pickupLat,
+        pickupLong
+      );
+      if (fareMap && fareMap.has(safeTypeId)) {
+        setCachedServiceCategoryByTypeId(safeTypeId, categoryId);
+        console.log("[service-type-category][resolved-by-fare-api]", {
+          service_type_id: safeTypeId,
+          service_category_id: categoryId,
+        });
+        return categoryId;
+      }
+    } catch (_) {}
+  }
+
+  return null;
 };
 
 const extractIdFromObject = (value, keys = []) => {
@@ -3490,9 +3524,20 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
 
     let sc = extractServiceCategoryIdFromPayload(payload);
     if (sc === null && st !== null) {
-      sc = normalizeServiceCategoryId(st);
+      sc = await resolveServiceCategoryIdFromServiceTypeId(st, {
+        preferredCategoryId: normalizeServiceCategoryId(socket.nearbyServiceCategoryId),
+        distanceKm: routeKm,
+        pickupLat: la,
+        pickupLong: lo,
+      });
     }
-    if (sc !== null) setNearbyServiceCategoryId(sc, "user:findNearbyDrivers");
+    if (sc !== null) {
+      const sourceLabel =
+        extractServiceCategoryIdFromPayload(payload) !== null
+          ? "user:findNearbyDrivers"
+          : "user:findNearbyDrivers:from-service-type-fare-api";
+      setNearbyServiceCategoryId(sc, sourceLabel);
+    }
     await syncNearbyRadius(payload);
 
     if (routeKm !== null) {
@@ -3568,9 +3613,17 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
 
   let sc = extractServiceCategoryIdFromPayload(payload);
   if (sc === null && socket.nearbyServiceTypeId !== null) {
-    sc = normalizeServiceCategoryId(socket.nearbyServiceTypeId);
+    sc = await resolveServiceCategoryIdFromServiceTypeId(socket.nearbyServiceTypeId, {
+      preferredCategoryId: normalizeServiceCategoryId(socket.nearbyServiceCategoryId),
+      distanceKm: routeKm,
+      pickupLat: la,
+      pickupLong: lo,
+    });
     if (sc !== null) {
-      setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes:from-service-type");
+      setNearbyServiceCategoryId(
+        sc,
+        "user:getNearbyVehicleTypes:from-service-type-fare-api"
+      );
     }
   } else if (sc !== null) {
     setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes");
