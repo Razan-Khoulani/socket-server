@@ -123,34 +123,9 @@ const parseServiceCategoryIds = (value) => {
   return safeValue ? [safeValue] : [];
 };
 
-const resolveServiceTypeId = (profile = {}) => {
-  const direct = toNumber(
-    profile.service_type_id ??
-      profile.vehicle_type_id ??
-      profile.transport_vehicle_type?.service_type_id ??
-      profile.transport_vehicle_type?.id
-  );
-  return direct;
-};
-
 const resolvePrimaryServiceCategoryId = (profile = {}) => {
   const direct = toNumber(profile.service_category_id ?? profile.service_cat_id);
   if (direct) return direct;
-
-  const preferredTypeId = resolveServiceTypeId(profile);
-  const entries = parseServiceCategoryEntries(
-    profile.driver_vehicle_service_lists ?? profile.service_category_ids
-  );
-  if (preferredTypeId && preferredTypeId > 0) {
-    const matched = entries.find(
-      (item) =>
-        toNumber(item?.service_type_id) &&
-        Number(item.service_type_id) === Number(preferredTypeId)
-    );
-    if (matched?.service_category_id) {
-      return toNumber(matched.service_category_id);
-    }
-  }
 
   const ids = parseServiceCategoryIds(
     profile.service_category_ids ?? profile.driver_vehicle_service_lists
@@ -196,7 +171,6 @@ const setCachedProfile = (profile = {}) => {
     service_category_id: primaryServiceCategoryId,
     service_cat_id: primaryServiceCategoryId,
     service_category_ids: serviceCategoryIds,
-    service_type_id: resolveServiceTypeId(profile),
     vehicle_type_id: toNumber(profile.vehicle_type_id),
     driver_name: String(profile.driver_name ?? profile.name ?? "").trim(),
     name: String(profile.name ?? profile.driver_name ?? "").trim(),
@@ -228,8 +202,6 @@ const setCachedProfile = (profile = {}) => {
     ),
     current_lat: toNumber(profile.current_lat ?? profile.lat),
     current_long: toNumber(profile.current_long ?? profile.lng ?? profile.long),
-    lat: toNumber(profile.current_lat ?? profile.lat),
-    long: toNumber(profile.current_long ?? profile.lng ?? profile.long),
     remaining_balance: toNumber(profile.remaining_balance),
     not_valid_wallet_balance: toNumber(profile.not_valid_wallet_balance) ?? 0,
     not_valid_wallet_balance_msg: String(
