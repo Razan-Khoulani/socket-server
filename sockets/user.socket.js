@@ -454,15 +454,17 @@ const resolveServiceCategoryIdFromServiceTypeId = async (
   const preferredCategoryId = normalizeServiceCategoryId(
     options?.preferredCategoryId
   );
+  const strictPreferredCategory = options?.strictPreferredCategory === true;
   const distanceKm = toNumber(options?.distanceKm);
   const probeDistanceKm = distanceKm !== null && distanceKm > 0 ? distanceKm : 1;
   const pickupLat = toNumber(options?.pickupLat);
   const pickupLong = toNumber(options?.pickupLong);
 
-  const categoryCandidates = [
-    preferredCategoryId,
-    ...Array.from(KNOWN_SERVICE_CATEGORY_IDS.values()),
-  ].filter((value, index, arr) => value !== null && arr.indexOf(value) === index);
+  const categoryCandidates = strictPreferredCategory && preferredCategoryId !== null
+    ? [preferredCategoryId]
+    : [preferredCategoryId, ...Array.from(KNOWN_SERVICE_CATEGORY_IDS.values())].filter(
+        (value, index, arr) => value !== null && arr.indexOf(value) === index
+      );
 
   for (const categoryId of categoryCandidates) {
     try {
@@ -1411,6 +1413,32 @@ const fetchVehicleFaresFromApi = async (
       console.log("[vehicle-fares-api] ok", {
         count: data.items.length,
         has_driver_distance: !!(first && first.driver_to_pickup_distance_m != null),
+      });
+
+      const requestedTypeIds = (Array.isArray(vehicleTypeIds) ? vehicleTypeIds : [])
+        .map((id) => toPositiveId(id))
+        .filter((id) => id !== null);
+      const returnedTypeIds = data.items
+        .map((item) => toPositiveId(item?.vehicle_type_id))
+        .filter((id) => id !== null);
+      const returnedSet = new Set(returnedTypeIds);
+      const missingTypeIds = requestedTypeIds.filter((id) => !returnedSet.has(id));
+
+      const itemSummary = data.items.slice(0, 15).map((item) => ({
+        vehicle_type_id: toPositiveId(item?.vehicle_type_id),
+        cost_per_km: toNumber(item?.cost_per_km),
+        base_fare: toNumber(item?.base_fare),
+        min_fare_amount: toNumber(item?.min_fare_amount),
+        estimated_fare: toNumber(item?.estimated_fare),
+        distance_km: toNumber(item?.distance_km),
+      }));
+
+      console.log("[vehicle-fares-api][response-summary]", {
+        service_category_id: payload.service_category_id ?? null,
+        requested_vehicle_type_ids: requestedTypeIds,
+        returned_vehicle_type_ids: returnedTypeIds,
+        missing_vehicle_type_ids: missingTypeIds,
+        items: itemSummary,
       });
     }
     if (!data || data.status !== 1 || !Array.isArray(data.items)) return new Map();
@@ -3050,6 +3078,7 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
               const resolvedCategoryId = normalizeServiceCategoryId(
                 await resolveServiceCategoryIdFromServiceTypeId(itemTypeId, {
                   preferredCategoryId: serviceCatId,
+                  strictPreferredCategory: true,
                   distanceKm,
                   pickupLat,
                   pickupLong,
@@ -3590,6 +3619,7 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
     if (sc === null && st !== null) {
       sc = await resolveServiceCategoryIdFromServiceTypeId(st, {
         preferredCategoryId: normalizeServiceCategoryId(socket.nearbyServiceCategoryId),
+        strictPreferredCategory: true,
         distanceKm: routeKm,
         pickupLat: la,
         pickupLong: lo,
@@ -3679,6 +3709,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   if (sc === null && socket.nearbyServiceTypeId !== null) {
     sc = await resolveServiceCategoryIdFromServiceTypeId(socket.nearbyServiceTypeId, {
       preferredCategoryId: normalizeServiceCategoryId(socket.nearbyServiceCategoryId),
+      strictPreferredCategory: true,
       distanceKm: routeKm,
       pickupLat: la,
       pickupLong: lo,
