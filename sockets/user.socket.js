@@ -2930,17 +2930,22 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     const requiredChildSeat = toOptionalBinaryRequirement(socket.nearbyNeedChildSeat);
     const requiredHandicap = toOptionalBinaryRequirement(socket.nearbyNeedHandicap);
 
+    const nearbyOpts = {
+      only_online: true,
+      max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
+      required_gender: socket.nearbyRequiredGender,
+      need_child_seat: requiredChildSeat,
+      need_handicap: requiredHandicap,
+    };
+    if (socket.nearbyServiceTypeId !== null) {
+      nearbyOpts.service_type_id = socket.nearbyServiceTypeId;
+    }
+
     const nearbyAll = driverLocationService.getNearbyDriversFromMemory(
       lat,
       long,
       airCandidateRadius,
-      {
-        only_online: true,
-        max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
-        required_gender: socket.nearbyRequiredGender,
-        need_child_seat: requiredChildSeat,
-        need_handicap: requiredHandicap,
-      }
+      nearbyOpts
     );
     const nearbyPreferenceMatched = applyNearbyDriverPreferenceFilters(nearbyAll);
 
@@ -3613,7 +3618,9 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
     socket.nearbyCenter = { lat: la, long: lo };
 
     const st = extractServiceTypeIdFromPayload(payload);
-    socket.nearbyServiceTypeId = st === null ? null : st;
+    if (st !== null) {
+      socket.nearbyServiceTypeId = st;
+    }
 
     let sc = extractServiceCategoryIdFromPayload(payload);
     if (sc === null && st !== null) {
@@ -3684,6 +3691,30 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   const payloadServiceTypeId = extractServiceTypeIdFromPayload(payload);
   if (payloadServiceTypeId !== null) {
     socket.nearbyServiceTypeId = payloadServiceTypeId;
+  } else if (socket.nearbyServiceTypeId === null) {
+    const fallbackNearby = driverLocationService.getNearbyDriversFromMemory(
+      la,
+      lo,
+      DEFAULT_AIR_CANDIDATE_RADIUS_METERS,
+      {
+        only_online: true,
+        max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
+        required_gender: socket.nearbyRequiredGender,
+        need_child_seat: toOptionalBinaryRequirement(socket.nearbyNeedChildSeat),
+        need_handicap: toOptionalBinaryRequirement(socket.nearbyNeedHandicap),
+        max_results: 20,
+      }
+    );
+    const inferredTypeId = (Array.isArray(fallbackNearby) ? fallbackNearby : [])
+      .map((item) => toPositiveId(item?.service_type_id))
+      .find((item) => item !== null);
+    if (inferredTypeId !== null) {
+      socket.nearbyServiceTypeId = inferredTypeId;
+      nearbyLog("[user:getNearbyVehicleTypes] inferred service_type_id from nearby", {
+        socket_id: socket.id,
+        service_type_id: inferredTypeId,
+      });
+    }
   }
 
   const details = extractUserDetails(payload, "user:getNearbyVehicleTypes");
@@ -3878,7 +3909,9 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   socket.on("user:setNearbyServiceType", async (payload = {}) => {
     debugLog("user:setNearbyServiceType", payload, socket.id);
     const st = extractServiceTypeIdFromPayload(payload);
-    socket.nearbyServiceTypeId = st === null ? null : st;
+    if (st !== null) {
+      socket.nearbyServiceTypeId = st;
+    }
 
     socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
     socket.nearbyDispatchStagesMeters = [DEFAULT_NEARBY_RADIUS_METERS];
