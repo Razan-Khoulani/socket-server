@@ -3025,6 +3025,10 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       snapshotServiceCatId;
     const pickupLat = toNumber(lat);
     const pickupLong = toNumber(long);
+    const resolveCategoryFromTypeForFareLookup =
+      fixedServiceCatId === null &&
+      nearbyServiceCategorySource.includes("nearby-memory");
+    const resolvedServiceCategoryByType = new Map();
 
     const scopedResult =
       fixedServiceCatId !== null
@@ -3035,16 +3039,43 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       try {
         const groups = new Map();
         for (const item of scopedResult) {
+          const itemTypeId = toPositiveId(item.service_type_id);
+          if (itemTypeId === null) continue;
           const itemServiceCatId = normalizeServiceCategoryId(item.service_category_id);
           if (fixedServiceCatId !== null) {
             if (itemServiceCatId === null || itemServiceCatId !== fixedServiceCatId) {
               continue;
             }
           }
-          const serviceCatId = fixedServiceCatId ?? itemServiceCatId;
+          let serviceCatId = fixedServiceCatId ?? itemServiceCatId;
+          if (resolveCategoryFromTypeForFareLookup) {
+            if (!resolvedServiceCategoryByType.has(itemTypeId)) {
+              const resolvedCategoryId = normalizeServiceCategoryId(
+                await resolveServiceCategoryIdFromServiceTypeId(itemTypeId, {
+                  preferredCategoryId: serviceCatId,
+                  distanceKm,
+                  pickupLat,
+                  pickupLong,
+                })
+              );
+              resolvedServiceCategoryByType.set(itemTypeId, resolvedCategoryId);
+              if (resolvedCategoryId !== null && resolvedCategoryId !== serviceCatId) {
+                console.log("[nearbyVehicleTypes][category-remap]", {
+                  socket_id: socket.id,
+                  service_type_id: itemTypeId,
+                  from_service_category_id: itemServiceCatId,
+                  to_service_category_id: resolvedCategoryId,
+                });
+              }
+            }
+            const resolvedCategoryId = resolvedServiceCategoryByType.get(itemTypeId);
+            if (resolvedCategoryId !== null) {
+              serviceCatId = resolvedCategoryId;
+            }
+          }
           if (!serviceCatId) continue;
           if (!groups.has(serviceCatId)) groups.set(serviceCatId, new Set());
-          groups.get(serviceCatId).add(item.service_type_id);
+          groups.get(serviceCatId).add(itemTypeId);
         }
 
         for (const [serviceCatId, typeSet] of groups.entries()) {
@@ -3112,16 +3143,22 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
           }
 
           for (const item of scopedResult) {
+            const itemTypeId = toPositiveId(item.service_type_id);
+            if (itemTypeId === null) continue;
             const itemServiceCatId = normalizeServiceCategoryId(item.service_category_id);
             if (fixedServiceCatId !== null) {
               if (itemServiceCatId === null || itemServiceCatId !== fixedServiceCatId) {
                 continue;
               }
             }
-            const itemCatId = fixedServiceCatId ?? itemServiceCatId;
+            let itemCatId = fixedServiceCatId ?? itemServiceCatId;
+            if (resolveCategoryFromTypeForFareLookup) {
+              const resolvedCategoryId = resolvedServiceCategoryByType.get(itemTypeId);
+              if (resolvedCategoryId !== null) {
+                itemCatId = resolvedCategoryId;
+              }
+            }
             if (itemCatId !== serviceCatId) continue;
-            const itemTypeId = toNumber(item.service_type_id);
-            if (!itemTypeId) continue;
             const fare = cacheEntry.map.get(itemTypeId);
             if (!fare) continue;
 
