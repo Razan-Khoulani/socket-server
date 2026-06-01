@@ -101,6 +101,16 @@ const ACCEPT_LOCK_TTL_MS = Number.isFinite(Number(process.env.ACCEPT_LOCK_TTL_MS
   const DRIVER_ACCEPT_LOCK_TTL_MS = Number.isFinite(Number(process.env.DRIVER_ACCEPT_LOCK_TTL_MS))
   ? Number(process.env.DRIVER_ACCEPT_LOCK_TTL_MS)
   : 4000;
+const BID_MIN_PRICE_MULTIPLIER = Number.isFinite(
+  Number(process.env.BID_MIN_PRICE_MULTIPLIER)
+)
+  ? Math.max(0.01, Number(process.env.BID_MIN_PRICE_MULTIPLIER))
+  : 0.7;
+const BID_MAX_PRICE_MULTIPLIER = Number.isFinite(
+  Number(process.env.BID_MAX_PRICE_MULTIPLIER)
+)
+  ? Math.max(0.01, Number(process.env.BID_MAX_PRICE_MULTIPLIER))
+  : 3.0;
 const rideRoom = (rideId) => `ride:${rideId}`;
 const userRoom = (userId) => `user:${userId}`;
 const driverRoom = (driverId) => `driver:${driverId}`;
@@ -1209,8 +1219,8 @@ const buildPriceBounds = (baseFare, distanceKm = null) => {
   return {
     base_fare: round2(base),
     // Business rule: min is always 70% of computed trip price.
-    min_price: round2(base * 0.7),
-    max_price: round2(base * 2),
+    min_price: round2(base * BID_MIN_PRICE_MULTIPLIER),
+    max_price: round2(base * BID_MAX_PRICE_MULTIPLIER),
   };
 };
 
@@ -3728,6 +3738,23 @@ const resolveDispatchTimeoutSeconds = (payload = null) => {
   return Math.max(1, Math.floor(parsed !== null ? parsed : RIDE_TIMEOUT_S));
 };
 
+const resolveDispatchExpansionIntervalSeconds = (payload = null) => {
+  const parsed = toNumber(
+    payload?.dispatch_expand_every_s ??
+      payload?.dispatch_interval_s ??
+      payload?.dispatch_timeout_s ??
+      payload?.provider_accept_timeout ??
+      payload?.timeout_s ??
+      payload?.timeout_seconds ??
+      null
+  );
+
+  return Math.max(
+    1,
+    Math.floor(parsed !== null ? parsed : DISPATCH_EXPANSION_INTERVAL_S)
+  );
+};
+
 const resolveCustomerOfferTimeoutSeconds = (payload = null) => {
   return CUSTOMER_SEARCH_TIMEOUT_S;
 };
@@ -4030,8 +4057,11 @@ function startRideTimeoutWithExpansion(io, rideId, remainingLifetimeSec = RIDE_T
   }
 
   const radiusPlan = snapshot ? resolveDispatchRadiusPlan(snapshot) : null;
+  const expansionIntervalSeconds = resolveDispatchExpansionIntervalSeconds(
+    snapshot ?? null
+  );
   const waitSeconds = radiusPlan?.hasNextStage
-    ? Math.min(DISPATCH_EXPANSION_INTERVAL_S, resolvedRemainingLifetimeSec)
+    ? Math.min(expansionIntervalSeconds, resolvedRemainingLifetimeSec)
     : resolvedRemainingLifetimeSec;
   const ms = waitSeconds * 1000;
 
@@ -5114,6 +5144,10 @@ async function dispatchToNearbyDrivers(io, data) {
   const radiusPlan = resolveDispatchRadiusPlan(data);
   const roadRadius = radiusPlan.currentRadiusMeters;
   const dispatchTimeoutSeconds = resolveDispatchTimeoutSeconds(data);
+  const dispatchExpandEverySeconds = resolveDispatchExpansionIntervalSeconds({
+    ...(data && typeof data === "object" ? data : {}),
+    dispatch_timeout_s: dispatchTimeoutSeconds,
+  });
   const customerOfferTimeoutSeconds = resolveCustomerOfferTimeoutSeconds(data);
   const searchTimeoutSeconds = resolveRideSearchLifetimeSeconds(data);
   if (searchTimeoutSeconds <= 0) {
@@ -5255,7 +5289,7 @@ async function dispatchToNearbyDrivers(io, data) {
     (incomingExplicitMin !== null && incomingExplicitMin > 0 ? incomingExplicitMin : 0);
   const legacyMaxFareAmount =
     toNumber(priceBounds?.max_price) ??
-    (base !== null && base > 0 ? round2(base * 2) : 0);
+    (base !== null && base > 0 ? round2(base * BID_MAX_PRICE_MULTIPLIER) : 0);
 
   // ✅ build/merge user details from payload + store + token (retry-safe)
   const built = buildUserDetails(data);
@@ -5694,7 +5728,7 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   customer_offer_timeout_s: customerOfferTimeoutSeconds,
   search_timeout_s: searchTimeoutSeconds,
   dispatch_remaining_stages: remainingSearchStageCount,
-  dispatch_expand_every_s: DISPATCH_EXPANSION_INTERVAL_S,
+  dispatch_expand_every_s: dispatchExpandEverySeconds,
   incremental_expansion: incrementalExpansion,
   initial_radius_m: radiusPlan.initialRadiusMeters,
   dispatch_stage_number: radiusPlan.currentStageIndex + 1,
@@ -5834,7 +5868,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     user_timeout: customerOfferTimeoutSeconds,
     search_timeout_s: searchTimeoutSeconds,
     dispatch_remaining_stages: effectiveRemainingSearchStageCount,
-    dispatch_expand_every_s: DISPATCH_EXPANSION_INTERVAL_S,
+    dispatch_expand_every_s: dispatchExpandEverySeconds,
     initial_dispatch_radius: radiusPlan.initialRadiusMeters,
     dispatch_stage_index: radiusPlan.currentStageIndex,
     dispatch_stage_number: radiusPlan.currentStageIndex + 1,
@@ -6934,10 +6968,12 @@ const getAcceptedEtaMin = (payload = {}, rideSnapshot = null) => {
 
 const getFrontendRouteOverrideFromPayload = (payload = {}) => {
   const durationMin = pickFirstValue(
-    payload?.driver_to_pickup_distance_m,
-    payload?.duration,
     payload?.driver_to_pickup_duration_min,
     payload?.driverToPickupDurationMin,
+    payload?.duration,
+    payload?.eta,
+    payload?.eta_min,
+    payload?.estimated_time,
     payload?.ride_details?.duration,
     payload?.meta?.duration
   );
@@ -7429,7 +7465,10 @@ module.exports = (io, socket) => {
       return;
     }
     socket.isUser = true;
-    socket.userId = toNumber(user_id) ?? null;
+    const payloadUserId = toNumber(user_id);
+    if (payloadUserId) {
+      socket.userId = payloadUserId;
+    }
     if (joinToken) {
       socket.userToken = joinToken;
     }
@@ -7445,13 +7484,24 @@ module.exports = (io, socket) => {
         });
       }
     }
-    socket.join(rideRoom(rideId));
+    const rideRoomName = rideRoom(rideId);
+    const alreadyJoinedRideRoom =
+      socket.currentRideId === rideId &&
+      socket.rooms &&
+      typeof socket.rooms.has === "function" &&
+      socket.rooms.has(rideRoomName);
+
+    if (!alreadyJoinedRideRoom) {
+      socket.join(rideRoomName);
+    }
     socket.currentRideId = rideId;
 
     if (socket.userId) {
       setUserActiveRide(socket.userId, rideId);
     }
-    socket.emit("ride:joined", { ride_id: rideId });
+    if (!alreadyJoinedRideRoom) {
+      socket.emit("ride:joined", { ride_id: rideId });
+    }
 const vehicleTypes = buildRideCandidatesSummary(rideId);
 
 socket.emit("ride:candidatesSummary", {
@@ -7464,9 +7514,11 @@ socket.emit("ride:candidatesSummary", {
   ),
   at: Date.now(),
 });
-    console.log(
-      `👤 User ${socket.userId || "unknown"} joined ride room ${rideRoom(rideId)} (socket:${socket.id})`
-    );
+    if (!alreadyJoinedRideRoom) {
+      console.log(
+        `👤 User ${socket.userId || "unknown"} joined ride room ${rideRoomName} (socket:${socket.id})`
+      );
+    }
 
     const details = socket.userId ? getUserDetails(socket.userId) : null;
     if (details) {
@@ -9985,11 +10037,14 @@ const accessToken = tokenTmp;
 
 const acceptedRouteDataDuration = toNumber(
   pickFirstValue(
-    payload?.driver_to_pickup_distance_m,
-    payload?.meta?.driver_to_pickup_distance_m,
-    acceptedRideSnapshot?.driver_to_pickup_distance_m,
-    acceptedRideSnapshot?.meta?.driver_to_pickup_distance_m,
-    getAcceptedDriverToPickupMinutes(payload, acceptedRideSnapshot)
+    getAcceptedDriverToPickupMinutes(payload, acceptedRideSnapshot),
+    payload?.driver_to_pickup_duration_min,
+    payload?.driverToPickupDurationMin,
+    payload?.duration,
+    payload?.ride_details?.duration,
+    payload?.meta?.duration,
+    acceptedRideSnapshot?.duration,
+    acceptedRideSnapshot?.meta?.duration
   )
 );
 

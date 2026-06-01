@@ -127,6 +127,16 @@ const NEARBY_DISPATCH_TIMEOUT_S = Number.isFinite(
 )
   ? Math.max(1, Math.floor(Number(process.env.NEARBY_DISPATCH_TIMEOUT_S)))
   : 5;
+const BID_MIN_PRICE_MULTIPLIER = Number.isFinite(
+  Number(process.env.BID_MIN_PRICE_MULTIPLIER)
+)
+  ? Math.max(0.01, Number(process.env.BID_MIN_PRICE_MULTIPLIER))
+  : 0.7;
+const BID_MAX_PRICE_MULTIPLIER = Number.isFinite(
+  Number(process.env.BID_MAX_PRICE_MULTIPLIER)
+)
+  ? Math.max(0.01, Number(process.env.BID_MAX_PRICE_MULTIPLIER))
+  : 3.0;
 
 const toNumber = (v) => {
   if (v === null || v === undefined || v === "") return null;
@@ -834,9 +844,14 @@ const buildPriceBounds = (baseFare, estimatedFare = null, distanceKm = null) => 
     estimated_fare: roundedEstimated,
     min_price:
       anchor !== null
-        ? roundMoney(distance !== null && distance <= 1 ? anchor : anchor * 0.7)
+        ? roundMoney(
+            distance !== null && distance <= 1
+              ? anchor
+              : anchor * BID_MIN_PRICE_MULTIPLIER
+          )
         : null,
-    max_price: anchor !== null ? roundMoney(anchor * 2) : null,
+    max_price:
+      anchor !== null ? roundMoney(anchor * BID_MAX_PRICE_MULTIPLIER) : null,
   };
 };
 
