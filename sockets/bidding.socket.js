@@ -18,6 +18,7 @@ const {
   getActiveDriverByRide,
   setActiveRide,
   clearActiveRideByDriver,
+  getActiveRideLockAgeMs,
 } = require("../store/activeRides.store");
 const { getRideStatusSnapshot } = require("../store/rideStatusSnapshots.store");
 const LARAVEL_GET_ROUTE_PATH =
@@ -1789,6 +1790,11 @@ const BUSY_DRIVER_FINISH_RADIUS_M = Number.isFinite(Number(process.env.BUSY_DRIV
 const MAX_QUEUED_RIDES_PER_DRIVER = Number.isFinite(Number(process.env.MAX_QUEUED_RIDES_PER_DRIVER))
   ? Math.max(0, Number(process.env.MAX_QUEUED_RIDES_PER_DRIVER))
   : 1;
+const ACTIVE_RIDE_UNKNOWN_STATUS_GRACE_MS = Number.isFinite(
+  Number(process.env.ACTIVE_RIDE_UNKNOWN_STATUS_GRACE_MS)
+)
+  ? Math.max(15_000, Number(process.env.ACTIVE_RIDE_UNKNOWN_STATUS_GRACE_MS))
+  : 90_000;
 
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
@@ -3435,16 +3441,55 @@ function canDriverReceiveNewRideRequests(driverId) {
     getRideSnapshotForRedispatch(activeRideId) ??
     findRideInInboxes(activeRideId) ??
     null;
+  const rideStatusSnapshot = getRideStatusSnapshot(activeRideId) ?? null;
 
   const activeRideStatus =
     toNumber(activeRideSnapshot?.ride_status) ??
     toNumber(activeRideSnapshot?.status) ??
-    toNumber(getRideStatusSnapshot(activeRideId)?.ride_status) ??
+    toNumber(rideStatusSnapshot?.ride_status) ??
     null;
 
   if (activeRideStatus !== null && isTerminalRideStatus(activeRideStatus)) {
     clearActiveRideByDriver(driverId);
     return true;
+  }
+
+  const metaRideId = toNumber(meta?.current_ride_id ?? null);
+  const metaRideStatus = toNumber(
+    meta?.current_ride_status ?? meta?.latest_ride_status ?? meta?.raw_ride_status ?? null
+  );
+  if (
+    activeRideStatus === null &&
+    metaRideStatus !== null &&
+    isTerminalRideStatus(metaRideStatus) &&
+    (metaRideId === null || metaRideId !== activeRideId)
+  ) {
+    clearActiveRideByDriver(driverId);
+    return true;
+  }
+
+  const queued = getDriverQueuedRide(driverId);
+  if (activeRideStatus === null) {
+    const activeLockAgeMs = getActiveRideLockAgeMs(driverId);
+    const hasRideArtifacts =
+      !!activeRideSnapshot ||
+      !!rideStatusSnapshot ||
+      (toNumber(queued?.ride_id) === activeRideId) ||
+      (metaRideId === activeRideId);
+    if (
+      !hasRideArtifacts &&
+      Number.isFinite(activeLockAgeMs) &&
+      activeLockAgeMs >= ACTIVE_RIDE_UNKNOWN_STATUS_GRACE_MS
+    ) {
+      clearActiveRideByDriver(driverId);
+      console.log("[driver-lock-recovery][released-stale-active-ride]", {
+        driver_id: driverId,
+        active_ride_id: activeRideId,
+        active_lock_age_ms: activeLockAgeMs,
+        grace_ms: ACTIVE_RIDE_UNKNOWN_STATUS_GRACE_MS,
+      });
+      return true;
+    }
   }
 
   // إذا الرحلة الحالية لساتها accepted / arrived / started
@@ -3454,7 +3499,6 @@ function canDriverReceiveNewRideRequests(driverId) {
   }
 
   // إذا عنده queued ride أصلاً، لا تبعتلو كمان وحدة
-  const queued = getDriverQueuedRide(driverId);
   if (queued) return false;
 
   // فقط بالحالات غير 1/2/3، فيك تترك منطق "قرب النهاية" يشتغل

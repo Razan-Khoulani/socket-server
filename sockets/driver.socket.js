@@ -488,18 +488,29 @@ module.exports = (io, socket) => {
     const driverId = toNumber(driver_id);
     const la = toNumber(lat);
     const lo = toNumber(long);
+    const existingMeta = driverId
+      ? driverLocationService.getMeta(driverId) || {}
+      : {};
     const normalizedAccessToken =
       access_token ??
       payload?.accessToken ??
       payload?.token ??
+      socket.driverAccessToken ??
+      existingMeta?.access_token ??
       null;
     if (!driverId || la === null || lo === null) return;
     if (!bindDriverOnce(driverId)) return;
 
     const payloadServiceTypeId = toNumber(
-      service_type_id ?? vehicle_type_id ?? payload?.service_type ?? null
+      service_type_id ??
+        vehicle_type_id ??
+        payload?.service_type ??
+        existingMeta?.service_type_id ??
+        null
     );
-    const payloadServiceCategoryId = toNumber(service_category_id ?? null);
+    const payloadServiceCategoryId = toNumber(
+      service_category_id ?? existingMeta?.service_category_id ?? null
+    );
 
     socket.driverServiceId = toNumber(driver_service_id) ?? null;
     socket.driverDetailId = toNumber(payload?.driver_detail_id ?? null);
@@ -1596,11 +1607,12 @@ const acceptExtraPayload = {
       pendingRelocationByDriver.delete(driverId);
 
       if (activeRideId || hasOtherConnectedSockets) {
+        const socketDisconnected = !hasOtherConnectedSockets;
         // ✅ Keep driver online if ride is active OR another device/socket is still connected.
         driverLocationService.updateMeta(driverId, {
           is_online: true,
           dashboard_is_online: true,
-          socket_disconnected: true,
+          socket_disconnected: socketDisconnected,
           lastSeen: now,
           updatedAt: now,
         });
@@ -1627,3 +1639,4 @@ const acceptExtraPayload = {
     }
   });
 };
+
