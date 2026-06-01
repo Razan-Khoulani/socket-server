@@ -758,33 +758,16 @@ const pickDominantServiceCategoryId = (drivers = []) => {
   return bestId;
 };
 
-const pickDominantServiceTypeId = (drivers = []) => {
-  const counts = new Map();
-  for (const item of Array.isArray(drivers) ? drivers : []) {
-    const st = toPositiveId(item?.service_type_id);
-    if (st === null) continue;
-    counts.set(st, (counts.get(st) ?? 0) + 1);
-  }
-
-  let bestId = null;
-  let bestCount = -1;
-  for (const [id, count] of counts.entries()) {
-    if (count > bestCount) {
-      bestId = id;
-      bestCount = count;
-    }
-  }
-  return bestId;
-};
-
-const inferServiceProfileFromNearbyMemory = (lat, long, serviceTypeId = null) => {
+const inferServiceCategoryIdFromNearbyMemory = (
+  lat,
+  long,
+  serviceTypeId = null
+) => {
   const la = toNumber(lat);
   const lo = toNumber(long);
-  if (la === null || lo === null) {
-    return { service_type_id: null, service_category_id: null, source: "invalid-center" };
-  }
+  if (la === null || lo === null) return null;
 
-  const st = toPositiveId(serviceTypeId);
+  const st = toNumber(serviceTypeId);
   const nearbyWithType =
     typeof driverLocationService.getNearbyDriversFromMemory === "function"
       ? driverLocationService.getNearbyDriversFromMemory(
@@ -799,23 +782,9 @@ const inferServiceProfileFromNearbyMemory = (lat, long, serviceTypeId = null) =>
         )
       : [];
 
-  if (Array.isArray(nearbyWithType) && nearbyWithType.length > 0) {
-    const dominantTypeId = st ?? pickDominantServiceTypeId(nearbyWithType);
-    const scopedByType =
-      dominantTypeId !== null
-        ? nearbyWithType.filter(
-            (item) => toPositiveId(item?.service_type_id) === dominantTypeId
-          )
-        : nearbyWithType;
-    const dominantServiceCategoryId =
-      pickDominantServiceCategoryId(scopedByType) ??
-      pickDominantServiceCategoryId(nearbyWithType);
-
-    return {
-      service_type_id: dominantTypeId,
-      service_category_id: dominantServiceCategoryId,
-      source: st !== null ? "nearby-memory:typed" : "nearby-memory:any-typed",
-    };
+  let inferred = pickDominantServiceCategoryId(nearbyWithType);
+  if (inferred !== null) {
+    return inferred;
   }
 
   const nearbyAnyType =
@@ -831,31 +800,12 @@ const inferServiceProfileFromNearbyMemory = (lat, long, serviceTypeId = null) =>
         )
       : [];
 
-  const dominantTypeId = pickDominantServiceTypeId(nearbyAnyType);
-  const scopedByType =
-    dominantTypeId !== null
-      ? nearbyAnyType.filter(
-          (item) => toPositiveId(item?.service_type_id) === dominantTypeId
-        )
-      : nearbyAnyType;
-  const dominantServiceCategoryId =
-    pickDominantServiceCategoryId(scopedByType) ??
-    pickDominantServiceCategoryId(nearbyAnyType);
+  inferred = pickDominantServiceCategoryId(nearbyAnyType);
+  if (inferred !== null) {
+    return inferred;
+  }
 
-  return {
-    service_type_id: dominantTypeId,
-    service_category_id: dominantServiceCategoryId,
-    source: "nearby-memory:any",
-  };
-};
-
-const inferServiceCategoryIdFromNearbyMemory = (
-  lat,
-  long,
-  serviceTypeId = null
-) => {
-  const inferred = inferServiceProfileFromNearbyMemory(lat, long, serviceTypeId);
-  return normalizeServiceCategoryId(inferred?.service_category_id);
+  return null;
 };
 
 const getCachedServiceSearchRadius = (serviceCategoryId) => {
@@ -3633,33 +3583,10 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
 
     socket.nearbyCenter = { lat: la, long: lo };
 
-    let st = extractServiceTypeIdFromPayload(payload);
-    if (st !== null) {
-      socket.nearbyServiceTypeId = st;
-    } else {
-      st = toPositiveId(socket.nearbyServiceTypeId);
-    }
+    const st = extractServiceTypeIdFromPayload(payload);
+    socket.nearbyServiceTypeId = st === null ? null : st;
 
     let sc = extractServiceCategoryIdFromPayload(payload);
-    if (st === null || sc === null) {
-      const inferredProfile = inferServiceProfileFromNearbyMemory(la, lo, st);
-      if (st === null && toPositiveId(inferredProfile?.service_type_id) !== null) {
-        st = toPositiveId(inferredProfile.service_type_id);
-        socket.nearbyServiceTypeId = st;
-        nearbyLog("[user:findNearbyDrivers] inferred service_type_id", {
-          socket_id: socket.id,
-          service_type_id: st,
-          source: inferredProfile?.source ?? null,
-        });
-      }
-      if (
-        sc === null &&
-        normalizeServiceCategoryId(inferredProfile?.service_category_id) !== null
-      ) {
-        sc = normalizeServiceCategoryId(inferredProfile.service_category_id);
-        setNearbyServiceCategoryId(sc, "user:findNearbyDrivers:driver-memory");
-      }
-    }
     if (sc === null && st !== null) {
       sc = await resolveServiceCategoryIdFromServiceTypeId(st, {
         preferredCategoryId: normalizeServiceCategoryId(socket.nearbyServiceCategoryId),
@@ -3724,11 +3651,9 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   applyNearbyFiltersFromPayload(payload, { resetMissing: false });
   syncRideContextFromPayload(payload, "user:getNearbyVehicleTypes");
 
-  let payloadServiceTypeId = extractServiceTypeIdFromPayload(payload);
+  const payloadServiceTypeId = extractServiceTypeIdFromPayload(payload);
   if (payloadServiceTypeId !== null) {
     socket.nearbyServiceTypeId = payloadServiceTypeId;
-  } else {
-    payloadServiceTypeId = toPositiveId(socket.nearbyServiceTypeId);
   }
 
   const details = extractUserDetails(payload, "user:getNearbyVehicleTypes");
@@ -3751,34 +3676,8 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
   emitRouteEtaToDriver(routeKm, etaMin, payload);
 
   let sc = extractServiceCategoryIdFromPayload(payload);
-  if (payloadServiceTypeId === null || sc === null) {
-    const inferredProfile = inferServiceProfileFromNearbyMemory(
-      la,
-      lo,
-      payloadServiceTypeId
-    );
-    if (
-      payloadServiceTypeId === null &&
-      toPositiveId(inferredProfile?.service_type_id) !== null
-    ) {
-      payloadServiceTypeId = toPositiveId(inferredProfile.service_type_id);
-      socket.nearbyServiceTypeId = payloadServiceTypeId;
-      nearbyLog("[user:getNearbyVehicleTypes] inferred service_type_id", {
-        socket_id: socket.id,
-        service_type_id: payloadServiceTypeId,
-        source: inferredProfile?.source ?? null,
-      });
-    }
-    if (
-      sc === null &&
-      normalizeServiceCategoryId(inferredProfile?.service_category_id) !== null
-    ) {
-      sc = normalizeServiceCategoryId(inferredProfile.service_category_id);
-      setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes:driver-memory");
-    }
-  }
-  if (sc === null && payloadServiceTypeId !== null) {
-    sc = await resolveServiceCategoryIdFromServiceTypeId(payloadServiceTypeId, {
+  if (sc === null && socket.nearbyServiceTypeId !== null) {
+    sc = await resolveServiceCategoryIdFromServiceTypeId(socket.nearbyServiceTypeId, {
       preferredCategoryId: normalizeServiceCategoryId(socket.nearbyServiceCategoryId),
       distanceKm: routeKm,
       pickupLat: la,
@@ -3794,7 +3693,11 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     setNearbyServiceCategoryId(sc, "user:getNearbyVehicleTypes");
   }
   if (sc === null && normalizeServiceCategoryId(socket.nearbyServiceCategoryId) === null) {
-    const inferredSc = inferServiceCategoryIdFromNearbyMemory(la, lo, payloadServiceTypeId);
+    const inferredSc = inferServiceCategoryIdFromNearbyMemory(
+      la,
+      lo,
+      socket.nearbyServiceTypeId
+    );
     if (inferredSc !== null) {
       setNearbyServiceCategoryId(inferredSc, "user:getNearbyVehicleTypes:nearby-memory");
       nearbyLog("[user:getNearbyVehicleTypes] inferred service_category_id", {
