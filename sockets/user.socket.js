@@ -444,6 +444,22 @@ const extractServiceCategoryIdFromPayload = (payload = {}) => {
   return null;
 };
 
+const extractServiceTypeIdFromPayload = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return null;
+
+  const explicit = getFirstNumber(
+    payload?.service_type_id,
+    payload?.vehicle_type_id,
+    payload?.selected_service_type_id,
+    payload?.selectedServiceTypeId,
+    payload?.serviceTypeId,
+    payload?.selected_vehicle_type_id,
+    payload?.selectedVehicleTypeId
+  );
+  const normalized = normalizeServiceCategoryId(explicit);
+  return normalized;
+};
+
 const pickDominantServiceCategoryId = (drivers = []) => {
   const counts = new Map();
   for (const item of Array.isArray(drivers) ? drivers : []) {
@@ -569,6 +585,32 @@ const setCachedServiceSearchRadius = (serviceCategoryId, config = {}) => {
   });
 };
 
+const invalidateServiceSearchRadiusCache = (serviceCategoryId = null) => {
+  if (serviceCategoryId === null || serviceCategoryId === undefined || serviceCategoryId === "") {
+    const clearedCount = serviceSearchRadiusCache.size;
+    serviceSearchRadiusCache.clear();
+    return {
+      scope: "all",
+      cleared_count: clearedCount,
+    };
+  }
+
+  const safeServiceCategoryId = toNumber(serviceCategoryId);
+  if (!safeServiceCategoryId) {
+    return {
+      scope: "none",
+      cleared_count: 0,
+    };
+  }
+
+  const existed = serviceSearchRadiusCache.delete(safeServiceCategoryId);
+  return {
+    scope: "single",
+    service_category_id: safeServiceCategoryId,
+    cleared_count: existed ? 1 : 0,
+  };
+};
+
 const getCachedNearbyFareVersion = (serviceCategoryId) => {
   const safeServiceCategoryId = toNumber(serviceCategoryId);
   if (!safeServiceCategoryId) return null;
@@ -598,19 +640,28 @@ const setCachedNearbyFareVersion = (serviceCategoryId, version) => {
   });
 };
 
-const fetchServiceSearchRadiusFromApi = async (serviceCategoryId) => {
+const fetchServiceSearchRadiusFromApi = async (serviceCategoryId, serviceTypeId = null) => {
   const safeServiceCategoryId = toNumber(serviceCategoryId);
-  if (!safeServiceCategoryId) return null;
+  const safeServiceTypeId = toNumber(serviceTypeId);
+  if (!safeServiceCategoryId && !safeServiceTypeId) return null;
 
-  const cachedConfig = getCachedServiceSearchRadius(safeServiceCategoryId);
+  const cachedConfig = safeServiceCategoryId
+    ? getCachedServiceSearchRadius(safeServiceCategoryId)
+    : null;
   if (cachedConfig !== null) return cachedConfig;
 
   try {
+    const requestPayload = {};
+    if (safeServiceCategoryId) {
+      requestPayload.service_category_id = safeServiceCategoryId;
+    }
+    if (safeServiceTypeId) {
+      requestPayload.service_type_id = safeServiceTypeId;
+    }
+
     const res = await axios.post(
       `${LARAVEL_BASE_URL}${LARAVEL_SERVICE_SEARCH_RADIUS_PATH}`,
-      {
-        service_category_id: safeServiceCategoryId,
-      },
+      requestPayload,
       { timeout: LARAVEL_TIMEOUT_MS }
     );
 
@@ -623,6 +674,7 @@ const fetchServiceSearchRadiusFromApi = async (serviceCategoryId) => {
 
     if (!data || data.status !== 1) return null;
 
+    const resolvedServiceCategoryId = toNumber(data?.service_category_id) ?? safeServiceCategoryId;
     const radiusMeters = resolveNearbyRadiusFromPayload(data);
     if (radiusMeters === null) return null;
 
@@ -637,19 +689,24 @@ const fetchServiceSearchRadiusFromApi = async (serviceCategoryId) => {
       NEARBY_DISPATCH_TIMEOUT_S
     );
     const normalizedConfig = {
+      service_category_id: resolvedServiceCategoryId,
       radius_m: normalizeNearbyRadiusMeters(radiusMeters),
       dispatch_radius_stages_m: dispatchRadiusStagesMeters,
       dispatch_timeout_s: dispatchTimeoutSeconds,
     };
 
     nearbyLog("[service-search-radius] ok", {
-      service_category_id: safeServiceCategoryId,
+      requested_service_category_id: safeServiceCategoryId,
+      requested_service_type_id: safeServiceTypeId,
+      resolved_service_category_id: resolvedServiceCategoryId,
       radius_m: normalizedConfig.radius_m,
       dispatch_stages_m: normalizedConfig.dispatch_radius_stages_m,
       dispatch_timeout_s: normalizedConfig.dispatch_timeout_s,
     });
 
-    setCachedServiceSearchRadius(safeServiceCategoryId, normalizedConfig);
+    if (resolvedServiceCategoryId !== null) {
+      setCachedServiceSearchRadius(resolvedServiceCategoryId, normalizedConfig);
+    }
     return normalizedConfig;
   } catch (e) {
     console.warn(
@@ -1663,7 +1720,7 @@ const ensureRideTimer = (rideId, rideDetails) => {
   return timer;
 };
 
-module.exports = (io, socket) => {
+const setupUserSocket = (io, socket) => {
   socket.isUser = false;
   socket.userId = null;
   socket.userToken = null;
@@ -1856,17 +1913,25 @@ const syncNearbyRadius = async (payload = {}) => {
     setNearbyServiceCategoryId(snapshotServiceCategoryId, "ride-snapshot");
   }
 
-  const serviceCategoryId =
+  let serviceCategoryId =
     normalizeServiceCategoryId(socket.nearbyServiceCategoryId) ??
     snapshotServiceCategoryId;
+  const payloadServiceTypeId =
+    extractServiceTypeIdFromPayload(payload) ??
+    normalizeServiceCategoryId(socket.nearbyServiceTypeId);
 
   let nextRadius = null;
   let nextDispatchStagesMeters = null;
   let nextDispatchTimeoutSeconds = null;
   let source = null;
 
-  if (serviceCategoryId) {
-    const apiConfig = await fetchServiceSearchRadiusFromApi(serviceCategoryId);
+  const usedVehicleTypeFallback = !serviceCategoryId && payloadServiceTypeId !== null;
+
+  if (serviceCategoryId || payloadServiceTypeId) {
+    const apiConfig = await fetchServiceSearchRadiusFromApi(
+      serviceCategoryId,
+      payloadServiceTypeId
+    );
     if (apiConfig && toNumber(apiConfig.radius_m) !== null) {
       nextRadius = apiConfig.radius_m;
       nextDispatchStagesMeters = apiConfig.dispatch_radius_stages_m ?? null;
@@ -1874,7 +1939,17 @@ const syncNearbyRadius = async (payload = {}) => {
         apiConfig,
         socket.nearbyDispatchTimeoutS ?? RIDE_TIMEOUT_S
       );
-      source = "service-setting-api";
+      const resolvedServiceCategoryId = toNumber(apiConfig?.service_category_id);
+      if (
+        resolvedServiceCategoryId !== null &&
+        normalizeServiceCategoryId(socket.nearbyServiceCategoryId) !== resolvedServiceCategoryId
+      ) {
+        setNearbyServiceCategoryId(resolvedServiceCategoryId, "service-setting-api");
+        serviceCategoryId = resolvedServiceCategoryId;
+      }
+      source = usedVehicleTypeFallback
+        ? "service-setting-api:vehicle-type"
+        : "service-setting-api";
     }
   }
 
@@ -2833,8 +2908,11 @@ item.max_price = hasExplicitBounds
   };
 
   const emitNearbyVehicleTypes = async () => {
-  if (!socket.nearbyCenter) return;
-  const { lat, long } = socket.nearbyCenter;
+    if (!socket.nearbyCenter) return;
+
+    await syncNearbyRadius({});
+
+    const { lat, long } = socket.nearbyCenter;
 
   try {
     const radiusPlan = resolveActiveNearbyRadiusPlan(
@@ -3045,6 +3123,8 @@ item.max_price = hasExplicitBounds
   /////////////////////////////////////////////////////////////
 const sendNearby = async (eventName = "user:nearbyDrivers") => {
     if (!socket.nearbyCenter) return;
+
+    await syncNearbyRadius({});
 
     const { lat, long } = socket.nearbyCenter;
     const radiusPlan = resolveActiveNearbyRadiusPlan(
@@ -3523,3 +3603,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     socket.userId = null;
   });
 };
+
+setupUserSocket.invalidateNearbyServiceSearchRadiusCache = invalidateServiceSearchRadiusCache;
+
+module.exports = setupUserSocket;

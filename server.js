@@ -1438,6 +1438,31 @@ app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
     res.status(500).json({ status: 0, message: "Dispatch failed" });
   }
 });
+
+app.post("/events/internal/service-settings-updated", (req, res) => {
+  const serviceCategoryId = toPositiveInt(req.body?.service_category_id ?? null);
+  const serviceSettingsId = toPositiveInt(req.body?.service_settings_id ?? null);
+  const invalidation =
+    typeof userSocket.invalidateNearbyServiceSearchRadiusCache === "function"
+      ? userSocket.invalidateNearbyServiceSearchRadiusCache(serviceCategoryId)
+      : { scope: "unavailable", cleared_count: 0 };
+
+  console.log("[internal][service-settings-updated]", {
+    service_category_id: serviceCategoryId ?? null,
+    service_settings_id: serviceSettingsId ?? null,
+    provider_search_radius: req.body?.provider_search_radius ?? null,
+    provider_accept_timeout: req.body?.provider_accept_timeout ?? null,
+    dispatch_radius_stages_km: req.body?.dispatch_radius_stages_km ?? null,
+    updated_at: req.body?.updated_at ?? null,
+    cache_invalidation: invalidation,
+  });
+
+  res.json({
+    status: 1,
+    message: "service settings cache invalidated",
+    ...invalidation,
+  });
+});
 app.post("/events/internal/ride-user-accepted", (req, res) => {
   const {
     ride_id,
