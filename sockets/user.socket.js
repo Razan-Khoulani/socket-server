@@ -44,6 +44,7 @@ const warnThrottled = (key, ...args) => {
 const userRoom = (userId) => `user:${userId}`;
 
 const DEFAULT_NEARBY_RADIUS_METERS = 5000;
+const NEARBY_DISPATCH_RADIUS_STEPS_KM = Object.freeze([1, 2, 3, 5, 7, 10, 15, 20]);
 const NEARBY_EVERY_MS = Number.isFinite(Number(process.env.NEARBY_EVERY_MS))
   ? Math.max(1000, Number(process.env.NEARBY_EVERY_MS))
   : 3000;
@@ -363,10 +364,16 @@ const normalizeNearbyRadiusMeters = (
 
 const buildDefaultNearbyDispatchStagesMeters = (initialRadiusMeters) => {
   const initial = normalizeNearbyRadiusMeters(initialRadiusMeters);
-  // Dashboard-first behavior:
-  // when dispatch stages are missing, keep a single stage at base radius
-  // instead of expanding using hardcoded km steps.
-  return [initial];
+  const initialKm = Math.round((initial / 1000) * 100) / 100;
+  const stageKm = uniqueSortedNumbers([
+    ...NEARBY_DISPATCH_RADIUS_STEPS_KM,
+    initialKm,
+  ]).filter((km) => km >= initialKm);
+  const stageMeters = uniqueSortedNumbers(
+    stageKm.map((km) => normalizeNearbyRadiusMeters(Math.round(km * 1000), initial))
+  );
+
+  return stageMeters.length > 0 ? stageMeters : [initial];
 };
 
 const resolveNearbyRadiusFromPayload = (payload = {}) => {

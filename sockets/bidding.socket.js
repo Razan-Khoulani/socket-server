@@ -3668,9 +3668,15 @@ const normalizeDispatchRadiusMeters = (radiusMeters) => {
 
 const buildDispatchRadiusStagesMeters = (initialRadiusMeters) => {
   const initialMeters = normalizeDispatchRadiusMeters(initialRadiusMeters);
-  // Dashboard-first behavior: when dispatch stages are missing from payload,
-  // keep a single stage instead of expanding through hardcoded km steps.
-  return [initialMeters];
+  const initialKm = round2(initialMeters / 1000);
+  const stageKm = uniqueSortedNumbers([...DISPATCH_RADIUS_STEPS_KM, initialKm]).filter(
+    (km) => km >= initialKm
+  );
+  const stageMeters = uniqueSortedNumbers(
+    stageKm.map((km) => normalizeDispatchRadiusMeters(Math.round(km * 1000)))
+  );
+
+  return stageMeters.length > 0 ? stageMeters : [initialMeters];
 };
 
 const normalizeDispatchStageIndex = (stagesMeters, stageIndex, currentRadiusMeters) => {
