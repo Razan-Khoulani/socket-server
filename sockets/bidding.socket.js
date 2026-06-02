@@ -105,12 +105,12 @@ const BID_MIN_PRICE_MULTIPLIER = Number.isFinite(
   Number(process.env.BID_MIN_PRICE_MULTIPLIER)
 )
   ? Math.max(0.01, Number(process.env.BID_MIN_PRICE_MULTIPLIER))
-  : 0.7;
+  : 0.75;
 const BID_MAX_PRICE_MULTIPLIER = Number.isFinite(
   Number(process.env.BID_MAX_PRICE_MULTIPLIER)
 )
   ? Math.max(0.01, Number(process.env.BID_MAX_PRICE_MULTIPLIER))
-  : 3.0;
+  : 2.0;
 const rideRoom = (rideId) => `ride:${rideId}`;
 const userRoom = (userId) => `user:${userId}`;
 const driverRoom = (driverId) => `driver:${driverId}`;
@@ -1218,7 +1218,7 @@ const buildPriceBounds = (baseFare, distanceKm = null) => {
 
   return {
     base_fare: round2(base),
-    // Business rule: min is always 70% of computed trip price.
+    // Business rule: min is always 75% of computed trip price.
     min_price: round2(base * BID_MIN_PRICE_MULTIPLIER),
     max_price: round2(base * BID_MAX_PRICE_MULTIPLIER),
   };

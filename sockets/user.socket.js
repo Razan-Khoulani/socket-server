@@ -132,12 +132,12 @@ const BID_MIN_PRICE_MULTIPLIER = Number.isFinite(
   Number(process.env.BID_MIN_PRICE_MULTIPLIER)
 )
   ? Math.max(0.01, Number(process.env.BID_MIN_PRICE_MULTIPLIER))
-  : 0.7;
+  : 0.75;
 const BID_MAX_PRICE_MULTIPLIER = Number.isFinite(
   Number(process.env.BID_MAX_PRICE_MULTIPLIER)
 )
   ? Math.max(0.01, Number(process.env.BID_MAX_PRICE_MULTIPLIER))
-  : 3.0;
+  : 2.0;
 
 const toNumber = (v) => {
   if (v === null || v === undefined || v === "") return null;
