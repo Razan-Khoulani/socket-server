@@ -642,6 +642,13 @@ const fetchServiceSearchRadiusFromApi = async (serviceCategoryId) => {
       dispatch_timeout_s: dispatchTimeoutSeconds,
     };
 
+    nearbyLog("[service-search-radius] ok", {
+      service_category_id: safeServiceCategoryId,
+      radius_m: normalizedConfig.radius_m,
+      dispatch_stages_m: normalizedConfig.dispatch_radius_stages_m,
+      dispatch_timeout_s: normalizedConfig.dispatch_timeout_s,
+    });
+
     setCachedServiceSearchRadius(safeServiceCategoryId, normalizedConfig);
     return normalizedConfig;
   } catch (e) {
@@ -1909,8 +1916,10 @@ const syncNearbyRadius = async (payload = {}) => {
     nextRadius,
     socket.nearbyRadius ?? DEFAULT_NEARBY_RADIUS_METERS
   );
+  const hasExplicitDispatchStages =
+    Array.isArray(nextDispatchStagesMeters) && nextDispatchStagesMeters.length > 0;
   const dispatchStagesSeed =
-    Array.isArray(nextDispatchStagesMeters) && nextDispatchStagesMeters.length > 0
+    hasExplicitDispatchStages
       ? nextDispatchStagesMeters
       : buildDefaultNearbyDispatchStagesMeters(normalizedRadius);
   const normalizedDispatchStages = normalizeNearbyDispatchStagesMeters(
@@ -1928,6 +1937,15 @@ const syncNearbyRadius = async (payload = {}) => {
     JSON.stringify(normalizedDispatchStages);
   const timeoutChanged =
     toNumber(socket.nearbyDispatchTimeoutS) !== normalizedDispatchTimeoutSeconds;
+
+  nearbyLog("[nearby-radius][resolve]", {
+    service_category_id: serviceCategoryId ?? null,
+    source: source ?? "fallback",
+    radius_m: normalizedRadius,
+    dispatch_stages_source: hasExplicitDispatchStages ? source ?? "payload" : "default-fallback",
+    dispatch_stages_m: normalizedDispatchStages,
+    dispatch_timeout_s: normalizedDispatchTimeoutSeconds,
+  });
 
   if (radiusChanged) {
     socket.nearbyRadius = normalizedRadius;
@@ -2833,15 +2851,16 @@ item.max_price = hasExplicitBounds
     const sig = buildVehicleTypesSignature(nearbyTypes);
     const vehicleTypesChanged = sig !== socket.lastVehicleTypesSig;
 
-    nearbyLog("[nearbyVehicleTypes] tick", {
-      socket_id: socket.id,
-      stage_number: radiusPlan.stageNumber,
-      stage_total: radiusPlan.stageTotal,
-      road_radius_m: radiusPlan.roadRadius,
-      next_radius_m: radiusPlan.nextRadiusMeters,
-      timeout_s: radiusPlan.timeoutSeconds,
-      elapsed_s: Math.floor(radiusPlan.elapsedMs / 1000),
-      types_count: nearbyTypes.length,
+  nearbyLog("[nearbyVehicleTypes] tick", {
+    socket_id: socket.id,
+    stage_number: radiusPlan.stageNumber,
+    stage_total: radiusPlan.stageTotal,
+    stages_m: radiusPlan.stagesMeters,
+    road_radius_m: radiusPlan.roadRadius,
+    next_radius_m: radiusPlan.nextRadiusMeters,
+    timeout_s: radiusPlan.timeoutSeconds,
+    elapsed_s: Math.floor(radiusPlan.elapsedMs / 1000),
+    types_count: nearbyTypes.length,
       changed: vehicleTypesChanged,
     });
 
@@ -3313,6 +3332,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     center_changed: centerChanged,
     center_shift_m: centerShiftMeters,
     center_reset_threshold_m: NEARBY_CENTER_RESET_THRESHOLD_M,
+    dispatch_stage_list_m: socket.nearbyDispatchStagesMeters,
     dispatch_stages_m: socket.nearbyDispatchStagesMeters,
     dispatch_timeout_s: socket.nearbyDispatchTimeoutS,
     base_radius_m: socket.nearbyRadius,

@@ -4071,6 +4071,18 @@ function startRideTimeoutWithExpansion(io, rideId, remainingLifetimeSec = RIDE_T
     : resolvedRemainingLifetimeSec;
   const ms = waitSeconds * 1000;
 
+  console.log("[dispatch][expand][timer]", {
+    ride_id: rideId,
+    current_stage_number: radiusPlan ? radiusPlan.currentStageIndex + 1 : 1,
+    total_stages: radiusPlan?.stagesMeters?.length ?? 1,
+    current_radius_m: radiusPlan?.currentRadiusMeters ?? null,
+    next_radius_m: radiusPlan?.nextRadiusMeters ?? null,
+    stages_m: radiusPlan?.stagesMeters ?? null,
+    expand_every_s: expansionIntervalSeconds,
+    wait_s: waitSeconds,
+    remaining_lifetime_s: resolvedRemainingLifetimeSec,
+  });
+
   const timer = setTimeout(async () => {
     rideTimers.delete(rideId);
 
@@ -4838,6 +4850,8 @@ async function expandRideDispatchRadius(io, rideId, reason = "timeout") {
     to_radius_m: nextRadiusMeters,
     stage_number: nextStageIndex + 1,
     total_stages: radiusPlan.stagesMeters.length,
+    stages_m: radiusPlan.stagesMeters,
+    expand_every_s: resolveDispatchExpansionIntervalSeconds(snapshot),
   });
 
   const redispatchPayload = {
@@ -5730,6 +5744,7 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
     null,
   road_radius_m: roadRadius,
   air_candidate_radius_m: airCandidateRadius,
+  dispatch_stages_m: radiusPlan.stagesMeters,
   dispatch_timeout_s: dispatchTimeoutSeconds,
   customer_offer_timeout_s: customerOfferTimeoutSeconds,
   search_timeout_s: searchTimeoutSeconds,
