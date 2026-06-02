@@ -835,7 +835,6 @@ const decorateNearbyVehicleTypes = (types = [], selectedTypeId = null) => {
 const buildPriceBounds = (baseFare, estimatedFare = null, distanceKm = null) => {
   const base = toNumber(baseFare);
   const estimated = toNumber(estimatedFare);
-  const distance = toNumber(distanceKm);
   const hasAny = base !== null || estimated !== null;
   if (!hasAny) {
     return {
@@ -858,11 +857,7 @@ const buildPriceBounds = (baseFare, estimatedFare = null, distanceKm = null) => 
     estimated_fare: roundedEstimated,
     min_price:
       anchor !== null
-        ? roundMoney(
-            distance !== null && distance <= 1
-              ? anchor
-              : anchor * BID_MIN_PRICE_MULTIPLIER
-          )
+        ? roundMoney(anchor * BID_MIN_PRICE_MULTIPLIER)
         : null,
     max_price:
       anchor !== null ? roundMoney(anchor * BID_MAX_PRICE_MULTIPLIER) : null,
