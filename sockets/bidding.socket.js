@@ -74,7 +74,7 @@ const DISPATCH_EXPAND_STOP_AFTER_NO_NEW_STAGES = Number.isFinite(
   Number(process.env.DISPATCH_EXPAND_STOP_AFTER_NO_NEW_STAGES)
 )
   ? Math.max(0, Math.floor(Number(process.env.DISPATCH_EXPAND_STOP_AFTER_NO_NEW_STAGES)))
-  : 0;
+  : 2;
 
 const RIDE_STATE_STALE_TTL_MS = Number.isFinite(Number(process.env.RIDE_STATE_STALE_TTL_MS))
   ? Math.max(60_000, Number(process.env.RIDE_STATE_STALE_TTL_MS))
@@ -5848,13 +5848,15 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     0,
     Math.floor(toNumber(data?.dispatch_no_new_stage_count) ?? 0)
   );
+  const hasCandidatesInCurrentRadius = nextCandidateIds.length > 0;
   const noNewConsecutiveStages = incrementalExpansion
-    ? candidatesToNotify.length === 0
+    ? hasCandidatesInCurrentRadius && candidatesToNotify.length === 0
       ? previousNoNewConsecutiveStages + 1
       : 0
     : 0;
   const shouldHaltFurtherExpansion =
     incrementalExpansion &&
+    hasCandidatesInCurrentRadius &&
     candidatesToNotify.length === 0 &&
     DISPATCH_EXPAND_STOP_AFTER_NO_NEW_STAGES > 0 &&
     noNewConsecutiveStages >= DISPATCH_EXPAND_STOP_AFTER_NO_NEW_STAGES &&
@@ -5874,6 +5876,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       ride_id: rideId,
       stage_number: radiusPlan.currentStageIndex + 1,
       stage_total: radiusPlan.stagesMeters.length,
+      has_candidates_in_current_radius: hasCandidatesInCurrentRadius,
       no_new_stage_count: noNewConsecutiveStages,
       stop_after: DISPATCH_EXPAND_STOP_AFTER_NO_NEW_STAGES,
       reason: "no-newly-notified-drivers",
