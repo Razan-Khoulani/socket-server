@@ -1079,6 +1079,9 @@ app.post("/events/internal/driver-profile-updated", async (req, res) => {
     };
 
     driverLocationService.updateMeta(safeDriverId, nextMeta);
+    if (typeof biddingSocket.syncDriverProfileIntoInbox === "function") {
+      biddingSocket.syncDriverProfileIntoInbox(io, safeDriverId, nextMeta);
+    }
 
     if (resolvedIsOnline) {
       io.in(room).socketsJoin("drivers:online");

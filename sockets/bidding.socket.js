@@ -2151,6 +2151,176 @@ function emitDriverPatch(io, driverId, ops = []) {
   return true;
 }
 
+function syncDriverProfileIntoInbox(io, driverId, profile = null) {
+  const safeDriverId = toNumber(driverId);
+  if (!safeDriverId) return { updated_rides: 0, queued_updated: false };
+
+  const currentMeta = driverLocationService.getMeta(safeDriverId) || {};
+  const nextMeta =
+    profile && typeof profile === "object" ? { ...currentMeta, ...profile } : { ...currentMeta };
+  const normalizedDetails = normalizeDriverDetailsPayload(nextMeta, nextMeta);
+  const driverImage = normalizeDriverImageUrl(
+    toTrimmedText(
+      pickFirstValue(
+        nextMeta?.driver_image,
+        nextMeta?.driver_image_url,
+        nextMeta?.driver_profile_image,
+        nextMeta?.profile_image,
+        nextMeta?.avatar,
+        nextMeta?.image,
+        normalizedDetails?.driver_image
+      )
+    )
+  );
+
+  const patchRide = (ride = null) => {
+    if (!ride || typeof ride !== "object") return null;
+
+    const rideDriverDetails =
+      ride?.driver_details && typeof ride.driver_details === "object" ? ride.driver_details : {};
+    const rideDetails =
+      ride?.ride_details && typeof ride.ride_details === "object" ? ride.ride_details : {};
+    const rideMeta = ride?.meta && typeof ride.meta === "object" ? ride.meta : {};
+
+    const nextDriverDetails = {
+      ...rideDriverDetails,
+      ...normalizedDetails,
+      driver_id: safeDriverId,
+      provider_id: safeDriverId,
+      driver_image: driverImage ?? rideDriverDetails?.driver_image ?? ride?.driver_image ?? null,
+      driver_image_url:
+        driverImage ?? rideDriverDetails?.driver_image_url ?? ride?.driver_image_url ?? null,
+    };
+
+    const nextRideDetails = {
+      ...rideDetails,
+      driver_details: nextDriverDetails,
+      driver_id: safeDriverId,
+      provider_id: safeDriverId,
+      driver_name: nextDriverDetails.driver_name ?? rideDetails?.driver_name ?? ride?.driver_name ?? null,
+      driver_image: driverImage ?? rideDetails?.driver_image ?? ride?.driver_image ?? null,
+      driver_image_url:
+        driverImage ?? rideDetails?.driver_image_url ?? ride?.driver_image_url ?? null,
+    };
+
+    const nextRideMeta = {
+      ...rideMeta,
+      driver_id: safeDriverId,
+      provider_id: safeDriverId,
+      driver_service_id: toNumber(
+        nextMeta?.driver_service_id ?? rideMeta?.driver_service_id ?? null
+      ),
+      driver_detail_id: toNumber(
+        nextMeta?.driver_detail_id ?? nextMeta?.driver_details_id ?? rideMeta?.driver_detail_id ?? rideMeta?.driver_details_id ?? null
+      ),
+      driver_details_id: toNumber(
+        nextMeta?.driver_detail_id ?? nextMeta?.driver_details_id ?? rideMeta?.driver_detail_id ?? rideMeta?.driver_details_id ?? null
+      ),
+      service_type_id: toNumber(nextMeta?.service_type_id ?? rideMeta?.service_type_id ?? null),
+      service_category_id: toNumber(
+        nextMeta?.service_category_id ?? nextMeta?.service_cat_id ?? rideMeta?.service_category_id ?? rideMeta?.service_cat_id ?? null
+      ),
+      driver_name: nextDriverDetails.driver_name ?? rideMeta?.driver_name ?? ride?.driver_name ?? null,
+      driver_image: driverImage ?? rideMeta?.driver_image ?? ride?.driver_image ?? null,
+      driver_image_url:
+        driverImage ?? rideMeta?.driver_image_url ?? ride?.driver_image_url ?? null,
+      vehicle_company:
+        nextDriverDetails.vehicle_company ?? rideMeta?.vehicle_company ?? ride?.vehicle_company ?? null,
+      model_name: nextDriverDetails.model_name ?? rideMeta?.model_name ?? ride?.model_name ?? null,
+      vehicle_type_name:
+        nextDriverDetails.vehicle_type_name ?? rideMeta?.vehicle_type_name ?? ride?.vehicle_type_name ?? null,
+    };
+
+    return attachCustomerFields(
+      {
+        ...ride,
+        driver_id: safeDriverId,
+        provider_id: safeDriverId,
+        driver_service_id: nextRideMeta.driver_service_id ?? ride?.driver_service_id ?? null,
+        driver_detail_id:
+          nextRideMeta.driver_detail_id ?? ride?.driver_detail_id ?? ride?.driver_details_id ?? null,
+        driver_details_id:
+          nextRideMeta.driver_details_id ?? ride?.driver_details_id ?? ride?.driver_detail_id ?? null,
+        driver_name: nextDriverDetails.driver_name ?? ride?.driver_name ?? null,
+        driver_image: driverImage ?? ride?.driver_image ?? null,
+        driver_image_url: driverImage ?? ride?.driver_image_url ?? null,
+        driver_image_source: nextMeta?.driver_image_source ?? ride?.driver_image_source ?? null,
+        vehicle_company: nextDriverDetails.vehicle_company ?? ride?.vehicle_company ?? null,
+        vehicle_company_en: nextDriverDetails.vehicle_company_en ?? ride?.vehicle_company_en ?? null,
+        vehicle_company_ar: nextDriverDetails.vehicle_company_ar ?? ride?.vehicle_company_ar ?? null,
+        vehicle_manufacturer:
+          nextDriverDetails.vehicle_manufacturer ?? ride?.vehicle_manufacturer ?? null,
+        vehicle_manufacturer_en:
+          nextDriverDetails.vehicle_manufacturer_en ?? ride?.vehicle_manufacturer_en ?? null,
+        vehicle_manufacturer_ar:
+          nextDriverDetails.vehicle_manufacturer_ar ?? ride?.vehicle_manufacturer_ar ?? null,
+        manufacturer_name: nextDriverDetails.manufacturer_name ?? ride?.manufacturer_name ?? null,
+        manufacturer_name_en:
+          nextDriverDetails.manufacturer_name_en ?? ride?.manufacturer_name_en ?? null,
+        manufacturer_name_ar:
+          nextDriverDetails.manufacturer_name_ar ?? ride?.manufacturer_name_ar ?? null,
+        model_name: nextDriverDetails.model_name ?? ride?.model_name ?? null,
+        model_name_en: nextDriverDetails.model_name_en ?? ride?.model_name_en ?? null,
+        model_name_ar: nextDriverDetails.model_name_ar ?? ride?.model_name_ar ?? null,
+        model_year: nextDriverDetails.model_year ?? ride?.model_year ?? null,
+        vehicle_color: nextDriverDetails.vehicle_color ?? ride?.vehicle_color ?? null,
+        vehicle_color_en: nextDriverDetails.vehicle_color_en ?? ride?.vehicle_color_en ?? null,
+        vehicle_color_ar: nextDriverDetails.vehicle_color_ar ?? ride?.vehicle_color_ar ?? null,
+        vehicle_type: nextDriverDetails.vehicle_type ?? ride?.vehicle_type ?? null,
+        vehicle_type_name: nextDriverDetails.vehicle_type_name ?? ride?.vehicle_type_name ?? null,
+        plat_no: nextDriverDetails.plat_no ?? ride?.plat_no ?? null,
+        plate_no: nextDriverDetails.plate_no ?? ride?.plate_no ?? null,
+        rating: nextDriverDetails.rating ?? ride?.rating ?? null,
+        driver_gender:
+          nextMeta?.driver_gender ?? ride?.driver_gender ?? ride?.meta?.driver_gender ?? null,
+        child_seat:
+          nextMeta?.child_seat ?? ride?.child_seat ?? ride?.meta?.child_seat ?? null,
+        handicap: nextMeta?.handicap ?? ride?.handicap ?? ride?.meta?.handicap ?? null,
+        driver_details: nextDriverDetails,
+        ride_details: nextRideDetails,
+        meta: nextRideMeta,
+        _ts: Date.now(),
+      },
+      ride?.user_details ?? ride?.customer_details ?? ride?.customer ?? null
+    );
+  };
+
+  let updatedRides = 0;
+  const inbox = driverRideInbox.get(safeDriverId);
+  if (inbox && inbox.size > 0) {
+    const ops = [];
+    for (const [rideId, ride] of inbox.entries()) {
+      const patched = patchRide(ride);
+      if (!patched) continue;
+      inbox.set(rideId, patched);
+      ops.push({ op: "upsert", ride: patched });
+      updatedRides += 1;
+    }
+
+    if (ops.length > 0) {
+      emitDriverPatch(io, safeDriverId, ops);
+    }
+  }
+
+  let queuedUpdated = false;
+  const queuedRide = driverQueuedRide.get(safeDriverId);
+  if (queuedRide && queuedRide.ride_snapshot && typeof queuedRide.ride_snapshot === "object") {
+    const patchedSnapshot = patchRide(queuedRide.ride_snapshot);
+    if (patchedSnapshot) {
+      driverQueuedRide.set(safeDriverId, {
+        ...queuedRide,
+        ride_snapshot: patchedSnapshot,
+      });
+      queuedUpdated = true;
+    }
+  }
+
+  return {
+    updated_rides: updatedRides,
+    queued_updated: queuedUpdated,
+  };
+}
+
 function isRideOfferExpired(ride) {
   const expiresAt = toNumber(ride?.expires_at);
   if (expiresAt === null) return false;
@@ -10254,3 +10424,4 @@ module.exports.canDriverReceiveNewRideRequests = canDriverReceiveNewRideRequests
 module.exports.activateQueuedRideForDriver = activateQueuedRideForDriver;
 module.exports.getDriverInboxStats = getDriverInboxStats;
 module.exports.recoverDriverPendingDispatch = recoverDriverPendingDispatch;
+module.exports.syncDriverProfileIntoInbox = syncDriverProfileIntoInbox;

@@ -755,6 +755,10 @@ module.exports = (io, socket) => {
       forceRefresh: true,
     });
 
+    if (typeof biddingSocket.syncDriverProfileIntoInbox === "function") {
+      biddingSocket.syncDriverProfileIntoInbox(io, driverId, driverLocationService.getMeta(driverId) || {});
+    }
+
     if (typeof biddingSocket.recoverDriverPendingDispatch === "function") {
       biddingSocket.recoverDriverPendingDispatch(io, driverId, "driver-online");
     }
