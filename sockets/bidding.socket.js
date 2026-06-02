@@ -73,8 +73,8 @@ const DRIVER_RECOVERY_NOOP_LOG_THROTTLE_MS = Number.isFinite(
 const DISPATCH_EXPAND_STOP_AFTER_NO_NEW_STAGES = Number.isFinite(
   Number(process.env.DISPATCH_EXPAND_STOP_AFTER_NO_NEW_STAGES)
 )
-  ? Math.max(1, Math.floor(Number(process.env.DISPATCH_EXPAND_STOP_AFTER_NO_NEW_STAGES)))
-  : 2;
+  ? Math.max(0, Math.floor(Number(process.env.DISPATCH_EXPAND_STOP_AFTER_NO_NEW_STAGES)))
+  : 0;
 
 const RIDE_STATE_STALE_TTL_MS = Number.isFinite(Number(process.env.RIDE_STATE_STALE_TTL_MS))
   ? Math.max(60_000, Number(process.env.RIDE_STATE_STALE_TTL_MS))
