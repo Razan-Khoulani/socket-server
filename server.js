@@ -1062,23 +1062,18 @@ app.post("/events/internal/driver-profile-updated", async (req, res) => {
     );
 
     const resolvedIsOnline =
-      typeof currentMeta.is_online === "boolean"
-        ? currentMeta.is_online
-        : hasActiveRoomSockets || profileStatus === 1 || fallbackStatus === 1;
+      hasActiveRoomSockets ||
+      profileStatus === 1 ||
+      fallbackStatus === 1 ||
+      currentMeta.is_online === true;
 
     const now = Date.now();
     const nextMeta = {
       ...currentMeta,
       ...profile,
       is_online: resolvedIsOnline,
-      dashboard_is_online:
-        typeof currentMeta.dashboard_is_online === "boolean"
-          ? currentMeta.dashboard_is_online
-          : resolvedIsOnline,
-      socket_disconnected:
-        typeof currentMeta.socket_disconnected === "boolean"
-          ? currentMeta.socket_disconnected
-          : !resolvedIsOnline,
+      dashboard_is_online: resolvedIsOnline,
+      socket_disconnected: !resolvedIsOnline,
       updatedAt: now,
       ...(resolvedIsOnline ? { last_activity_at: now } : { lastSeen: now }),
     };
@@ -1092,6 +1087,17 @@ app.post("/events/internal/driver-profile-updated", async (req, res) => {
     }
 
     emitAdminDriverUpdate(io, safeDriverId);
+
+    if (resolvedIsOnline && typeof biddingSocket.recoverDriverPendingDispatch === "function") {
+      biddingSocket.recoverDriverPendingDispatch(io, safeDriverId, "driver-profile-updated");
+    }
+
+    if (
+      resolvedIsOnline &&
+      typeof biddingSocket.emitCandidatesSummaryForDriverStateChange === "function"
+    ) {
+      biddingSocket.emitCandidatesSummaryForDriverStateChange(io, safeDriverId);
+    }
 
     io.to(room).emit("driver:profile-updated", {
       driver_id: safeDriverId,
@@ -1115,6 +1121,19 @@ app.post("/events/internal/driver-profile-updated", async (req, res) => {
       vehicle_type_icon: nextMeta?.vehicle_type_icon ?? "",
       is_online: resolvedIsOnline,
     });
+
+    if (resolvedIsOnline) {
+      io.to(room).emit("driver:ready", {
+        driver_id: safeDriverId,
+        provider_id: safeDriverId,
+        driver_service_id: toFiniteNumber(
+          nextMeta?.driver_service_id ?? safeDriverServiceId
+        ),
+        driver_detail_id: toFiniteNumber(
+          nextMeta?.driver_detail_id ?? nextMeta?.driver_details_id ?? null
+        ),
+      });
+    }
 
     return res.json({ status: 1, driver_id: safeDriverId });
   } catch (error) {
