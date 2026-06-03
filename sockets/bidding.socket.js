@@ -1138,6 +1138,157 @@ const buildDriverIdentityPayload = (identity = {}, legacyDriverId = null) => {
 
   return payload;
 };
+const buildLocalizedRideVehiclePayload = (primary = {}, fallbackMeta = {}) => {
+  const sources = [
+    primary,
+    primary?.driver_details,
+    primary?.ride_details,
+    primary?.ride_details?.driver_details,
+    primary?.meta,
+    fallbackMeta,
+    fallbackMeta?.driver_details,
+    fallbackMeta?.ride_details,
+    fallbackMeta?.ride_details?.driver_details,
+    fallbackMeta?.meta,
+  ].filter((source) => source && typeof source === "object");
+
+  const readText = (...keys) => {
+    for (const source of sources) {
+      for (const key of keys) {
+        const value = toTrimmedText(source?.[key]);
+        if (value !== null) return value;
+      }
+    }
+    return null;
+  };
+
+  const readNumber = (...keys) => {
+    for (const source of sources) {
+      for (const key of keys) {
+        const value = toNumber(source?.[key]);
+        if (value !== null) return value;
+      }
+    }
+    return null;
+  };
+
+  const language = normalizeLanguageCode(
+    readText("user_language", "language", "preferred_language") ??
+      fallbackMeta?.user_language ??
+      fallbackMeta?.language ??
+      null
+  );
+
+  const buildLocalizedGroup = ({ baseKeys = [], enKeys = [], arKeys = [] }) => {
+    const english = readText(...enKeys, ...baseKeys);
+    const arabic = readText(...arKeys, ...baseKeys);
+    const fallback = readText(...baseKeys, ...enKeys, ...arKeys);
+    return resolveLocalizedFieldVariants(language, english, arabic, fallback);
+  };
+
+  const result = {};
+
+  const assignLocalizedGroup = (baseName, localized) => {
+    if (!localized) return;
+    const canonical = toTrimmedText(localized.localized);
+    const english = toTrimmedText(localized.en ?? canonical);
+    const arabic = toTrimmedText(localized.ar ?? canonical);
+    if (canonical !== null) result[baseName] = canonical;
+    if (english !== null) result[`${baseName}_en`] = english;
+    if (arabic !== null) result[`${baseName}_ar`] = arabic;
+  };
+
+  const vehicleType = buildLocalizedGroup({
+    baseKeys: ["vehicle_type_name", "vehicle_type", "service_type_name", "service_type"],
+    enKeys: ["vehicle_type_name_en", "vehicle_type_en", "service_type_name_en", "service_type_en"],
+    arKeys: ["vehicle_type_name_ar", "vehicle_type_ar", "service_type_name_ar", "service_type_ar"],
+  });
+  ["vehicle_type", "vehicle_type_name", "service_type_name"].forEach((baseName) =>
+    assignLocalizedGroup(baseName, vehicleType)
+  );
+
+  const company = buildLocalizedGroup({
+    baseKeys: [
+      "vehicle_company",
+      "vehicle_manufacture_name",
+      "vehicle_manufacturer",
+      "manufacturer_name",
+    ],
+    enKeys: [
+      "vehicle_company_en",
+      "vehicle_manufacture_name_en",
+      "vehicle_manufacturer_en",
+      "manufacturer_name_en",
+    ],
+    arKeys: [
+      "vehicle_company_ar",
+      "vehicle_manufacture_name_ar",
+      "vehicle_manufacturer_ar",
+      "manufacturer_name_ar",
+    ],
+  });
+  ["vehicle_company", "vehicle_manufacture_name", "vehicle_manufacturer", "manufacturer_name"].forEach(
+    (baseName) => assignLocalizedGroup(baseName, company)
+  );
+
+  const model = buildLocalizedGroup({
+    baseKeys: ["model_name", "vehicle_model_name"],
+    enKeys: ["model_name_en", "vehicle_model_name_en"],
+    arKeys: ["model_name_ar", "vehicle_model_name_ar"],
+  });
+  ["model_name", "vehicle_model_name"].forEach((baseName) => assignLocalizedGroup(baseName, model));
+
+  const color = buildLocalizedGroup({
+    baseKeys: ["vehicle_color"],
+    enKeys: ["vehicle_color_en"],
+    arKeys: ["vehicle_color_ar"],
+  });
+  assignLocalizedGroup("vehicle_color", color);
+
+  const vehicleTypeIcon = readText("vehicle_type_icon", "service_type_icon");
+  if (vehicleTypeIcon !== null) result.vehicle_type_icon = vehicleTypeIcon;
+
+  const vehicleTypeId = readNumber("vehicle_type_id");
+  if (vehicleTypeId !== null) result.vehicle_type_id = vehicleTypeId;
+
+  const serviceTypeId = readNumber("service_type_id", "vehicle_type_id");
+  if (serviceTypeId !== null) result.service_type_id = serviceTypeId;
+
+  const serviceCategoryId = readNumber("service_category_id");
+  if (serviceCategoryId !== null) result.service_category_id = serviceCategoryId;
+
+  const modelYear = readNumber("model_year");
+  if (modelYear !== null) result.model_year = modelYear;
+
+  const vehicleNumber = readText("vehicle_number", "plat_no", "plate_no");
+  if (vehicleNumber !== null) {
+    result.vehicle_number = vehicleNumber;
+    result.plat_no = readText("plat_no", "vehicle_number", "plate_no") ?? vehicleNumber;
+    result.plate_no = readText("plate_no", "plat_no", "vehicle_number") ?? vehicleNumber;
+  }
+
+  const driverName = readText("driver_name", "driverName", "name");
+  if (driverName !== null) {
+    result.driver_name = driverName;
+    const driverNameEn = readText("driver_name_en", "driverName_en", "name_en") ?? driverName;
+    const driverNameAr = readText("driver_name_ar", "driverName_ar", "name_ar") ?? driverName;
+    if (driverNameEn !== null) result.driver_name_en = driverNameEn;
+    if (driverNameAr !== null) result.driver_name_ar = driverNameAr;
+  }
+
+  const driverImage = normalizeDriverImageUrl(
+    readText("driver_image", "driver_image_url", "profile_image", "driver_profile_image", "provider_image")
+  );
+  if (driverImage !== null) {
+    result.driver_image = driverImage;
+    result.driver_image_url = driverImage;
+  }
+
+  const driverRating = readNumber("driver_rating", "rating");
+  if (driverRating !== null) result.driver_rating = driverRating;
+
+  return result;
+};
 function resolveRideDriverIdentity(rideId, payload = {}, options = {}) {
   const legacyDriverId = toNumber(payload?.driver_id);
   const requestedIdentity = extractDriverIdentity(payload);
@@ -8034,14 +8185,70 @@ if (removed) {
       null;
 
     const accessToken = tokenTmp;
+    const acceptedRideLocalePayload = buildLocalizedRideVehiclePayload(
+      {
+        ...(rideSnapshot && typeof rideSnapshot === "object" ? rideSnapshot : {}),
+        ride_details:
+          rideSnapshot?.ride_details && typeof rideSnapshot.ride_details === "object"
+            ? rideSnapshot.ride_details
+            : rideDetails && typeof rideDetails === "object"
+              ? rideDetails
+              : null,
+        driver_details:
+          rideSnapshot?.driver_details && typeof rideSnapshot.driver_details === "object"
+            ? rideSnapshot.driver_details
+            : driverMeta,
+        meta:
+          rideSnapshot?.meta && typeof rideSnapshot.meta === "object"
+            ? rideSnapshot.meta
+            : driverMeta,
+      },
+      driverMeta
+    );
+    const acceptedRideDetails = {
+      ...(rideSnapshot && typeof rideSnapshot === "object" ? rideSnapshot : {}),
+      ...acceptedRideLocalePayload,
+      driver_details: {
+        ...(rideSnapshot?.driver_details && typeof rideSnapshot.driver_details === "object"
+          ? rideSnapshot.driver_details
+          : {}),
+        ...acceptedRideLocalePayload,
+      },
+      meta: {
+        ...(rideSnapshot?.meta && typeof rideSnapshot.meta === "object" ? rideSnapshot.meta : {}),
+        ...acceptedRideLocalePayload,
+      },
+    };
 
     io.to(driverRoom(driverId)).emit("ride:driverAccepted", {
       ride_id: rideId,
       driver_id: driverId,
       ...buildDriverIdentityPayload(driverIdentity, driverId),
+      ...acceptedRideLocalePayload,
       offered_price: offeredPrice,
       message: "Offer accepted by driver",
-      ride_details: rideSnapshot,
+      ride_details: acceptedRideDetails,
+      at: Date.now(),
+    });
+    console.log("[emit][ride:driverAccepted][locale]", {
+      ride_id: rideId,
+      driver_id: driverId,
+      room: driverRoom(driverId),
+      vehicle_company: acceptedRideLocalePayload?.vehicle_company ?? null,
+      vehicle_company_en: acceptedRideLocalePayload?.vehicle_company_en ?? null,
+      vehicle_company_ar: acceptedRideLocalePayload?.vehicle_company_ar ?? null,
+      model_name: acceptedRideLocalePayload?.model_name ?? null,
+      model_name_en: acceptedRideLocalePayload?.model_name_en ?? null,
+      model_name_ar: acceptedRideLocalePayload?.model_name_ar ?? null,
+      vehicle_color: acceptedRideLocalePayload?.vehicle_color ?? null,
+      vehicle_color_en: acceptedRideLocalePayload?.vehicle_color_en ?? null,
+      vehicle_color_ar: acceptedRideLocalePayload?.vehicle_color_ar ?? null,
+      vehicle_type_name: acceptedRideLocalePayload?.vehicle_type_name ?? null,
+      vehicle_type_name_en: acceptedRideLocalePayload?.vehicle_type_name_en ?? null,
+      vehicle_type_name_ar: acceptedRideLocalePayload?.vehicle_type_name_ar ?? null,
+      driver_name: acceptedRideLocalePayload?.driver_name ?? null,
+      driver_name_en: acceptedRideLocalePayload?.driver_name_en ?? null,
+      driver_name_ar: acceptedRideLocalePayload?.driver_name_ar ?? null,
       at: Date.now(),
     });
 
@@ -8052,13 +8259,34 @@ if (removed) {
       {
         ride_id: rideId,
         ...buildDriverIdentityPayload(driverIdentity, customerFacingDriverId),
+        ...acceptedRideLocalePayload,
         offered_price: offeredPrice,
         message: "Offer accepted by driver",
-        ride_details: rideSnapshot,
+        ride_details: acceptedRideDetails,
         at: Date.now(),
       },
       userId
     );
+    console.log("[emit][ride:acceptedByDriver][locale]", {
+      ride_id: rideId,
+      audience_user_id: userId ?? null,
+      vehicle_company: acceptedRideLocalePayload?.vehicle_company ?? null,
+      vehicle_company_en: acceptedRideLocalePayload?.vehicle_company_en ?? null,
+      vehicle_company_ar: acceptedRideLocalePayload?.vehicle_company_ar ?? null,
+      model_name: acceptedRideLocalePayload?.model_name ?? null,
+      model_name_en: acceptedRideLocalePayload?.model_name_en ?? null,
+      model_name_ar: acceptedRideLocalePayload?.model_name_ar ?? null,
+      vehicle_color: acceptedRideLocalePayload?.vehicle_color ?? null,
+      vehicle_color_en: acceptedRideLocalePayload?.vehicle_color_en ?? null,
+      vehicle_color_ar: acceptedRideLocalePayload?.vehicle_color_ar ?? null,
+      vehicle_type_name: acceptedRideLocalePayload?.vehicle_type_name ?? null,
+      vehicle_type_name_en: acceptedRideLocalePayload?.vehicle_type_name_en ?? null,
+      vehicle_type_name_ar: acceptedRideLocalePayload?.vehicle_type_name_ar ?? null,
+      driver_name: acceptedRideLocalePayload?.driver_name ?? null,
+      driver_name_en: acceptedRideLocalePayload?.driver_name_en ?? null,
+      driver_name_ar: acceptedRideLocalePayload?.driver_name_ar ?? null,
+      at: Date.now(),
+    });
 
     const finalize = () =>
       finalizeAcceptedRide(io, rideId, driverId, offeredPrice, {
@@ -9196,6 +9424,21 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       },
       bidUserDetails ?? ridePayload?.user_details ?? null
     );
+    const bidLocalePayload = buildLocalizedRideVehiclePayload(ridePayload, driverMeta);
+    ridePayload = {
+      ...ridePayload,
+      ...bidLocalePayload,
+      meta: {
+        ...(ridePayload?.meta && typeof ridePayload.meta === "object" ? ridePayload.meta : {}),
+        ...bidLocalePayload,
+      },
+      driver_details: {
+        ...(ridePayload?.driver_details && typeof ridePayload.driver_details === "object"
+          ? ridePayload.driver_details
+          : {}),
+        ...bidLocalePayload,
+      },
+    };
 
     const driverDefaultVehicleType = toTrimmedText(
       pickFirstValue(
@@ -9355,11 +9598,22 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       driver_id: driverId,
       room: driverRoom(driverId),
       vehicle_company: driverRoomPayload?.vehicle_company ?? null,
+      vehicle_company_en: driverRoomPayload?.vehicle_company_en ?? null,
+      vehicle_company_ar: driverRoomPayload?.vehicle_company_ar ?? null,
       plat_no: driverRoomPayload?.plat_no ?? null,
       model_year: driverRoomPayload?.model_year ?? null,
       model_name: driverRoomPayload?.model_name ?? null,
+      model_name_en: driverRoomPayload?.model_name_en ?? null,
+      model_name_ar: driverRoomPayload?.model_name_ar ?? null,
       vehicle_color: driverRoomPayload?.vehicle_color ?? null,
+      vehicle_color_en: driverRoomPayload?.vehicle_color_en ?? null,
+      vehicle_color_ar: driverRoomPayload?.vehicle_color_ar ?? null,
+      vehicle_type_name: driverRoomPayload?.vehicle_type_name ?? null,
+      vehicle_type_name_en: driverRoomPayload?.vehicle_type_name_en ?? null,
+      vehicle_type_name_ar: driverRoomPayload?.vehicle_type_name_ar ?? null,
       driver_name: driverRoomPayload?.driver_name ?? null,
+      driver_name_en: driverRoomPayload?.driver_name_en ?? null,
+      driver_name_ar: driverRoomPayload?.driver_name_ar ?? null,
       driver_rating: driverRoomPayload?.driver_rating ?? null,
       driver_image: driverRoomPayload?.driver_image ?? null,
       additional_remarks:
@@ -9374,6 +9628,26 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
       ridePayload,
       ridePayload?.user_id ?? ridePayload?.user_details?.user_id ?? null
     );
+    console.log("[emit][ride:newBid][locale]", {
+      ride_id: rideId,
+      audience_user_id: ridePayload?.user_id ?? ridePayload?.user_details?.user_id ?? null,
+      vehicle_company: ridePayload?.vehicle_company ?? null,
+      vehicle_company_en: ridePayload?.vehicle_company_en ?? null,
+      vehicle_company_ar: ridePayload?.vehicle_company_ar ?? null,
+      model_name: ridePayload?.model_name ?? null,
+      model_name_en: ridePayload?.model_name_en ?? null,
+      model_name_ar: ridePayload?.model_name_ar ?? null,
+      vehicle_color: ridePayload?.vehicle_color ?? null,
+      vehicle_color_en: ridePayload?.vehicle_color_en ?? null,
+      vehicle_color_ar: ridePayload?.vehicle_color_ar ?? null,
+      vehicle_type_name: ridePayload?.vehicle_type_name ?? null,
+      vehicle_type_name_en: ridePayload?.vehicle_type_name_en ?? null,
+      vehicle_type_name_ar: ridePayload?.vehicle_type_name_ar ?? null,
+      driver_name: ridePayload?.driver_name ?? null,
+      driver_name_en: ridePayload?.driver_name_en ?? null,
+      driver_name_ar: ridePayload?.driver_name_ar ?? null,
+      at: Date.now(),
+    });
 
     console.log(`💰 Driver ${driverId} submitted bid ${offeredPrice} for ride ${rideId}`);
     const removed = inboxRemove(driverId, rideId);
