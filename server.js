@@ -2655,6 +2655,8 @@ app.post("/events/internal/ride-dispatch-retry", async (req, res) => {
     dispatch_expand_reason: "retry",
     dispatch_incremental_only: 0,
     force_new_search_window: 1,
+    hard_reset: 1,
+    reset_candidates: 1,
     rebroadcast_all: 1,
     ...(rad !== null ? { radius: rad } : {}),
     ...(dispatchTimeoutSec !== null ? { dispatch_timeout_s: dispatchTimeoutSec } : {}),

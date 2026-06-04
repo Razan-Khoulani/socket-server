@@ -1434,7 +1434,7 @@ const getRidePriceBounds = (payload = {}) => {
     return { base_fare: null, min_price: null, max_price: null };
   }
   const anchorBounds = extractRidePriceAnchor(payload);
-  if (anchorBounds?.min_price !== null && anchorBounds?.max_price !== null) {
+  if (anchorBounds?.min_price != null && anchorBounds?.max_price != null) {
     return {
       base_fare: toNumber(anchorBounds?.base_fare) !== null ? round2(toNumber(anchorBounds.base_fare)) : null,
       min_price: round2(toNumber(anchorBounds.min_price)),
@@ -5278,6 +5278,7 @@ function removeRideFromAllInboxes(io, rideId, options = {}) {
     cancelRetryStateCleanup(rideId);
   }
   acceptLocks.delete(rideId);
+  dispatchInFlightByRide.delete(rideId);
 
   for (const [driverId, box] of driverRideInbox.entries()) {
     if (box.has(rideId)) {
