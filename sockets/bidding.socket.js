@@ -10544,12 +10544,7 @@ if (acceptedRouteDataDuration !== null) {
       ...buildDriverIdentityPayload(driverIdentity, driverId),
     });
 
-    finalizeAcceptedRide(io, rideId, driverId, finalPrice, {
-      message: "User accepted the offer",
-      rideDetails: acceptedRideSnapshot,
-      userId,
-      driverIdentity,
-    });
+    
 
     console.log(`✅ user:acceptOffer -> ride ${rideId} driver ${driverId} price ${finalPrice}`);
         } finally {
