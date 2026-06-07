@@ -1876,6 +1876,10 @@ app.post("/events/internal/ride-status-updated", (req, res) => {
           Number(payload.wallet_paid) === 1
         ? 1
         : null;
+    const isRidePaymentUpdate =
+      paymentEvent === "ride_payment_updated" ||
+      (paymentType === 3 && paymentStatus === 1) ||
+      walletPaid === 1;
     const rating = payload?.rating ?? null;
     const evt = {
       ride_id: rideId,
@@ -2171,6 +2175,31 @@ if (
         rideStatus: status,
         statusPayload: payload,
       });
+    }
+
+    // Emit dedicated payment refresh event for driver invoice screens.
+    const paymentUpdateDriverId = driverId ?? adminDriverId ?? null;
+    if (isRidePaymentUpdate && paymentUpdateDriverId) {
+      const paymentEvt = {
+        event: "ride_payment_updated",
+        action: "refresh_invoice",
+        event_source: "ride_payment_api",
+        ride_id: rideId,
+        ride_status: status,
+        driver_id: paymentUpdateDriverId,
+        ...(Number.isFinite(Number(userId)) ? { user_id: Number(userId) } : {}),
+        ...(subRideId != null ? { sub_ride_id: subRideId } : {}),
+        ...(rideNo != null ? { ride_no: rideNo } : {}),
+        ...(paymentType != null ? { payment_type: paymentType } : {}),
+        ...(paymentStatus != null ? { payment_status: paymentStatus } : {}),
+        ...(walletPaid != null ? { wallet_paid: walletPaid } : {}),
+        ...(paymentEvent != null ? { payment_event: paymentEvent } : {}),
+        ...(paymentMessage != null ? { payment_message: paymentMessage } : {}),
+        at: Date.now(),
+      };
+      const paymentDriverRoom = `driver:${paymentUpdateDriverId}`;
+      io.to(paymentDriverRoom).emit("ride:paymentUpdated", paymentEvt);
+      logServerEmit("ride:paymentUpdated", paymentDriverRoom, paymentEvt);
     }
 
     // ✅ If ride reached a terminal status, handle active mapping + notify
