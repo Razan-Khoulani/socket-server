@@ -54,6 +54,7 @@ const driverAcceptLocks = new Map(); // driverId -> timestamp (prevent concurren
 const driverQueuedRide = new Map(); // driverId -> { ride_id, offered_price, ride_snapshot, reserved_at }
 const rideDriverStates = new Map(); // rideId -> Map(driverId -> { status, notified_at, updated_at })
 const dispatchInFlightByRide = new Map(); // rideId -> token
+const autoAcceptFirstBidLocks = new Map(); // rideId -> timestamp
 
 // ✅ NEW: per-driver patch sequence (ordering)
 const driverPatchSeq = new Map(); // driverId -> number
@@ -101,6 +102,13 @@ const ACCEPT_LOCK_TTL_MS = Number.isFinite(Number(process.env.ACCEPT_LOCK_TTL_MS
   const DRIVER_ACCEPT_LOCK_TTL_MS = Number.isFinite(Number(process.env.DRIVER_ACCEPT_LOCK_TTL_MS))
   ? Number(process.env.DRIVER_ACCEPT_LOCK_TTL_MS)
   : 4000;
+
+  const AUTO_ACCEPT_FIRST_BID_LOCK_TTL_MS = Number.isFinite(
+  Number(process.env.AUTO_ACCEPT_FIRST_BID_LOCK_TTL_MS)
+)
+  ? Math.max(5000, Number(process.env.AUTO_ACCEPT_FIRST_BID_LOCK_TTL_MS))
+  : 30_000;
+
 const BID_MIN_PRICE_MULTIPLIER = Number.isFinite(
   Number(process.env.BID_MIN_PRICE_MULTIPLIER)
 )
@@ -319,6 +327,27 @@ const pickFirstValue = (...values) => {
   }
   return null;
 };
+
+const isAutoAcceptFirstBidEnabled = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return false;
+
+  return (
+    toBinaryFlag(
+      pickFirstValue(
+        payload?.auto_accept_first_bid,
+        payload?.auto_accept_first_offer,
+        payload?.instant_accept,
+        payload?.meta?.auto_accept_first_bid,
+        payload?.meta?.auto_accept_first_offer,
+        payload?.meta?.instant_accept,
+        payload?.ride_details?.auto_accept_first_bid,
+        payload?.ride_details?.auto_accept_first_offer,
+        payload?.ride_details?.instant_accept
+      )
+    ) === 1
+  );
+};
+
 const pickFirstPresentValueWithSource = (candidates = []) => {
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== "object") continue;
@@ -3213,6 +3242,7 @@ const touchUserActiveRide = (userId, rideId) => {
 // ✅ NEW: unify token extraction (fix retry cases where token name differs)
 const getTokenFromAny = (data, built = null, src = null) => {
   return (
+    data?.socket_user_token ??
     data?.token ??
     data?.access_token ??
     data?.user_token ??
@@ -3523,8 +3553,14 @@ const stripTokenFields = (value) => {
     token,
     access_token,
     user_token,
+    socket_user_token,
     driver_token,
     driver_access_token,
+    // runtime-only controls; do not expose to clients
+    auto_accept_first_bid,
+    auto_accept_first_offer,
+    instant_accept,
+
     ...rest
   } = value;
   return rest;
@@ -4136,6 +4172,35 @@ function releaseDriverAcceptLock(driverId) {
   if (!driverId) return;
   driverAcceptLocks.delete(driverId);
 }
+
+function acquireAutoAcceptFirstBidLock(rideId) {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return false;
+
+  const now = Date.now();
+  const last = autoAcceptFirstBidLocks.get(safeRideId);
+
+  if (last && now - last < AUTO_ACCEPT_FIRST_BID_LOCK_TTL_MS) {
+    return false;
+  }
+
+  autoAcceptFirstBidLocks.set(safeRideId, now);
+
+  setTimeout(() => {
+    if (autoAcceptFirstBidLocks.get(safeRideId) === now) {
+      autoAcceptFirstBidLocks.delete(safeRideId);
+    }
+  }, AUTO_ACCEPT_FIRST_BID_LOCK_TTL_MS);
+
+  return true;
+}
+
+function releaseAutoAcceptFirstBidLock(rideId) {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return;
+  autoAcceptFirstBidLocks.delete(safeRideId);
+}
+
 
 function finalizeAcceptedRide(io, rideId, driverId, finalPrice, options = {}) {
   const {
@@ -6298,6 +6363,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       language: userDetails?.language ?? dispatchUserLanguage,
     };
   }
+  const autoAcceptFirstBid = isAutoAcceptFirstBidEnabled(data);
 
   const ridePayloadBase = {
     ride_id: rideId,
@@ -6305,6 +6371,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     ui_action: "show_bid_list",
     auto_open_running: false,
     is_running_ride: false,
+    auto_accept_first_bid: autoAcceptFirstBid ? 1 : 0,
 
     // ✅ FLAT user fields (important for retry + merges)
     user_id: userId ?? userDetails?.user_id ?? null,
@@ -6435,9 +6502,11 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       ...(serviceTypeNameAr ? { service_type_name_ar: serviceTypeNameAr, vehicle_type_name_ar: serviceTypeNameAr } : {}),
       ...(dispatchUserLanguage ? { user_language: dispatchUserLanguage, language: dispatchUserLanguage } : {}),
       ...dispatchPreferencePayload,
+      ...(autoAcceptFirstBid ? { auto_accept_first_bid: 1 } : {}),
       ...(routeApiData && typeof routeApiData === "object"
         ? { route_api_data: routeApiData }
         : {}),
+        
     },
 
     // ✅ full object too
@@ -6512,6 +6581,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         duration: finalRouteApiDurationMin,
         route_api_distance_km: finalRouteApiDistanceKm,
         ...dispatchPreferencePayload,
+        auto_accept_first_bid: autoAcceptFirstBid ? 1 : 0,
         ride_details: {
           ride_id: rideId,
           pickup_lat: lat,
@@ -6577,6 +6647,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
           ...(dispatchUserLanguage
             ? { user_language: dispatchUserLanguage, language: dispatchUserLanguage }
             : {}),
+            ...(autoAcceptFirstBid ? { auto_accept_first_bid: 1 } : {}),
           ...dispatchPreferencePayload,
           ...(routeApiData && typeof routeApiData === "object"
             ? { route_api_data: routeApiData }
@@ -7751,6 +7822,221 @@ function emitDriverRideRecovery(io, driverId) {
   return true;
 }
 
+async function tryAutoAcceptFirstBid(io, {
+  rideId,
+  driverId,
+  customerFacingDriverId = null,
+  offeredPrice,
+  finalPrice = null,
+  rideSnapshot = null,
+  driverIdentity = null,
+  driverBidPayload = null,
+} = {}) {
+  const safeRideId = toNumber(rideId);
+  const safeDriverId = toNumber(driverId);
+  const acceptedPrice = toNumber(finalPrice) ?? toNumber(offeredPrice);
+
+  if (!safeRideId || !safeDriverId || acceptedPrice === null) {
+    return { handled: false, accepted: false, reason: "invalid_input" };
+  }
+
+  const snapshot =
+    rideSnapshot ??
+    getFullRideSnapshot(safeRideId, safeDriverId) ??
+    getRideDetails(safeRideId) ??
+    driverRideInbox.get(safeDriverId)?.get(safeRideId) ??
+    null;
+
+  if (!isAutoAcceptFirstBidEnabled(snapshot)) {
+    return { handled: false, accepted: false, reason: "auto_accept_disabled" };
+  }
+
+  const alreadyAcceptedDriverId = getActiveDriverByRide(safeRideId);
+  if (alreadyAcceptedDriverId && alreadyAcceptedDriverId !== safeDriverId) {
+    emitRideUnavailable(io, safeDriverId, safeRideId);
+    return { handled: true, accepted: false, reason: "ride_already_accepted" };
+  }
+
+  const userId =
+    toNumber(snapshot?.user_id) ??
+    toNumber(snapshot?.user_details?.user_id) ??
+    toNumber(getUserIdForRide(safeRideId));
+
+  const storedUser = userId ? getUserDetails(userId) : null;
+
+  const accessToken = normalizeToken(
+    pickFirstValue(
+      snapshot?.socket_user_token ,
+      snapshot?.access_token,
+      snapshot?.token,
+      snapshot?.user_token,
+      snapshot?.user_details?.access_token,
+      snapshot?.user_details?.token,
+      snapshot?.user_details?.user_token,
+      storedUser?.access_token,
+      storedUser?.token,
+      storedUser?.user_token,
+      getLiveUserTokenFromRoom(io, userId)
+    )
+  );
+
+  if (!userId || !accessToken) {
+    console.warn("[auto-accept-first-bid] missing user auth; fallback to normal bid flow", {
+      ride_id: safeRideId,
+      driver_id: safeDriverId,
+      has_user_id: !!userId,
+      has_access_token: !!accessToken,
+    });
+
+    return { handled: false, accepted: false, reason: "missing_user_auth" };
+  }
+
+  const acceptedRouteKm = toNumber(
+    pickFirstValue(
+      driverBidPayload?.driver_to_pickup_distance_km,
+      driverBidPayload?.route_api_distance_km,
+      snapshot?.driver_to_pickup_distance_km,
+      snapshot?.route_api_distance_km,
+      snapshot?.distance,
+      snapshot?.route,
+      snapshot?.meta?.driver_to_pickup_distance_km,
+      snapshot?.meta?.route_api_distance_km
+    )
+  );
+
+  const acceptedEtaMin = toNumber(
+    pickFirstValue(
+      getAcceptedDriverToPickupMinutes(driverBidPayload ?? {}, snapshot),
+      driverBidPayload?.driver_to_pickup_duration_min,
+      driverBidPayload?.duration,
+      driverBidPayload?.eta_min,
+      snapshot?.driver_to_pickup_duration_min,
+      snapshot?.duration,
+      snapshot?.eta_min,
+      snapshot?.meta?.driver_to_pickup_duration_min,
+      snapshot?.meta?.duration,
+      snapshot?.meta?.eta_min
+    )
+  );
+
+  const acceptPayload = {
+    user_id: userId,
+    access_token: accessToken,
+    ...buildDriverIdentityPayload(
+      driverIdentity,
+      toNumber(customerFacingDriverId) ?? safeDriverId
+    ),
+    ride_id: safeRideId,
+    offered_price: acceptedPrice,
+    ...(acceptedRouteKm !== null
+      ? {
+          route: acceptedRouteKm,
+          total_distance: acceptedRouteKm,
+        }
+      : {}),
+    ...(acceptedEtaMin !== null
+      ? {
+          eta: acceptedEtaMin,
+          estimated_time: acceptedEtaMin,
+        }
+      : {}),
+  };
+
+  try {
+    const response = await axios.post(
+      `${LARAVEL_BASE_URL}${LARAVEL_ACCEPT_BID_PATH}`,
+      acceptPayload,
+      { timeout: LARAVEL_ACCEPT_BID_TIMEOUT_MS }
+    );
+
+    let parsed = response?.data ?? null;
+    if (typeof parsed === "string") {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch (_) {}
+    }
+
+    const ok =
+      parsed?.status === 1 ||
+      parsed?.success === true ||
+      parsed?.result === true;
+
+    if (!ok) {
+      console.warn("[auto-accept-first-bid] accept API rejected; fallback to normal bid flow", {
+        ride_id: safeRideId,
+        driver_id: safeDriverId,
+        response: parsed,
+      });
+
+      return {
+        handled: false,
+        accepted: false,
+        reason: "accept_api_rejected",
+        details: parsed,
+      };
+    }
+
+    emitUserAcceptOfferResult(io, userId, {
+      success: true,
+      status: USER_ACCEPT_OFFER_STATUS.SUCCESS,
+      ride_id: safeRideId,
+      driver_id: toNumber(customerFacingDriverId) ?? safeDriverId,
+      message: "تم قبول أول عرض تلقائياً وبدء الرحلة بنجاح",
+      reason: null,
+      details: parsed,
+    });
+
+    emitToRideAudience(
+      io,
+      safeRideId,
+      "ride:autoAcceptedFirstBid",
+      {
+        ride_id: safeRideId,
+        driver_id: toNumber(customerFacingDriverId) ?? safeDriverId,
+        provider_id: safeDriverId,
+        offered_price: acceptedPrice,
+        auto_accept_first_bid: 1,
+        at: Date.now(),
+      },
+      userId
+    );
+
+    if (acceptedEtaMin !== null) {
+      emitRouteDataFromAcceptedOffer(io, safeRideId, safeDriverId, acceptedEtaMin);
+    }
+
+    finalizeAcceptedRide(io, safeRideId, safeDriverId, acceptedPrice, {
+      message: "Auto accepted first driver bid",
+      rideDetails: snapshot,
+      userId,
+      driverIdentity,
+    });
+
+    clearDriverBidStatus(safeDriverId, safeRideId);
+
+    console.log("[auto-accept-first-bid] accepted", {
+      ride_id: safeRideId,
+      driver_id: safeDriverId,
+      offered_price: acceptedPrice,
+    });
+
+    return { handled: true, accepted: true, reason: "accepted" };
+  } catch (error) {
+    console.error("[auto-accept-first-bid] accept API failed; fallback to normal bid flow", {
+      ride_id: safeRideId,
+      driver_id: safeDriverId,
+      error: error?.response?.data || error?.message || error,
+    });
+
+    return {
+      handled: false,
+      accepted: false,
+      reason: "accept_api_failed",
+      details: error?.response?.data || error?.message || null,
+    };
+  }
+}
+
 module.exports = (io, socket) => {
   socket.on("driver:getRidesList", (payload = {}) => {
     const { driver_id, recover_active_ride } = payload;
@@ -8896,17 +9182,54 @@ if (removed) {
       return;
     }
 
+    
+    const autoAcceptFirstBid = isAutoAcceptFirstBidEnabled(
+  rideSnapshot ?? getRideDetails(rideId) ?? payload
+);
+
+let autoAcceptLockAcquired = false;
+
+if (autoAcceptFirstBid) {
+  autoAcceptLockAcquired = acquireAutoAcceptFirstBidLock(rideId);
+
+  if (!autoAcceptLockAcquired) {
+    console.log("[auto-accept-first-bid] ignored: another auto accept is in progress", {
+      ride_id: rideId,
+      driver_id: driverId,
+    });
+
+    io.to(driverRoom(driverId)).emit("ride:bidBlocked", {
+      ride_id: rideId,
+      reason: "auto_accept_in_progress",
+      message: "Another driver bid is being auto-accepted",
+      at: Date.now(),
+    });
+
+    return;
+  }
+}
+
+const releaseAutoAcceptLockIfNeeded = () => {
+  if (!autoAcceptLockAcquired) return;
+  releaseAutoAcceptFirstBidLock(rideId);
+  autoAcceptLockAcquired = false;
+};
+
+   let driverBidApiOk = false;
+let bidPayload = null;
+
 driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriverState(rideId, driverId, "bid_submitted", {
       last_offered_price: offeredPrice,
       ...buildDriverIdentityPayload(driverIdentity, driverId),
     });
 
-    if (!driverServiceId || !accessToken) {
+
+if (!driverServiceId || !accessToken) {
   console.log(
     `⚠️ driver:submitBid API skipped: missing driver_service_id/access_token (driver ${driverId})`
   );
 } else {
-  const bidPayload = {
+  bidPayload = {
     ...buildDriverIdentityPayload(driverIdentity, driverId),
     access_token: accessToken,
     driver_service_id: driverServiceId,
@@ -8920,26 +9243,105 @@ driverLastBidStatus.set(driverId, { rideId, responded: false });    markRideDriv
     offered_price: offeredPrice,
     driver_service_id: driverServiceId,
     has_access_token: !!accessToken,
+    auto_accept_first_bid: autoAcceptFirstBid ? 1 : 0,
   });
 
-  axios
-    .post(`${LARAVEL_BASE_URL}${LARAVEL_DRIVER_BID_PATH}`, bidPayload, {
-      timeout: LARAVEL_TIMEOUT_MS,
-    })
-    .then((response) => {
+  if (autoAcceptFirstBid) {
+    try {
+      const response = await axios.post(
+        `${LARAVEL_BASE_URL}${LARAVEL_DRIVER_BID_PATH}`,
+        bidPayload,
+        { timeout: LARAVEL_TIMEOUT_MS }
+      );
+
+      let parsed = response?.data ?? null;
+      if (typeof parsed === "string") {
+        try {
+          parsed = JSON.parse(parsed);
+        } catch (_) {}
+      }
+
+      driverBidApiOk =
+        parsed?.status === 1 ||
+        parsed?.success === true ||
+        parsed?.result === true ||
+        response?.status === 200;
+
       console.log("[driver:submitBid][api-ok]", {
         ride_id: rideId,
         driver_id: driverId,
-        response: response?.data ?? null,
+        response: parsed,
       });
-    })
-    .catch((error) => {
+    } catch (error) {
       console.error("[driver:submitBid][api-failed]", {
         ride_id: rideId,
         driver_id: driverId,
         error: error?.response?.data || error?.message || error,
       });
+    }
+  } else {
+    axios
+      .post(`${LARAVEL_BASE_URL}${LARAVEL_DRIVER_BID_PATH}`, bidPayload, {
+        timeout: LARAVEL_TIMEOUT_MS,
+      })
+      .then((response) => {
+        console.log("[driver:submitBid][api-ok]", {
+          ride_id: rideId,
+          driver_id: driverId,
+          response: response?.data ?? null,
+        });
+      })
+      .catch((error) => {
+        console.error("[driver:submitBid][api-failed]", {
+          ride_id: rideId,
+          driver_id: driverId,
+          error: error?.response?.data || error?.message || error,
+        });
+      });
+  }
+}
+
+if (autoAcceptFirstBid) {
+  if (!driverBidApiOk) {
+    releaseAutoAcceptLockIfNeeded();
+
+    console.warn("[auto-accept-first-bid] driver bid API not confirmed; continuing normal bid flow", {
+      ride_id: rideId,
+      driver_id: driverId,
     });
+  } else {
+    const autoAcceptResult = await tryAutoAcceptFirstBid(io, {
+      rideId,
+      driverId,
+      customerFacingDriverId,
+      offeredPrice,
+      finalPrice,
+      rideSnapshot: getFullRideSnapshot(rideId, driverId) ?? rideSnapshot,
+      driverIdentity,
+      driverBidPayload: {
+        ...(bidPayload ?? {}),
+        ...(payload && typeof payload === "object" ? payload : {}),
+        driver_to_pickup_distance_km: finalDriverToPickupDistanceKm,
+        driver_to_pickup_distance_m: driverToPickupDistanceM,
+        driver_to_pickup_duration_s: finalDriverToPickupDurationS,
+        driver_to_pickup_duration_min: finalDriverToPickupDurationMin,
+        duration: finalDriverToPickupDurationMin,
+        eta_min: finalDriverToPickupDurationMin,
+      },
+    });
+
+    releaseAutoAcceptLockIfNeeded();
+
+    if (autoAcceptResult.handled) {
+      return;
+    }
+
+    console.warn("[auto-accept-first-bid] auto accept failed; continuing normal bid flow", {
+      ride_id: rideId,
+      driver_id: driverId,
+      reason: autoAcceptResult.reason,
+    });
+  }
 }
 // console.log("[driver:submitBid][api-response]", {
 //   ride_id: rideId,
