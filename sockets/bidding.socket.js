@@ -7822,6 +7822,38 @@ function emitDriverRideRecovery(io, driverId) {
   return true;
 }
 
+const AUTO_ACCEPT_PRICE_EPSILON = 0.01;
+
+const getAutoAcceptTargetPrice = (snapshot = null) => {
+  if (!snapshot || typeof snapshot !== "object") return null;
+
+  return toNumber(
+    pickFirstValue(
+      snapshot?.user_bid_price_final,
+      snapshot?.updatedPrice,
+      snapshot?.user_bid_price,
+      snapshot?.price,
+      snapshot?.ride_details?.user_bid_price_final,
+      snapshot?.ride_details?.updatedPrice,
+      snapshot?.ride_details?.user_bid_price,
+      snapshot?.ride_details?.price,
+      snapshot?.meta?.user_bid_price_final,
+      snapshot?.meta?.updatedPrice,
+      snapshot?.meta?.user_bid_price,
+      snapshot?.meta?.price
+    )
+  );
+};
+
+const isSameMoneyValue = (a, b) => {
+  const left = toNumber(a);
+  const right = toNumber(b);
+
+  if (left === null || right === null) return false;
+
+  return Math.abs(round2(left) - round2(right)) <= AUTO_ACCEPT_PRICE_EPSILON;
+};
+
 async function tryAutoAcceptFirstBid(io, {
   rideId,
   driverId,
@@ -7850,6 +7882,24 @@ async function tryAutoAcceptFirstBid(io, {
   if (!isAutoAcceptFirstBidEnabled(snapshot)) {
     return { handled: false, accepted: false, reason: "auto_accept_disabled" };
   }
+  const targetAutoAcceptPrice = getAutoAcceptTargetPrice(snapshot);
+
+if (!isSameMoneyValue(acceptedPrice, targetAutoAcceptPrice)) {
+  console.log("[auto-accept-first-bid] skipped: price mismatch", {
+    ride_id: safeRideId,
+    driver_id: safeDriverId,
+    offered_price: acceptedPrice,
+    target_price: targetAutoAcceptPrice,
+  });
+
+  return {
+    handled: false,
+    accepted: false,
+    reason: "price_mismatch",
+    offered_price: acceptedPrice,
+    target_price: targetAutoAcceptPrice,
+  };
+}
 
   const alreadyAcceptedDriverId = getActiveDriverByRide(safeRideId);
   if (alreadyAcceptedDriverId && alreadyAcceptedDriverId !== safeDriverId) {
