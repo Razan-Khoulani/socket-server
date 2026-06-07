@@ -9183,9 +9183,74 @@ if (removed) {
     }
 
     
-    const autoAcceptFirstBid = isAutoAcceptFirstBidEnabled(
-  rideSnapshot ?? getRideDetails(rideId) ?? payload
-);
+const inboxRideSnapshot = driverRideInbox.get(driverId)?.get(rideId) ?? null;
+const memoryRideSnapshot = getRideDetails(rideId) ?? null;
+const payloadSnapshot = payload && typeof payload === "object" ? payload : null;
+
+const autoAcceptFirstBid =
+  isAutoAcceptFirstBidEnabled(payloadSnapshot) ||
+  isAutoAcceptFirstBidEnabled(memoryRideSnapshot) ||
+  isAutoAcceptFirstBidEnabled(inboxRideSnapshot) ||
+  isAutoAcceptFirstBidEnabled(rideSnapshot);
+
+const rideSnapshotForAutoAccept = {
+  ...(inboxRideSnapshot && typeof inboxRideSnapshot === "object" ? inboxRideSnapshot : {}),
+  ...(memoryRideSnapshot && typeof memoryRideSnapshot === "object" ? memoryRideSnapshot : {}),
+  ...(rideSnapshot && typeof rideSnapshot === "object" ? rideSnapshot : {}),
+
+  auto_accept_first_bid: autoAcceptFirstBid ? 1 : 0,
+
+  socket_user_token: pickFirstValue(
+    memoryRideSnapshot?.socket_user_token,
+    inboxRideSnapshot?.socket_user_token,
+    rideSnapshot?.socket_user_token,
+    payloadSnapshot?.socket_user_token,
+
+    memoryRideSnapshot?.token,
+    inboxRideSnapshot?.token,
+    rideSnapshot?.token,
+    payloadSnapshot?.token,
+
+    memoryRideSnapshot?.user_details?.user_token,
+    inboxRideSnapshot?.user_details?.user_token,
+    rideSnapshot?.user_details?.user_token
+  ),
+
+  meta: {
+    ...(inboxRideSnapshot?.meta && typeof inboxRideSnapshot.meta === "object"
+      ? inboxRideSnapshot.meta
+      : {}),
+    ...(memoryRideSnapshot?.meta && typeof memoryRideSnapshot.meta === "object"
+      ? memoryRideSnapshot.meta
+      : {}),
+    ...(rideSnapshot?.meta && typeof rideSnapshot.meta === "object"
+      ? rideSnapshot.meta
+      : {}),
+    ...(autoAcceptFirstBid ? { auto_accept_first_bid: 1 } : {}),
+  },
+
+  ride_details: {
+    ...(inboxRideSnapshot?.ride_details && typeof inboxRideSnapshot.ride_details === "object"
+      ? inboxRideSnapshot.ride_details
+      : {}),
+    ...(memoryRideSnapshot?.ride_details && typeof memoryRideSnapshot.ride_details === "object"
+      ? memoryRideSnapshot.ride_details
+      : {}),
+    ...(rideSnapshot?.ride_details && typeof rideSnapshot.ride_details === "object"
+      ? rideSnapshot.ride_details
+      : {}),
+    ...(autoAcceptFirstBid ? { auto_accept_first_bid: 1 } : {}),
+  },
+};
+
+console.log("[driver:submitBid][auto-accept-resolve]", {
+  ride_id: rideId,
+  driver_id: driverId,
+  from_payload: isAutoAcceptFirstBidEnabled(payloadSnapshot) ? 1 : 0,
+  from_memory: isAutoAcceptFirstBidEnabled(memoryRideSnapshot) ? 1 : 0,
+  from_inbox: isAutoAcceptFirstBidEnabled(inboxRideSnapshot) ? 1 : 0,
+  resolved: autoAcceptFirstBid ? 1 : 0,
+});
 
 let autoAcceptLockAcquired = false;
 
@@ -9316,8 +9381,7 @@ if (autoAcceptFirstBid) {
       customerFacingDriverId,
       offeredPrice,
       finalPrice,
-      rideSnapshot: getFullRideSnapshot(rideId, driverId) ?? rideSnapshot,
-      driverIdentity,
+rideSnapshot: rideSnapshotForAutoAccept,      driverIdentity,
       driverBidPayload: {
         ...(bidPayload ?? {}),
         ...(payload && typeof payload === "object" ? payload : {}),
