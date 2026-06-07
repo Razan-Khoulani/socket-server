@@ -3587,6 +3587,7 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
 
   const builtCustomer = buildCustomerPayload(payload, user_details ?? customer_details ?? customer ?? null);
   const safeCustomer = sanitizeCustomerForClient(builtCustomer);
+  const publicAutoAcceptFirstBid = isAutoAcceptFirstBidEnabled(payload) ? 1 : 0;
 
   const sanitized = {
     ...stripTokenFields(rest),
@@ -3595,6 +3596,19 @@ const sanitizeRidePayloadForClient = (payload = {}) => {
   if (rest?.meta && typeof rest.meta === "object" && !Array.isArray(rest.meta)) {
     sanitized.meta = stripTokenFields(rest.meta);
   }
+
+  sanitized.auto_accept_first_bid = publicAutoAcceptFirstBid;
+
+if (
+  rest?.ride_details &&
+  typeof rest.ride_details === "object" &&
+  !Array.isArray(rest.ride_details)
+) {
+  sanitized.ride_details = {
+    ...stripTokenFields(rest.ride_details),
+    auto_accept_first_bid: publicAutoAcceptFirstBid,
+  };
+}
 
   if (safeCustomer) {
     const resolvedUserId = toNumber(sanitized.user_id) ?? safeCustomer.user_id ?? null;
