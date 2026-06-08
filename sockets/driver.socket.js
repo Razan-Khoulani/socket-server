@@ -674,19 +674,26 @@ module.exports = (io, socket) => {
         const currentStatus = Number(
           d.new_status ?? d.driver_current_status ?? d.current_status ?? 0
         );
-        const notValidWalletBalance =
-          toNumber(
-            d.not_valid_wallet_balance ??
-              d.not_valid_wallet ??
-              d.wallet_blocked ??
-              null
-          ) ?? 0;
-        const notValidWalletBalanceMsg = String(
-          d.not_valid_wallet_balance_msg ??
-            d.not_valid_wallet_msg ??
-            d.wallet_blocked_message ??
-            ""
-        );
+        const rawWalletState =
+          d.not_valid_wallet_balance ??
+          d.not_valid_wallet ??
+          d.wallet_blocked ??
+          null;
+        const hasWalletStateFromApi =
+          rawWalletState !== null &&
+          rawWalletState !== undefined &&
+          rawWalletState !== "";
+        const notValidWalletBalance = hasWalletStateFromApi
+          ? toNumber(rawWalletState) ?? 0
+          : null;
+        const notValidWalletBalanceMsg = hasWalletStateFromApi
+          ? String(
+              d.not_valid_wallet_balance_msg ??
+                d.not_valid_wallet_msg ??
+                d.wallet_blocked_message ??
+                ""
+            )
+          : "";
         const walletBlocked = Number(notValidWalletBalance) === 1;
         // Keep socket presence online even when wallet is blocked; dispatch layer
         // already excludes blocked wallets from receiving new requests.
@@ -697,9 +704,6 @@ module.exports = (io, socket) => {
           // status/meta
           is_online: canBeOnlineByApi,
           dashboard_is_online: canBeOnlineByApi,
-          not_valid_wallet_balance: walletBlocked ? 1 : 0,
-          not_valid_wallet_balance_msg: notValidWalletBalanceMsg,
-          can_receive_new_requests: walletBlocked ? 0 : 1,
           updatedAt: Date.now(),
           ...(Number.isFinite(resolvedProviderId) ? { provider_id: resolvedProviderId } : {}),
           ...(Number.isFinite(resolvedDriverServiceId)
@@ -734,6 +738,14 @@ module.exports = (io, socket) => {
           ...(driver_gender === 1 || driver_gender === 2 ? { driver_gender } : {}),
           ...(child_seat === 0 || child_seat === 1 ? { child_seat } : {}),
           ...(handicap === 0 || handicap === 1 ? { handicap } : {}),
+          ...(hasWalletStateFromApi
+            ? {
+                not_valid_wallet_balance: walletBlocked ? 1 : 0,
+                not_valid_wallet_balance_msg: notValidWalletBalanceMsg,
+                can_receive_new_requests: walletBlocked ? 0 : 1,
+                wallet_checked_at: Date.now(),
+              }
+            : {}),
         };
 
         driverLocationService.updateMeta(driverId, metaUpdate);
@@ -747,13 +759,16 @@ module.exports = (io, socket) => {
       }
     }
 
-    // ✅ ابعث المرشحين مباشرة عند أونلاين
-    // Sync wallet/block flags from Laravel even when update-current-status
-    // was skipped because access_token was missing in driver-online payload.
-    await syncDriverAdminWalletMeta(driverId, {
-      driverServiceId: socket.driverServiceId ?? driver_service_id ?? null,
-      forceRefresh: true,
-    });
+    const currentMetaAfterStatus = driverLocationService.getMeta(driverId) || {};
+    const hasWalletStateAfterStatus =
+      currentMetaAfterStatus?.not_valid_wallet_balance !== undefined &&
+      currentMetaAfterStatus?.not_valid_wallet_balance !== null;
+    if (!hasWalletStateAfterStatus) {
+      await syncDriverAdminWalletMeta(driverId, {
+        driverServiceId: socket.driverServiceId ?? driver_service_id ?? null,
+        forceRefresh: true,
+      });
+    }
 
     if (typeof biddingSocket.syncDriverProfileIntoInbox === "function") {
       biddingSocket.syncDriverProfileIntoInbox(io, driverId, driverLocationService.getMeta(driverId) || {});

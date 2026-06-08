@@ -6,6 +6,13 @@ const PROFILE_CACHE_TTL_MS = Number.isFinite(
   ? Math.max(5000, Number(process.env.DRIVER_ADMIN_PROFILE_CACHE_TTL_MS))
   : 60 * 1000;
 const profileCache = new Map();
+const inFlightProfileRequests = new Map();
+const profileFetchBackoff = new Map();
+const PROFILE_FETCH_BACKOFF_MS = Number.isFinite(
+  Number(process.env.DRIVER_ADMIN_PROFILE_FETCH_BACKOFF_MS)
+)
+  ? Math.max(1000, Number(process.env.DRIVER_ADMIN_PROFILE_FETCH_BACKOFF_MS))
+  : 15 * 1000;
 
 const LARAVEL_BASE_URL = String(
   process.env.LARAVEL_BASE_URL ||
@@ -133,14 +140,70 @@ const resolvePrimaryServiceCategoryId = (profile = {}) => {
   return ids.length > 0 ? toNumber(ids[0]) : null;
 };
 
-const getCachedProfile = (key) => {
+const getCachedProfile = (key, { allowStale = false } = {}) => {
   const cached = profileCache.get(key);
   if (!cached) return null;
-  if (Date.now() - cached.at > PROFILE_CACHE_TTL_MS) {
+  if (!allowStale && Date.now() - cached.at > PROFILE_CACHE_TTL_MS) {
     profileCache.delete(key);
     return null;
   }
   return cached.value;
+};
+
+const buildCacheKeys = ({ driverId = null, driverServiceId = null } = {}) => [
+  driverServiceId ? `service:${driverServiceId}` : null,
+  driverId ? `driver:${driverId}` : null,
+].filter(Boolean);
+
+const getFirstCachedProfile = (keys = [], options = {}) => {
+  for (const key of keys) {
+    const cached = getCachedProfile(key, options);
+    if (cached) return cached;
+  }
+  return null;
+};
+
+const getInFlightProfileRequest = (keys = []) => {
+  for (const key of keys) {
+    const pending = inFlightProfileRequests.get(key);
+    if (pending) return pending;
+  }
+  return null;
+};
+
+const setInFlightProfileRequest = (keys = [], promise) => {
+  for (const key of keys) {
+    inFlightProfileRequests.set(key, promise);
+  }
+};
+
+const clearInFlightProfileRequest = (keys = [], promise) => {
+  for (const key of keys) {
+    if (!promise || inFlightProfileRequests.get(key) === promise) {
+      inFlightProfileRequests.delete(key);
+    }
+  }
+};
+
+const getProfileFetchBackoffUntil = (keys = []) => {
+  let latestUntil = 0;
+  for (const key of keys) {
+    const until = Number(profileFetchBackoff.get(key) ?? 0);
+    if (until > latestUntil) latestUntil = until;
+  }
+  return latestUntil;
+};
+
+const setProfileFetchBackoffUntil = (keys = [], until = 0) => {
+  for (const key of keys) {
+    profileFetchBackoff.set(key, until);
+  }
+};
+
+const clearProfileFetchBackoff = (keys = []) => {
+  for (const key of keys) {
+    profileFetchBackoff.delete(key);
+  }
 };
 
 const setCachedProfile = (profile = {}) => {
@@ -294,24 +357,52 @@ const getDriverAdminProfile = async ({
     return null;
   }
 
-  const cacheKeys = [
-    safeDriverServiceId ? `service:${safeDriverServiceId}` : null,
-    safeDriverId ? `driver:${safeDriverId}` : null,
-  ].filter(Boolean);
-
-  if (!forceRefresh) {
-    for (const cacheKey of cacheKeys) {
-      const cached = getCachedProfile(cacheKey);
-      if (cached) return cached;
-    }
-  }
-
-  const profile = await fetchDriverAdminProfile({
+  const cacheKeys = buildCacheKeys({
     driverId: safeDriverId,
     driverServiceId: safeDriverServiceId,
   });
 
-  return profile ? setCachedProfile(profile) : null;
+  if (!forceRefresh) {
+    const freshCached = getFirstCachedProfile(cacheKeys);
+    if (freshCached) return freshCached;
+  }
+
+  const sharedRequest = getInFlightProfileRequest(cacheKeys);
+  if (sharedRequest) {
+    return sharedRequest;
+  }
+
+  const staleCached = getFirstCachedProfile(cacheKeys, { allowStale: true });
+  const backoffUntil = getProfileFetchBackoffUntil(cacheKeys);
+  if (backoffUntil > Date.now()) {
+    return staleCached;
+  }
+
+  let fetchPromise;
+  fetchPromise = (async () => {
+    try {
+      const profile = await fetchDriverAdminProfile({
+        driverId: safeDriverId,
+        driverServiceId: safeDriverServiceId,
+      });
+      clearProfileFetchBackoff(cacheKeys);
+      return profile ? setCachedProfile(profile) : staleCached;
+    } catch (error) {
+      setProfileFetchBackoffUntil(
+        cacheKeys,
+        Date.now() + PROFILE_FETCH_BACKOFF_MS
+      );
+      if (staleCached) {
+        return staleCached;
+      }
+      throw error;
+    } finally {
+      clearInFlightProfileRequest(cacheKeys, fetchPromise);
+    }
+  })();
+
+  setInFlightProfileRequest(cacheKeys, fetchPromise);
+  return fetchPromise;
 };
 
 module.exports = {
