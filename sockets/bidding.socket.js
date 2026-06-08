@@ -348,6 +348,22 @@ const isAutoAcceptFirstBidEnabled = (payload = {}) => {
   );
 };
 
+const hasExplicitAutoAcceptFirstBid = (payload = {}) => {
+  if (!payload || typeof payload !== "object") return false;
+
+  return [
+    payload?.auto_accept_first_bid,
+    payload?.auto_accept_first_offer,
+    payload?.instant_accept,
+    payload?.meta?.auto_accept_first_bid,
+    payload?.meta?.auto_accept_first_offer,
+    payload?.meta?.instant_accept,
+    payload?.ride_details?.auto_accept_first_bid,
+    payload?.ride_details?.auto_accept_first_offer,
+    payload?.ride_details?.instant_accept,
+  ].some((value) => value !== undefined && value !== null && value !== "");
+};
+
 const pickFirstPresentValueWithSource = (candidates = []) => {
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== "object") continue;
@@ -2329,6 +2345,86 @@ function emitDriverPatch(io, driverId, ops = []) {
     at: Date.now(),
   });
   return true;
+}
+
+function updateAutoAcceptFirstBidForRide(io, rideId, sourcePayload = {}) {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId || !hasExplicitAutoAcceptFirstBid(sourcePayload)) {
+    return false;
+  }
+
+  const autoAcceptValue = isAutoAcceptFirstBidEnabled(sourcePayload) ? 1 : 0;
+
+  const patchRide = (ride = {}) => {
+    const rideDetails =
+      ride?.ride_details && typeof ride.ride_details === "object"
+        ? ride.ride_details
+        : {};
+
+    const meta =
+      ride?.meta && typeof ride.meta === "object"
+        ? ride.meta
+        : {};
+
+    return attachCustomerFields(
+      {
+        ...ride,
+        auto_accept_first_bid: autoAcceptValue,
+        ride_details: {
+          ...rideDetails,
+          auto_accept_first_bid: autoAcceptValue,
+        },
+        meta: {
+          ...meta,
+          auto_accept_first_bid: autoAcceptValue,
+        },
+        _ts: Date.now(),
+      },
+      ride?.user_details ?? null
+    );
+  };
+
+  const snapshot = getRideDetails(safeRideId);
+  if (snapshot && typeof snapshot === "object") {
+    saveRideDetails(safeRideId, patchRide(snapshot));
+  }
+
+  let updatedDrivers = 0;
+
+  for (const [driverId, box] of driverRideInbox.entries()) {
+    if (!box?.has?.(safeRideId)) continue;
+
+    const currentRide = box.get(safeRideId);
+    if (!currentRide || typeof currentRide !== "object") continue;
+
+    const updatedRide = patchRide(currentRide);
+    box.set(safeRideId, updatedRide);
+
+    emitDriverPatch(io, driverId, [{ op: "upsert", ride: updatedRide }]);
+
+    io.to(driverRoom(driverId)).emit(
+      "ride:bidRequest",
+      sanitizeRidePayloadForClient({
+        ...updatedRide,
+        event_type: "driver_new_bid_request",
+        ui_action: "show_bid_request",
+        auto_open_running: false,
+        is_running_ride: false,
+      })
+    );
+
+    updatedDrivers += 1;
+  }
+
+  if (updatedDrivers > 0) {
+    console.log("[auto-accept-first-bid][patched-existing-drivers]", {
+      ride_id: safeRideId,
+      auto_accept_first_bid: autoAcceptValue,
+      updated_drivers: updatedDrivers,
+    });
+  }
+
+  return updatedDrivers > 0;
 }
 
 function syncDriverProfileIntoInbox(io, driverId, profile = null) {
@@ -5321,6 +5417,7 @@ async function restartRideDispatch(io, payload = {}) {
     expires_at: null,
     timeout_ms: null,
   };
+  updateAutoAcceptFirstBidForRide(io, safeRideId, restartPayload);
 
   return !!(await dispatchToNearbyDrivers(io, restartPayload));
 }
