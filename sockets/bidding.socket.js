@@ -1943,8 +1943,8 @@ const DRIVER_TO_PICKUP_SPEED_KMPH = Number.isFinite(
 // ✅ UPDATED: timeout صار 90 ثانية (ALL TIMER VALUES RETURNED IN SECONDS)
 const RIDE_TIMEOUT_S = Number.isFinite(Number(process.env.RIDE_TIMEOUT_S))
   ? Number(process.env.RIDE_TIMEOUT_S)
-  :120; // ✅ fixed 90 seconds
-const CUSTOMER_SEARCH_TIMEOUT_S = 120;
+  :150; // ✅ fixed 90 seconds
+const CUSTOMER_SEARCH_TIMEOUT_S = 150;
 
 const CANCELLED_RIDE_TTL_MS = 10 * 60 * 1000;
 
