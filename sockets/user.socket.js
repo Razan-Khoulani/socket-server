@@ -47,7 +47,7 @@ const DEFAULT_NEARBY_RADIUS_METERS = 5000;
 const NEARBY_DISPATCH_RADIUS_STEPS_KM = Object.freeze([1, 2, 3, 5, 7, 10, 15, 20]);
 const NEARBY_EVERY_MS = Number.isFinite(Number(process.env.NEARBY_EVERY_MS))
   ? Math.max(1000, Number(process.env.NEARBY_EVERY_MS))
-  : 3000;
+  :10000;
 const MAX_DRIVER_LOCATION_AGE_MS = 2 * 60 * 1000;
 const NEARBY_CENTER_RESET_THRESHOLD_M = Number.isFinite(
   Number(process.env.NEARBY_CENTER_RESET_THRESHOLD_M)
@@ -70,14 +70,22 @@ const NEARBY_FARE_VERSION_CACHE_TTL_MS = Number.isFinite(
   Number(process.env.NEARBY_FARE_VERSION_CACHE_TTL_MS)
 )
   ? Math.max(0, Number(process.env.NEARBY_FARE_VERSION_CACHE_TTL_MS))
-  : 2000;
+  : 15000;
 const NEARBY_FARE_CACHE_TTL_MS = Number.isFinite(
   Number(process.env.NEARBY_FARE_CACHE_TTL_MS)
 )
   ? Math.max(0, Number(process.env.NEARBY_FARE_CACHE_TTL_MS))
-  : 5000;
+  : 15000;
+const NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS = Number.isFinite(
+  Number(process.env.NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS)
+)
+  ? Math.max(0, Number(process.env.NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS))
+  : 1500;
 const serviceSearchRadiusCache = new Map();
+const serviceSearchRadiusInFlight = new Map();
 const nearbyFareVersionCache = new Map();
+const nearbyFareVersionInFlight = new Map();
+const nearbyVehicleFaresInFlight = new Map();
 
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
@@ -650,71 +658,82 @@ const fetchServiceSearchRadiusFromApi = async (serviceCategoryId, serviceTypeId 
     : null;
   if (cachedConfig !== null) return cachedConfig;
 
-  try {
-    const requestPayload = {};
-    if (safeServiceCategoryId) {
-      requestPayload.service_category_id = safeServiceCategoryId;
+  const inFlightKey = `category:${safeServiceCategoryId ?? 0}:type:${safeServiceTypeId ?? 0}`;
+  const inFlightRequest = serviceSearchRadiusInFlight.get(inFlightKey);
+  if (inFlightRequest) return inFlightRequest;
+
+  const requestPromise = (async () => {
+    try {
+      const requestPayload = {};
+      if (safeServiceCategoryId) {
+        requestPayload.service_category_id = safeServiceCategoryId;
+      }
+      if (safeServiceTypeId) {
+        requestPayload.service_type_id = safeServiceTypeId;
+      }
+
+      const res = await axios.post(
+        `${LARAVEL_BASE_URL}${LARAVEL_SERVICE_SEARCH_RADIUS_PATH}`,
+        requestPayload,
+        { timeout: LARAVEL_TIMEOUT_MS }
+      );
+
+      let data = res?.data;
+      if (typeof data === "string") {
+        try {
+          data = JSON.parse(data);
+        } catch (_) {}
+      }
+
+      if (!data || data.status !== 1) return null;
+
+      const resolvedServiceCategoryId = toNumber(data?.service_category_id) ?? safeServiceCategoryId;
+      const radiusMeters = resolveNearbyRadiusFromPayload(data);
+      if (radiusMeters === null) return null;
+
+      const explicitDispatchStages =
+        extractDispatchRadiusStagesMetersFromPayload(data, radiusMeters) ?? null;
+      const dispatchRadiusStagesMeters =
+        Array.isArray(explicitDispatchStages) && explicitDispatchStages.length > 0
+          ? normalizeNearbyDispatchStagesMeters(radiusMeters, explicitDispatchStages)
+          : buildDefaultNearbyDispatchStagesMeters(radiusMeters);
+      const dispatchTimeoutSeconds = extractDispatchTimeoutSecondsFromPayload(
+        data,
+        NEARBY_DISPATCH_TIMEOUT_S
+      );
+      const normalizedConfig = {
+        service_category_id: resolvedServiceCategoryId,
+        radius_m: normalizeNearbyRadiusMeters(radiusMeters),
+        dispatch_radius_stages_m: dispatchRadiusStagesMeters,
+        dispatch_timeout_s: dispatchTimeoutSeconds,
+      };
+
+      nearbyLog("[service-search-radius] ok", {
+        requested_service_category_id: safeServiceCategoryId,
+        requested_service_type_id: safeServiceTypeId,
+        resolved_service_category_id: resolvedServiceCategoryId,
+        radius_m: normalizedConfig.radius_m,
+        dispatch_stages_m: normalizedConfig.dispatch_radius_stages_m,
+        dispatch_timeout_s: normalizedConfig.dispatch_timeout_s,
+      });
+
+      if (resolvedServiceCategoryId !== null) {
+        setCachedServiceSearchRadius(resolvedServiceCategoryId, normalizedConfig);
+      }
+      return normalizedConfig;
+    } catch (e) {
+      console.warn(
+        "[service-search-radius] failed:",
+        e?.response?.data || e?.message || e
+      );
+      return null;
+    } finally {
+      serviceSearchRadiusInFlight.delete(inFlightKey);
     }
-    if (safeServiceTypeId) {
-      requestPayload.service_type_id = safeServiceTypeId;
-    }
+  })();
 
-    const res = await axios.post(
-      `${LARAVEL_BASE_URL}${LARAVEL_SERVICE_SEARCH_RADIUS_PATH}`,
-      requestPayload,
-      { timeout: LARAVEL_TIMEOUT_MS }
-    );
-
-    let data = res?.data;
-    if (typeof data === "string") {
-      try {
-        data = JSON.parse(data);
-      } catch (_) {}
-    }
-
-    if (!data || data.status !== 1) return null;
-
-    const resolvedServiceCategoryId = toNumber(data?.service_category_id) ?? safeServiceCategoryId;
-    const radiusMeters = resolveNearbyRadiusFromPayload(data);
-    if (radiusMeters === null) return null;
-
-    const explicitDispatchStages =
-      extractDispatchRadiusStagesMetersFromPayload(data, radiusMeters) ?? null;
-    const dispatchRadiusStagesMeters =
-      Array.isArray(explicitDispatchStages) && explicitDispatchStages.length > 0
-        ? normalizeNearbyDispatchStagesMeters(radiusMeters, explicitDispatchStages)
-        : buildDefaultNearbyDispatchStagesMeters(radiusMeters);
-    const dispatchTimeoutSeconds = extractDispatchTimeoutSecondsFromPayload(
-      data,
-      NEARBY_DISPATCH_TIMEOUT_S
-    );
-    const normalizedConfig = {
-      service_category_id: resolvedServiceCategoryId,
-      radius_m: normalizeNearbyRadiusMeters(radiusMeters),
-      dispatch_radius_stages_m: dispatchRadiusStagesMeters,
-      dispatch_timeout_s: dispatchTimeoutSeconds,
-    };
-
-    nearbyLog("[service-search-radius] ok", {
-      requested_service_category_id: safeServiceCategoryId,
-      requested_service_type_id: safeServiceTypeId,
-      resolved_service_category_id: resolvedServiceCategoryId,
-      radius_m: normalizedConfig.radius_m,
-      dispatch_stages_m: normalizedConfig.dispatch_radius_stages_m,
-      dispatch_timeout_s: normalizedConfig.dispatch_timeout_s,
-    });
-
-    if (resolvedServiceCategoryId !== null) {
-      setCachedServiceSearchRadius(resolvedServiceCategoryId, normalizedConfig);
-    }
-    return normalizedConfig;
-  } catch (e) {
-    console.warn(
-      "[service-search-radius] failed:",
-      e?.response?.data || e?.message || e
-    );
-    return null;
-  }
+  serviceSearchRadiusInFlight.set(inFlightKey, requestPromise);
+  return requestPromise;
 };
 
 const fetchVehicleFareVersionFromApi = async (serviceCategoryId) => {
@@ -724,37 +743,47 @@ const fetchVehicleFareVersionFromApi = async (serviceCategoryId) => {
   const cachedVersion = getCachedNearbyFareVersion(safeServiceCategoryId);
   if (cachedVersion !== null) return cachedVersion;
 
-  try {
-    const res = await axios.post(
-      `${LARAVEL_BASE_URL}${LARAVEL_VEHICLE_FARE_VERSION_PATH}`,
-      {
-        service_category_id: safeServiceCategoryId,
-      },
-      { timeout: LARAVEL_TIMEOUT_MS }
-    );
+  const inFlightRequest = nearbyFareVersionInFlight.get(safeServiceCategoryId);
+  if (inFlightRequest) return inFlightRequest;
 
-    let data = res?.data;
-    if (typeof data === "string") {
-      try {
-        data = JSON.parse(data);
-      } catch (_) {}
+  const requestPromise = (async () => {
+    try {
+      const res = await axios.post(
+        `${LARAVEL_BASE_URL}${LARAVEL_VEHICLE_FARE_VERSION_PATH}`,
+        {
+          service_category_id: safeServiceCategoryId,
+        },
+        { timeout: LARAVEL_TIMEOUT_MS }
+      );
+
+      let data = res?.data;
+      if (typeof data === "string") {
+        try {
+          data = JSON.parse(data);
+        } catch (_) {}
+      }
+
+      if (!data || data.status !== 1) return null;
+
+      const version = toNumber(data?.config_version);
+      if (version === null) return null;
+
+      setCachedNearbyFareVersion(safeServiceCategoryId, version);
+      return version;
+    } catch (e) {
+      warnThrottled(
+        "vehicle-fares-version-failed",
+        "[vehicle-fares-version] failed:",
+        e?.response?.data || e?.message || e
+      );
+      return null;
+    } finally {
+      nearbyFareVersionInFlight.delete(safeServiceCategoryId);
     }
+  })();
 
-    if (!data || data.status !== 1) return null;
-
-    const version = toNumber(data?.config_version);
-    if (version === null) return null;
-
-    setCachedNearbyFareVersion(safeServiceCategoryId, version);
-    return version;
-  } catch (e) {
-    warnThrottled(
-      "vehicle-fares-version-failed",
-      "[vehicle-fares-version] failed:",
-      e?.response?.data || e?.message || e
-    );
-    return null;
-  }
+  nearbyFareVersionInFlight.set(safeServiceCategoryId, requestPromise);
+  return requestPromise;
 };
 
 const roundMoney = (v) => {
@@ -1145,54 +1174,85 @@ const fetchVehicleFaresFromApi = async (
   pickupLat = null,
   pickupLong = null
 ) => {
-  if (!serviceCategoryId || distanceKm === null) return new Map();
-  try {
-    const payload = {
-      service_category_id: serviceCategoryId,
-      distance_km: distanceKm,
-      vehicle_type_ids: vehicleTypeIds,
-    };
-    if (pickupLat !== null && pickupLong !== null) {
-      payload.pickup_lat = pickupLat;
-      payload.pickup_long = pickupLong;
-    }
+  const safeServiceCategoryId = toNumber(serviceCategoryId);
+  const safeDistanceKm = toNumber(distanceKm);
+  if (!safeServiceCategoryId || safeDistanceKm === null) return new Map();
 
-    const res = await axios.post(
-      `${LARAVEL_BASE_URL}/api/customer/transport/vehicle-fares`,
-      payload,
-      { timeout: LARAVEL_TIMEOUT_MS }
-    );
+  const safePickupLat = toNumber(pickupLat);
+  const safePickupLong = toNumber(pickupLong);
+  const normalizedVehicleTypeIds = (Array.isArray(vehicleTypeIds) ? vehicleTypeIds : [])
+    .map((id) => toNumber(id))
+    .filter((id) => id !== null)
+    .sort((a, b) => a - b);
+  const distanceKey = safeDistanceKm.toFixed(3);
+  const pickupKey =
+    safePickupLat !== null && safePickupLong !== null
+      ? `${safePickupLat.toFixed(5)},${safePickupLong.toFixed(5)}`
+      : "none";
+  const inFlightKey = [
+    `category:${safeServiceCategoryId}`,
+    `distance:${distanceKey}`,
+    `types:${normalizedVehicleTypeIds.join(",")}`,
+    `pickup:${pickupKey}`,
+  ].join("|");
 
-    let data = res?.data;
-    if (typeof data === "string") {
-      try {
-        data = JSON.parse(data);
-      } catch (_) {}
-    }
-    if (data?.status === 1 && Array.isArray(data.items)) {
-      const first = data.items[0] || null;
-      nearbyLog("[vehicle-fares-api] ok", {
-        count: data.items.length,
-        has_driver_distance: !!(first && first.driver_to_pickup_distance_m != null),
-      });
-    }
-    if (!data || data.status !== 1 || !Array.isArray(data.items)) return new Map();
+  const inFlightRequest = nearbyVehicleFaresInFlight.get(inFlightKey);
+  if (inFlightRequest) return inFlightRequest;
 
-    const map = new Map();
-    for (const item of data.items) {
-      const id = toNumber(item?.vehicle_type_id);
-      if (!id) continue;
-      map.set(id, item);
+  const requestPromise = (async () => {
+    try {
+      const payload = {
+        service_category_id: safeServiceCategoryId,
+        distance_km: safeDistanceKm,
+        vehicle_type_ids: normalizedVehicleTypeIds,
+      };
+      if (safePickupLat !== null && safePickupLong !== null) {
+        payload.pickup_lat = safePickupLat;
+        payload.pickup_long = safePickupLong;
+      }
+
+      const res = await axios.post(
+        `${LARAVEL_BASE_URL}/api/customer/transport/vehicle-fares`,
+        payload,
+        { timeout: LARAVEL_TIMEOUT_MS }
+      );
+
+      let data = res?.data;
+      if (typeof data === "string") {
+        try {
+          data = JSON.parse(data);
+        } catch (_) {}
+      }
+      if (data?.status === 1 && Array.isArray(data.items)) {
+        const first = data.items[0] || null;
+        nearbyLog("[vehicle-fares-api] ok", {
+          count: data.items.length,
+          has_driver_distance: !!(first && first.driver_to_pickup_distance_m != null),
+        });
+      }
+      if (!data || data.status !== 1 || !Array.isArray(data.items)) return new Map();
+
+      const map = new Map();
+      for (const item of data.items) {
+        const id = toNumber(item?.vehicle_type_id);
+        if (!id) continue;
+        map.set(id, item);
+      }
+      return map;
+    } catch (e) {
+      warnThrottled(
+        "vehicle-fares-api-failed",
+        "[vehicle-fares-api] failed:",
+        e?.response?.data || e?.message || e
+      );
+      return new Map();
+    } finally {
+      nearbyVehicleFaresInFlight.delete(inFlightKey);
     }
-    return map;
-  } catch (e) {
-    warnThrottled(
-      "vehicle-fares-api-failed",
-      "[vehicle-fares-api] failed:",
-      e?.response?.data || e?.message || e
-    );
-    return new Map();
-  }
+  })();
+
+  nearbyVehicleFaresInFlight.set(inFlightKey, requestPromise);
+  return requestPromise;
 };
 
 // ? NEW: helper extracts road distance from route API response
@@ -1735,6 +1795,7 @@ const setupUserSocket = (io, socket) => {
   socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
   socket.nearbyDriversSearchStartedAt = null;
   socket.nearbyVehicleTypesSearchStartedAt = null;
+  socket.nearbyCandidateCache = new Map();
 
   socket.nearbyServiceTypeId = null;
   socket.nearbyServiceCategoryId = null;
@@ -2182,6 +2243,187 @@ const syncNearbyRadius = async (payload = {}) => {
     });
   };
 
+  const clearNearbyCandidateCache = () => {
+    if (!(socket.nearbyCandidateCache instanceof Map)) {
+      socket.nearbyCandidateCache = new Map();
+      return;
+    }
+    socket.nearbyCandidateCache.clear();
+  };
+
+  const pruneNearbyCandidateCache = () => {
+    if (!(socket.nearbyCandidateCache instanceof Map)) {
+      socket.nearbyCandidateCache = new Map();
+      return;
+    }
+
+    const now = Date.now();
+    for (const [key, entry] of socket.nearbyCandidateCache.entries()) {
+      if (!entry || typeof entry !== "object") {
+        socket.nearbyCandidateCache.delete(key);
+        continue;
+      }
+      if (entry.promise) continue;
+      if (!Number.isFinite(Number(entry.expiresAt)) || Number(entry.expiresAt) <= now) {
+        socket.nearbyCandidateCache.delete(key);
+      }
+    }
+  };
+
+  const buildNearbyCandidateCacheKey = ({
+    lat,
+    long,
+    roadRadius,
+    airCandidateRadius,
+    serviceTypeId = null,
+  }) => {
+    const normalizedLat = normalizeCoordForRouteKey(lat);
+    const normalizedLong = normalizeCoordForRouteKey(long);
+    const requiredGender = toGenderFilter(socket.nearbyRequiredGender);
+    const requiredChildSeat = toOptionalBinaryRequirement(socket.nearbyNeedChildSeat);
+    const requiredHandicap = toOptionalBinaryRequirement(socket.nearbyNeedHandicap);
+    const normalizedServiceTypeId = toNumber(serviceTypeId);
+    const normalizedServiceCategoryId = normalizeServiceCategoryId(
+      socket.nearbyServiceCategoryId
+    );
+
+    return [
+      `lat:${normalizedLat ?? "na"}`,
+      `long:${normalizedLong ?? "na"}`,
+      `road:${Math.round(toNumber(roadRadius) ?? 0)}`,
+      `air:${Math.round(toNumber(airCandidateRadius) ?? 0)}`,
+      `service_type:${normalizedServiceTypeId ?? "all"}`,
+      `service_category:${normalizedServiceCategoryId ?? "all"}`,
+      `gender:${requiredGender ?? "all"}`,
+      `child_seat:${requiredChildSeat ?? "all"}`,
+      `handicap:${requiredHandicap ?? "all"}`,
+    ].join("|");
+  };
+
+  const getNearbyCandidatesSnapshot = async ({
+    lat,
+    long,
+    roadRadius,
+    airCandidateRadius,
+    serviceTypeId = null,
+  }) => {
+    const safeLat = toNumber(lat);
+    const safeLong = toNumber(long);
+    const safeRoadRadius = toNumber(roadRadius);
+    const safeAirCandidateRadius = toNumber(airCandidateRadius);
+    if (
+      safeLat === null ||
+      safeLong === null ||
+      safeRoadRadius === null ||
+      safeAirCandidateRadius === null
+    ) {
+      return {
+        nearbyAll: [],
+        nearbyPreferenceMatched: [],
+        nearbyAvailable: [],
+        roadFilteredCandidates: [],
+        finalCandidates: [],
+        usingAirFallback: false,
+      };
+    }
+
+    pruneNearbyCandidateCache();
+    const cacheKey = buildNearbyCandidateCacheKey({
+      lat: safeLat,
+      long: safeLong,
+      roadRadius: safeRoadRadius,
+      airCandidateRadius: safeAirCandidateRadius,
+      serviceTypeId,
+    });
+
+    const cachedEntry = socket.nearbyCandidateCache.get(cacheKey);
+    const now = Date.now();
+    if (cachedEntry?.value && Number(cachedEntry.expiresAt) > now) {
+      return cachedEntry.value;
+    }
+    if (cachedEntry?.promise) {
+      return cachedEntry.promise;
+    }
+
+    const requestPromise = (async () => {
+      const opts = {
+        only_online: true,
+        max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
+      };
+      const normalizedServiceTypeId = toNumber(serviceTypeId);
+      const requiredGender = toGenderFilter(socket.nearbyRequiredGender);
+      const requiredChildSeat = toOptionalBinaryRequirement(socket.nearbyNeedChildSeat);
+      const requiredHandicap = toOptionalBinaryRequirement(socket.nearbyNeedHandicap);
+
+      if (normalizedServiceTypeId !== null) {
+        opts.service_type_id = normalizedServiceTypeId;
+      }
+      if (requiredGender !== null) {
+        opts.required_gender = requiredGender;
+      }
+      if (requiredChildSeat !== null) {
+        opts.need_child_seat = requiredChildSeat;
+      }
+      if (requiredHandicap !== null) {
+        opts.need_handicap = requiredHandicap;
+      }
+
+      const nearbyAll = driverLocationService.getNearbyDriversFromMemory(
+        safeLat,
+        safeLong,
+        safeAirCandidateRadius,
+        opts
+      );
+      const nearbyPreferenceMatched = applyNearbyDriverPreferenceFilters(nearbyAll);
+      const nearbyAvailable = nearbyPreferenceMatched.filter((driver) => {
+        const driverId = toNumber(driver?.driver_id);
+        return canDriverAppearInNearby(driverId);
+      });
+      const roadFilteredCandidates = await filterDriversByRoadRadius(
+        nearbyAvailable,
+        safeLat,
+        safeLong,
+        safeRoadRadius
+      );
+      const finalCandidates =
+        roadFilteredCandidates.length > 0
+          ? roadFilteredCandidates
+          : buildAirFallbackCandidates(nearbyAvailable);
+
+      return {
+        nearbyAll,
+        nearbyPreferenceMatched,
+        nearbyAvailable,
+        roadFilteredCandidates,
+        finalCandidates,
+        usingAirFallback:
+          roadFilteredCandidates.length === 0 && nearbyAvailable.length > 0,
+      };
+    })();
+
+    socket.nearbyCandidateCache.set(cacheKey, {
+      promise: requestPromise,
+      expiresAt: now + NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS,
+    });
+
+    try {
+      const value = await requestPromise;
+      const nextExpiresAt = Date.now() + NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS;
+      if (NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS > 0) {
+        socket.nearbyCandidateCache.set(cacheKey, {
+          value,
+          expiresAt: nextExpiresAt,
+        });
+      } else {
+        socket.nearbyCandidateCache.delete(cacheKey);
+      }
+      return value;
+    } catch (error) {
+      socket.nearbyCandidateCache.delete(cacheKey);
+      throw error;
+    }
+  };
+
   const setNearbyRouteDistanceKm = (value) => {
     const n = toNumber(value);
     if (n === null) return;
@@ -2218,6 +2460,7 @@ const syncNearbyRadius = async (payload = {}) => {
     socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
     socket.nearbyDriversSearchStartedAt = null;
     socket.nearbyVehicleTypesSearchStartedAt = null;
+    clearNearbyCandidateCache();
     socket.nearbyFareCache.clear();
     socket.lastVehicleTypesSig = null;
     socket.lastPricingSnapshotSigByRide.clear();
@@ -2639,6 +2882,7 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
   const stopNearby = () => {
     stopNearbyDriversLoop();
     stopNearbyVehicleTypesLoop();
+    clearNearbyCandidateCache();
   };
 
   const buildNearbyVehicleTypes = async (lat, long) => {
@@ -2651,36 +2895,18 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       DEFAULT_AIR_CANDIDATE_RADIUS_METERS
     );
 
-    const requiredChildSeat = toOptionalBinaryRequirement(socket.nearbyNeedChildSeat);
-    const requiredHandicap = toOptionalBinaryRequirement(socket.nearbyNeedHandicap);
-
-    const nearbyAll = driverLocationService.getNearbyDriversFromMemory(
+    const nearbySnapshot = await getNearbyCandidatesSnapshot({
       lat,
       long,
+      roadRadius,
       airCandidateRadius,
-      {
-        only_online: true,
-        max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
-        required_gender: socket.nearbyRequiredGender,
-        need_child_seat: requiredChildSeat,
-        need_handicap: requiredHandicap,
-      }
-    );
-    const nearbyPreferenceMatched = applyNearbyDriverPreferenceFilters(nearbyAll);
-
-    const nearbyAvailable = nearbyPreferenceMatched.filter((d) => {
-      const dId = toNumber(d?.driver_id);
-      return canDriverAppearInNearby(dId);
+      serviceTypeId: null,
     });
-
-    const nearbyDrivers = await filterDriversByRoadRadius(
-      nearbyAvailable,
-      lat,
-      long,
-      roadRadius
-    );
-    const nearbyForTypes =
-      nearbyDrivers.length > 0 ? nearbyDrivers : buildAirFallbackCandidates(nearbyAvailable);
+    const nearbyAll = nearbySnapshot.nearbyAll;
+    const nearbyPreferenceMatched = nearbySnapshot.nearbyPreferenceMatched;
+    const nearbyAvailable = nearbySnapshot.nearbyAvailable;
+    const nearbyDrivers = nearbySnapshot.roadFilteredCandidates;
+    const nearbyForTypes = nearbySnapshot.finalCandidates;
 
     nearbyLog("[nearbyVehicleTypes] candidates", {
       socket_id: socket.id,
@@ -2692,7 +2918,7 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       available_candidates: nearbyAvailable.length,
       road_filtered_candidates: nearbyDrivers.length,
       next_radius_m: radiusPlan.nextRadiusMeters,
-      using_air_fallback: nearbyDrivers.length === 0 && nearbyAvailable.length > 0,
+      using_air_fallback: nearbySnapshot.usingAirFallback,
     });
 
     const typesMap = new Map();
@@ -3136,46 +3362,18 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
       DEFAULT_AIR_CANDIDATE_RADIUS_METERS
     );
 
-    const opts = { only_online: true };
-    const requiredChildSeat = toOptionalBinaryRequirement(socket.nearbyNeedChildSeat);
-    const requiredHandicap = toOptionalBinaryRequirement(socket.nearbyNeedHandicap);
-    if (socket.nearbyServiceTypeId !== null) {
-      opts.service_type_id = socket.nearbyServiceTypeId;
-    }
-    if (socket.nearbyRequiredGender !== null) {
-      opts.required_gender = socket.nearbyRequiredGender;
-    }
-    if (requiredChildSeat !== null) {
-      opts.need_child_seat = requiredChildSeat;
-    }
-    if (requiredHandicap !== null) {
-      opts.need_handicap = requiredHandicap;
-    }
-
-    const nearbyAll = driverLocationService.getNearbyDriversFromMemory(
+    const nearbySnapshot = await getNearbyCandidatesSnapshot({
       lat,
       long,
+      roadRadius,
       airCandidateRadius,
-      {
-        ...opts,
-        max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
-      }
-    );
-    const nearbyPreferenceMatched = applyNearbyDriverPreferenceFilters(nearbyAll);
-
-    const nearbyAvailable = nearbyPreferenceMatched.filter((d) => {
-      const dId = toNumber(d?.driver_id);
-      return canDriverAppearInNearby(dId);
+      serviceTypeId: socket.nearbyServiceTypeId,
     });
-
-    const nearby = await filterDriversByRoadRadius(
-      nearbyAvailable,
-      lat,
-      long,
-      roadRadius
-    );
-    const nearbyForEmit =
-      nearby.length > 0 ? nearby : buildAirFallbackCandidates(nearbyAvailable);
+    const nearbyAll = nearbySnapshot.nearbyAll;
+    const nearbyPreferenceMatched = nearbySnapshot.nearbyPreferenceMatched;
+    const nearbyAvailable = nearbySnapshot.nearbyAvailable;
+    const nearby = nearbySnapshot.roadFilteredCandidates;
+    const nearbyForEmit = nearbySnapshot.finalCandidates;
 
     const nearbyWithNormalizedIcons = nearbyForEmit.map((d) => ({
       ...d,
@@ -3198,7 +3396,7 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
       available_candidates: nearbyAvailable.length,
       road_filtered_candidates: nearby.length,
       emitted_candidates: nearbyWithNormalizedIcons.length,
-      using_air_fallback: nearby.length === 0 && nearbyAvailable.length > 0,
+      using_air_fallback: nearbySnapshot.usingAirFallback,
     });
   };
 

@@ -432,6 +432,42 @@ module.exports = (io, socket) => {
     return socket.driverId === newDriverId;
   };
 
+  const normalizeDriverAppState = (value) => {
+    if (value === null || value === undefined || value === "") return null;
+    const normalized = String(value).trim().toLowerCase();
+    if (!normalized) return null;
+    if (["foreground", "active", "open", "visible", "resume", "resumed"].includes(normalized)) {
+      return "foreground";
+    }
+    if (
+      ["background", "inactive", "paused", "pause", "hidden", "sleep", "closed"].includes(
+        normalized
+      )
+    ) {
+      return "background";
+    }
+    return null;
+  };
+
+  const persistDriverAppState = (nextState, driverId = null) => {
+    const normalizedState = normalizeDriverAppState(nextState);
+    if (!normalizedState) return false;
+
+    const now = Date.now();
+    const safeDriverId = toNumber(driverId ?? socket.driverId ?? null);
+    socket.driverAppState = normalizedState;
+    socket.driverAppStateUpdatedAt = now;
+
+    if (safeDriverId) {
+      driverLocationService.updateMeta(safeDriverId, {
+        app_state: normalizedState,
+        app_state_updated_at: now,
+        updatedAt: now,
+      });
+    }
+    return true;
+  };
+
   const emitCandidatesSummaryForDriver = (driverId) => {
     if (
       typeof biddingSocket.emitCandidatesSummaryForDriverStateChange ===
@@ -463,6 +499,8 @@ module.exports = (io, socket) => {
   // ─────────────────────────────
   socket.laravelLocationInterval = null;
   socket.activeRideId = null;
+  socket.driverAppState = null;
+  socket.driverAppStateUpdatedAt = 0;
 
   // ─────────────────────────────
   // Events
@@ -483,6 +521,7 @@ module.exports = (io, socket) => {
       driver_gender,
       child_seat,
       handicap,
+      app_state,
     } = payload || {};
 
     const driverId = toNumber(driver_id);
@@ -557,6 +596,18 @@ module.exports = (io, socket) => {
 
     const hc = toNumber(handicap);
     if (hc === 0 || hc === 1) baseMeta.handicap = hc;
+
+    const resolvedDriverAppState = normalizeDriverAppState(
+      app_state ?? payload?.appState ?? socket.driverAppState ?? null
+    );
+    if (resolvedDriverAppState) {
+      const resolvedAppStateUpdatedAt =
+        toNumber(socket.driverAppStateUpdatedAt) ?? onlineNow;
+      baseMeta.app_state = resolvedDriverAppState;
+      baseMeta.app_state_updated_at = resolvedAppStateUpdatedAt;
+      socket.driverAppState = resolvedDriverAppState;
+      socket.driverAppStateUpdatedAt = resolvedAppStateUpdatedAt;
+    }
 
     driverLocationService.updateMeta(driverId, baseMeta);
 
@@ -787,6 +838,39 @@ module.exports = (io, socket) => {
       driver_detail_id: socket.driverDetailId ?? null,
     });
   });
+
+  const handleDriverAppState = (payload = {}) => {
+    const rawState =
+      typeof payload === "string"
+        ? payload
+        : payload?.state ?? payload?.app_state ?? payload?.appState ?? null;
+    const payloadDriverId = toNumber(
+      typeof payload === "object"
+        ? payload?.driver_id ?? payload?.provider_id ?? null
+        : null
+    );
+    if (payloadDriverId && !bindDriverOnce(payloadDriverId)) {
+      socket.emit("driver:appState:ack", {
+        status: 0,
+        driver_id: socket.driverId ?? null,
+        state: socket.driverAppState ?? null,
+        at: Date.now(),
+      });
+      return;
+    }
+
+    const safeDriverId = toNumber(socket.driverId) ?? payloadDriverId ?? null;
+    const stored = persistDriverAppState(rawState, safeDriverId);
+    socket.emit("driver:appState:ack", {
+      status: stored ? 1 : 0,
+      driver_id: safeDriverId,
+      state: stored ? socket.driverAppState : null,
+      at: stored ? socket.driverAppStateUpdatedAt : Date.now(),
+    });
+  };
+
+  socket.on("driver:appState", handleDriverAppState);
+  socket.on("driverAppState", handleDriverAppState);
 
   socket.on("update-location", ({ lat, long }) => {
     locationLog("[update-location] payload:", { lat, long });

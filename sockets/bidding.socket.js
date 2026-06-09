@@ -1080,6 +1080,28 @@ const getRoomSocketCount = (io, roomName) => {
   const roomSet = io?.sockets?.adapter?.rooms?.get(roomName);
   return roomSet ? roomSet.size : 0;
 };
+const DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS = Number.isFinite(
+  Number(process.env.DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS)
+)
+  ? Math.max(1000, Number(process.env.DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS))
+  : 10000;
+const shouldSkipDriverPushForForegroundApp = (io, driverId) => {
+  const safeDriverId = toNumber(driverId);
+  if (!safeDriverId) return false;
+
+  const roomSockets = getRoomSocketCount(io, driverRoom(safeDriverId));
+  if (roomSockets <= 0) return false;
+
+  const driverMeta = driverLocationService.getMeta(safeDriverId) || {};
+  const appState = String(driverMeta?.app_state ?? "").trim().toLowerCase();
+  const appStateUpdatedAt = toNumber(
+    driverMeta?.app_state_updated_at ?? driverMeta?.appStateUpdatedAt ?? null
+  );
+  if (appState !== "foreground") return false;
+  if (!Number.isFinite(appStateUpdatedAt)) return false;
+
+  return Date.now() - appStateUpdatedAt <= DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS;
+};
 const DISPATCH_EMIT_RETRY_MAX_ATTEMPTS = Number.isFinite(
   Number(process.env.DISPATCH_EMIT_RETRY_MAX_ATTEMPTS)
 )
@@ -2174,19 +2196,8 @@ async function syncDriverUpdateListNotification({
   rideId,
   serviceCategoryId,
   triggerEvent,
-  dispatchPayload,
-  rideModel,
   minPrice,
   maxPrice,
-  minFare,
-  maxFare,
-  routeApiDistanceKm,
-  duration,
-  etaMin,
-  additionalRemarks,
-  isPriceUpdated,
-  serverTime,
-  expiresAt,
 }) {
   if (!driverId || !rideId) {
     console.log("[driver:rides:list][push] skipped: missing fields", {
@@ -2198,52 +2209,22 @@ async function syncDriverUpdateListNotification({
     return false;
   }
 
-  const resolvedMinPrice =
-    toNumber(minPrice) ?? toNumber(minFare) ?? null;
-  const resolvedMaxPrice =
-    toNumber(maxPrice) ?? toNumber(maxFare) ?? null;
-  const resolvedMinFare =
-    toNumber(minFare) ?? resolvedMinPrice;
-  const resolvedMaxFare =
-    toNumber(maxFare) ?? resolvedMaxPrice;
-  const normalizedDispatchPayload =
-    dispatchPayload && typeof dispatchPayload === "object"
-      ? sanitizeRidePayloadForClient(dispatchPayload)
-      : null;
-  const normalizedRideModel =
-    rideModel && typeof rideModel === "object"
-      ? sanitizeRidePayloadForClient(rideModel)
-      : null;
-  const normalizedAdditionalRemarks = toTrimmedText(additionalRemarks);
+  const resolvedMinPrice = toNumber(minPrice) ?? null;
+  const resolvedMaxPrice = toNumber(maxPrice) ?? null;
   const laravelSyncPayload = {
     driver_id: driverId,
     ride_id: rideId,
     service_category_id: serviceCategoryId ?? null,
     min_price: resolvedMinPrice,
     max_price: resolvedMaxPrice,
-    MIN_PRICE: resolvedMinPrice,
-    MAX_PRICE: resolvedMaxPrice,
-    min_fare: resolvedMinFare,
-    max_fare: resolvedMaxFare,
-    route_api_distance_km: toNumber(routeApiDistanceKm),
-    duration: toNumber(duration),
-    eta_min: toNumber(etaMin),
-    additional_remarks: normalizedAdditionalRemarks,
-    additional_remark: normalizedAdditionalRemarks,
-    additional_request: normalizedAdditionalRemarks,
-    isPriceUpdated: isPriceUpdated ? 1 : 0,
-    server_time: toNumber(serverTime),
-    expires_at: toNumber(expiresAt),
     trigger_event: triggerEvent ?? "ride:bidRequest",
-    paired_event: "driver:rides:list",
-    dispatch_payload: normalizedDispatchPayload,
-    ride_model: normalizedRideModel,
   };
   console.log("[driver:rides:list][push] Laravel sync request", {
     driver_id: driverId,
     ride_id: rideId,
+    service_category_id: serviceCategoryId ?? null,
+    trigger_event: triggerEvent ?? "ride:bidRequest",
     payload_bytes: Buffer.byteLength(JSON.stringify(laravelSyncPayload), "utf8"),
-    payload: laravelSyncPayload,
   });
 
   try {
@@ -2262,22 +2243,7 @@ async function syncDriverUpdateListNotification({
       service_category_id: serviceCategoryId ?? null,
       min_price: resolvedMinPrice,
       max_price: resolvedMaxPrice,
-      min_fare: resolvedMinFare,
-      max_fare: resolvedMaxFare,
-      route_api_distance_km: toNumber(routeApiDistanceKm),
-      duration: toNumber(duration),
-      eta_min: toNumber(etaMin),
-      server_time: toNumber(serverTime),
-      expires_at: toNumber(expiresAt),
       trigger_event: triggerEvent ?? null,
-      has_dispatch_payload: !!normalizedDispatchPayload,
-      dispatch_payload_keys: normalizedDispatchPayload
-        ? Object.keys(normalizedDispatchPayload).length
-        : 0,
-      has_ride_model: !!normalizedRideModel,
-      ride_model_keys: normalizedRideModel
-        ? Object.keys(normalizedRideModel).length
-        : 0,
     });
     return true;
   } catch (error) {
@@ -2287,22 +2253,7 @@ async function syncDriverUpdateListNotification({
       service_category_id: serviceCategoryId ?? null,
       min_price: resolvedMinPrice,
       max_price: resolvedMaxPrice,
-      min_fare: resolvedMinFare,
-      max_fare: resolvedMaxFare,
-      route_api_distance_km: toNumber(routeApiDistanceKm),
-      duration: toNumber(duration),
-      eta_min: toNumber(etaMin),
-      server_time: toNumber(serverTime),
-      expires_at: toNumber(expiresAt),
       trigger_event: triggerEvent ?? null,
-      has_dispatch_payload: !!normalizedDispatchPayload,
-      dispatch_payload_keys: normalizedDispatchPayload
-        ? Object.keys(normalizedDispatchPayload).length
-        : 0,
-      has_ride_model: !!normalizedRideModel,
-      ride_model_keys: normalizedRideModel
-        ? Object.keys(normalizedRideModel).length
-        : 0,
       error: error?.response?.data || error?.message || error,
     });
     return false;
@@ -2750,60 +2701,29 @@ async function emitDispatchNotificationSync(payload = {}) {
     return;
   }
 
+  if (shouldSkipDriverPushForForegroundApp(io, safeDriverId)) {
+    console.log("[driver:rides:list][push] skipped: foreground-app", {
+      driver_id: safeDriverId,
+      ride_id: safeRideId,
+      trigger_event: payload?.pushSource ?? null,
+      app_state: "foreground",
+    });
+    return;
+  }
+
   const synced = await syncDriverUpdateListNotification({
     driverId: safeDriverId,
     rideId: safeRideId,
     serviceCategoryId: toNumber(ridePayloadForDriver?.service_category_id),
-    rideModel: bidRequestPayload ?? ridePayloadForDriver ?? null,
     minPrice:
       toNumber(ridePayloadForDriver?.min_price) ??
       toNumber(ridePayloadForDriver?.ride_details?.min_price) ??
-      toNumber(ridePayloadForDriver?.min_fare) ??
-      toNumber(ridePayloadForDriver?.ride_details?.min_fare) ??
       toNumber(ridePayloadForDriver?.min_fare_amount),
     maxPrice:
       toNumber(ridePayloadForDriver?.max_price) ??
       toNumber(ridePayloadForDriver?.ride_details?.max_price) ??
-      toNumber(ridePayloadForDriver?.max_fare) ??
-      toNumber(ridePayloadForDriver?.ride_details?.max_fare) ??
       toNumber(ridePayloadForDriver?.max_fare_amount),
-    minFare:
-      toNumber(ridePayloadForDriver?.min_fare) ??
-      toNumber(ridePayloadForDriver?.ride_details?.min_fare) ??
-      toNumber(ridePayloadForDriver?.min_price) ??
-      toNumber(ridePayloadForDriver?.ride_details?.min_price) ??
-      toNumber(ridePayloadForDriver?.min_fare_amount),
-    maxFare:
-      toNumber(ridePayloadForDriver?.max_fare) ??
-      toNumber(ridePayloadForDriver?.ride_details?.max_fare) ??
-      toNumber(ridePayloadForDriver?.max_price) ??
-      toNumber(ridePayloadForDriver?.ride_details?.max_price) ??
-      toNumber(ridePayloadForDriver?.max_fare_amount),
-    routeApiDistanceKm:
-      toNumber(ridePayloadForDriver?.route_api_distance_km) ??
-      toNumber(ridePayloadForDriver?.ride_details?.route_api_distance_km),
-    duration:
-      toNumber(ridePayloadForDriver?.duration) ??
-      toNumber(ridePayloadForDriver?.ride_details?.duration),
-    etaMin:
-      toNumber(ridePayloadForDriver?.eta_min) ??
-      toNumber(ridePayloadForDriver?.ride_details?.eta_min),
-    additionalRemarks: resolveAdditionalRemarks(
-      ridePayloadForDriver,
-      bidRequestPayload
-    ),
-    isPriceUpdated:
-      ridePayloadForDriver?.isPriceUpdated === true ||
-      ridePayloadForDriver?.isPriceUpdated === 1 ||
-      ridePayloadForDriver?.isPriceUpdated === "1",
-    serverTime:
-      toNumber(ridePayloadForDriver?.server_time) ??
-      toNumber(ridePayloadForDriver?.ride_details?.server_time),
-    expiresAt:
-      toNumber(ridePayloadForDriver?.expires_at) ??
-      toNumber(ridePayloadForDriver?.ride_details?.expires_at),
     triggerEvent: "ride:bidRequest",
-    dispatchPayload: bidRequestPayload ?? ridePayloadForDriver ?? null,
   });
 
   if (synced) {
