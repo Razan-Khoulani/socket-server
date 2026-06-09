@@ -2661,7 +2661,7 @@ function emitDispatchDeliverySummary(io, driverId, ridePayloadForDriver = null) 
   emitDriverInbox(io, safeDriverId, "driver:rides:list");
 }
 
-async function emitDispatchNotificationSync(payload = {}) {
+async function emitDispatchNotificationSync(io, payload = {}) {
   const ridePayloadForDriver = payload?.ridePayloadForDriver;
   const bidRequestPayload =
     payload?.bidRequestPayload && typeof payload?.bidRequestPayload === "object"
@@ -2701,7 +2701,7 @@ async function emitDispatchNotificationSync(payload = {}) {
     return;
   }
 
-  if (shouldSkipDriverPushForForegroundApp(io, safeDriverId)) {
+  if (io && shouldSkipDriverPushForForegroundApp(io, safeDriverId)) {
     console.log("[driver:rides:list][push] skipped: foreground-app", {
       driver_id: safeDriverId,
       ride_id: safeRideId,
