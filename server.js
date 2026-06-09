@@ -1392,6 +1392,17 @@ const normalizeLegacyRideNewPayload = (incoming = {}) => {
 
 app.post("/ride/new", async (req, res) => {
   const dispatchPayload = normalizeLegacyRideNewPayload(req.body);
+  const isRetryDispatch =
+  Number(dispatchPayload?.hard_reset) === 1 ||
+  Number(dispatchPayload?.reset_candidates) === 1 ||
+  Number(dispatchPayload?.no_of_retry) > 0 ||
+  String(dispatchPayload?.dispatch_expand_reason || "").toLowerCase() === "retry";
+
+if (isRetryDispatch) {
+  dispatchPayload.hard_reset = 1;
+  dispatchPayload.reset_candidates = 1;
+  dispatchPayload.rebroadcast_all = 1;
+}
 
   console.log("[ride/new][compat] Incoming legacy request", {
     ride_id: dispatchPayload?.ride_id ?? null,
