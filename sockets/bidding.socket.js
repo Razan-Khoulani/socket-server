@@ -2776,8 +2776,8 @@ function tryEmitBidRequestToDriver(
       ...stateMeta,
       last_emit_reason: "room_empty",
     });
-    void emitDispatchNotificationSync({
-      rideId: safeRideId,
+   void emitDispatchNotificationSync(io, {
+  rideId: safeRideId,
       driverId: safeDriverId,
       bidRequestPayload,
       ridePayloadForDriver,
@@ -2802,8 +2802,8 @@ function tryEmitBidRequestToDriver(
     last_emit_reason: "emitted_ok",
   });
   clearPendingBidEmitRetry(safeRideId, safeDriverId);
-  void emitDispatchNotificationSync({
-    rideId: safeRideId,
+void emitDispatchNotificationSync(io, {
+  rideId: safeRideId,
     driverId: safeDriverId,
     bidRequestPayload,
     ridePayloadForDriver,
