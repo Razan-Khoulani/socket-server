@@ -4451,11 +4451,12 @@ if (rideDetailsPayload) {
 
     io.to(driverRoom(driverId)).emit("ride:queued", queuedPayload);
     emitToRideAudience(io, rideId, "ride:queued", queuedPayload, userId);
-    closeRideBidding(io, rideId, {
-      clearUser: false,
-      preserveQueued: true,
-      preserveSnapshot: true,
-    });
+closeRideBidding(io, rideId, {
+  clearUser: false,
+  preserveQueued: true,
+  preserveSnapshot: true,
+  skipUnavailableForDriverId: driverId,
+});
 
     console.log(
       `🟡 ride queued -> ride ${rideId} reserved for driver ${driverId} until active ride ${currentActiveRideId} ends`
@@ -4489,8 +4490,11 @@ if (rideDetailsPayload) {
     }, driverId),
     userId
   );
-  closeRideBidding(io, rideId, { clearUser: false, preserveSnapshot: true });
-
+closeRideBidding(io, rideId, {
+  clearUser: false,
+  preserveSnapshot: true,
+  skipUnavailableForDriverId: driverId,
+});
   const d = driverLocationService.getDriver(driverId);
   if (d?.lat != null && d?.long != null) {
     emitToRideAudience(
@@ -5497,6 +5501,7 @@ function closeRideBidding(io, rideId, opts = {}) {
   const clearUser = opts.clearUser !== false;
   const preserveQueued = opts.preserveQueued === true;
   const preserveSnapshot = opts.preserveSnapshot === true;
+  const skipUnavailableForDriverId = toNumber(opts.skipUnavailableForDriverId);
   if (clearUser) clearUserRideByRideId(rideId);
   if (!preserveSnapshot) {
     rideDetailsMap.delete(rideId);
@@ -5510,8 +5515,9 @@ function closeRideBidding(io, rideId, opts = {}) {
       if (box.size === 0) driverRideInbox.delete(driverId);
 
       emitDriverPatch(io, driverId, [{ op: "remove", ride_id: rideId }]);
-      emitRideUnavailable(io, driverId, rideId);
-    }
+if (toNumber(driverId) !== skipUnavailableForDriverId) {
+  emitRideUnavailable(io, driverId, rideId);
+}    }
   }
 
   if (!preserveQueued) {
