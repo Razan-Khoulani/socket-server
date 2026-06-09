@@ -1392,17 +1392,6 @@ const normalizeLegacyRideNewPayload = (incoming = {}) => {
 
 app.post("/ride/new", async (req, res) => {
   const dispatchPayload = normalizeLegacyRideNewPayload(req.body);
-  const isRetryDispatch =
-  Number(dispatchPayload?.hard_reset) === 1 ||
-  Number(dispatchPayload?.reset_candidates) === 1 ||
-  Number(dispatchPayload?.no_of_retry) > 0 ||
-  String(dispatchPayload?.dispatch_expand_reason || "").toLowerCase() === "retry";
-
-if (isRetryDispatch) {
-  dispatchPayload.hard_reset = 1;
-  dispatchPayload.reset_candidates = 1;
-  dispatchPayload.rebroadcast_all = 1;
-}
 
   console.log("[ride/new][compat] Incoming legacy request", {
     ride_id: dispatchPayload?.ride_id ?? null,
@@ -1444,8 +1433,7 @@ app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
       dispatchPayload.vehicle_type_id = resolvedServiceTypeId;
     }
   }
-
-   const isRetryDispatch =
+ const isRetryDispatch =
     Number(dispatchPayload?.hard_reset) === 1 ||
     Number(dispatchPayload?.reset_candidates) === 1 ||
     Number(dispatchPayload?.no_of_retry) > 0 ||
@@ -1458,7 +1446,6 @@ app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
     dispatchPayload.force_rebroadcast = 1;
     dispatchPayload.dispatch_expand_reason = "retry";
   }
-
   console.log(
     "[ride-bid-dispatch] Incoming request from Laravel",
     dispatchPayload
