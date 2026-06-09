@@ -1445,6 +1445,20 @@ app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
     }
   }
 
+   const isRetryDispatch =
+    Number(dispatchPayload?.hard_reset) === 1 ||
+    Number(dispatchPayload?.reset_candidates) === 1 ||
+    Number(dispatchPayload?.no_of_retry) > 0 ||
+    String(dispatchPayload?.dispatch_expand_reason || "").toLowerCase() === "retry";
+
+  if (isRetryDispatch) {
+    dispatchPayload.hard_reset = 1;
+    dispatchPayload.reset_candidates = 1;
+    dispatchPayload.rebroadcast_all = 1;
+    dispatchPayload.force_rebroadcast = 1;
+    dispatchPayload.dispatch_expand_reason = "retry";
+  }
+
   console.log(
     "[ride-bid-dispatch] Incoming request from Laravel",
     dispatchPayload
