@@ -1097,10 +1097,26 @@ const shouldSkipDriverPushForForegroundApp = (io, driverId) => {
   const appStateUpdatedAt = toNumber(
     driverMeta?.app_state_updated_at ?? driverMeta?.appStateUpdatedAt ?? null
   );
-  if (appState !== "foreground") return false;
-  if (!Number.isFinite(appStateUpdatedAt)) return false;
+  const stateAgeMs = Number.isFinite(appStateUpdatedAt)
+    ? Date.now() - appStateUpdatedAt
+    : null;
+  const shouldSkip =
+    appState === "foreground" &&
+    Number.isFinite(appStateUpdatedAt) &&
+    stateAgeMs <= DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS;
+  console.log("[driver:rides:list][push] foreground-check", {
+    driver_id: safeDriverId,
+    room_sockets: roomSockets,
+    app_state: appState || null,
+    app_state_updated_at: Number.isFinite(appStateUpdatedAt)
+      ? appStateUpdatedAt
+      : null,
+    state_age_ms: stateAgeMs,
+    ttl_ms: DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS,
+    should_skip: shouldSkip,
+  });
 
-  return Date.now() - appStateUpdatedAt <= DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS;
+  return shouldSkip;
 };
 const DISPATCH_EMIT_RETRY_MAX_ATTEMPTS = Number.isFinite(
   Number(process.env.DISPATCH_EMIT_RETRY_MAX_ATTEMPTS)

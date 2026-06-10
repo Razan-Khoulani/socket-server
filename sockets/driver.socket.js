@@ -600,6 +600,14 @@ module.exports = (io, socket) => {
     const resolvedDriverAppState = normalizeDriverAppState(
       app_state ?? payload?.appState ?? socket.driverAppState ?? null
     );
+    if (app_state !== undefined || payload?.appState !== undefined) {
+      console.log("[driver-online][appState] payload", {
+        driver_id: driverId,
+        raw_app_state: app_state ?? payload?.appState ?? null,
+        normalized_app_state: resolvedDriverAppState,
+        socket_id: socket.id,
+      });
+    }
     if (resolvedDriverAppState) {
       const resolvedAppStateUpdatedAt =
         toNumber(socket.driverAppStateUpdatedAt) ?? onlineNow;
@@ -844,12 +852,28 @@ module.exports = (io, socket) => {
       typeof payload === "string"
         ? payload
         : payload?.state ?? payload?.app_state ?? payload?.appState ?? null;
+    const normalizedState = normalizeDriverAppState(rawState);
     const payloadDriverId = toNumber(
       typeof payload === "object"
         ? payload?.driver_id ?? payload?.provider_id ?? null
         : null
     );
+    console.log("[driver:appState] incoming", {
+      socket_id: socket.id,
+      bound_driver_id: socket.driverId ?? null,
+      payload_driver_id: payloadDriverId,
+      raw_state: rawState,
+      normalized_state: normalizedState,
+      payload,
+    });
     if (payloadDriverId && !bindDriverOnce(payloadDriverId)) {
+      console.log("[driver:appState] bind rejected", {
+        socket_id: socket.id,
+        bound_driver_id: socket.driverId ?? null,
+        payload_driver_id: payloadDriverId,
+        raw_state: rawState,
+        normalized_state: normalizedState,
+      });
       socket.emit("driver:appState:ack", {
         status: 0,
         driver_id: socket.driverId ?? null,
@@ -861,6 +885,15 @@ module.exports = (io, socket) => {
 
     const safeDriverId = toNumber(socket.driverId) ?? payloadDriverId ?? null;
     const stored = persistDriverAppState(rawState, safeDriverId);
+    console.log("[driver:appState] stored", {
+      socket_id: socket.id,
+      driver_id: safeDriverId,
+      raw_state: rawState,
+      normalized_state: normalizedState,
+      stored,
+      persisted_state: socket.driverAppState ?? null,
+      persisted_at: socket.driverAppStateUpdatedAt ?? null,
+    });
     socket.emit("driver:appState:ack", {
       status: stored ? 1 : 0,
       driver_id: safeDriverId,
