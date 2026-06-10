@@ -1080,11 +1080,6 @@ const getRoomSocketCount = (io, roomName) => {
   const roomSet = io?.sockets?.adapter?.rooms?.get(roomName);
   return roomSet ? roomSet.size : 0;
 };
-const DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS = Number.isFinite(
-  Number(process.env.DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS)
-)
-  ? Math.max(1000, Number(process.env.DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS))
-  : 10000;
 const shouldSkipDriverPushForForegroundApp = (io, driverId) => {
   const safeDriverId = toNumber(driverId);
   if (!safeDriverId) return false;
@@ -1097,13 +1092,7 @@ const shouldSkipDriverPushForForegroundApp = (io, driverId) => {
   const appStateUpdatedAt = toNumber(
     driverMeta?.app_state_updated_at ?? driverMeta?.appStateUpdatedAt ?? null
   );
-  const stateAgeMs = Number.isFinite(appStateUpdatedAt)
-    ? Date.now() - appStateUpdatedAt
-    : null;
-  const shouldSkip =
-    appState === "foreground" &&
-    Number.isFinite(appStateUpdatedAt) &&
-    stateAgeMs <= DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS;
+  const shouldSkip = appState === "foreground";
   console.log("[driver:rides:list][push] foreground-check", {
     driver_id: safeDriverId,
     room_sockets: roomSockets,
@@ -1111,8 +1100,6 @@ const shouldSkipDriverPushForForegroundApp = (io, driverId) => {
     app_state_updated_at: Number.isFinite(appStateUpdatedAt)
       ? appStateUpdatedAt
       : null,
-    state_age_ms: stateAgeMs,
-    ttl_ms: DRIVER_PUSH_SKIP_FOREGROUND_TTL_MS,
     should_skip: shouldSkip,
   });
 
