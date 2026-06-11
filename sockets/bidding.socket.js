@@ -13,6 +13,10 @@ const {
   setUserDetails,
 } = require("../store/users.store");
 const {
+  getPricingSnapshot,
+  clearPricingSnapshot,
+} = require("../store/pricingSnapshots.store");
+const {
   clearActiveRideByRideId,
   getActiveRideByDriver,
   getActiveDriverByRide,
@@ -2130,6 +2134,128 @@ const makeTimer = (durationSec = RIDE_TIMEOUT_S) => {
     timeout_ms: durSec, // seconds (kept key name)
   };
 };
+
+const normalizeEpochSecondsForPricing = (value) => {
+  const n = toNumber(value);
+  if (n === null) return null;
+  return n > 1e11 ? Math.floor(n / 1000) : Math.floor(n);
+};
+
+const resolveRetryPricingTimer = (rideDetails = {}, fallbackPayload = {}) => {
+  const serverTime = normalizeEpochSecondsForPricing(
+    rideDetails?.server_time ?? fallbackPayload?.server_time
+  );
+  const expiresAt = normalizeEpochSecondsForPricing(
+    rideDetails?.expires_at ?? fallbackPayload?.expires_at
+  );
+  const timeout = toNumber(
+    rideDetails?.timeout_ms ??
+      fallbackPayload?.timeout_ms ??
+      rideDetails?.customer_offer_timeout_s ??
+      fallbackPayload?.customer_offer_timeout_s ??
+      rideDetails?.user_timeout ??
+      fallbackPayload?.user_timeout ??
+      rideDetails?.dispatch_timeout_s ??
+      fallbackPayload?.dispatch_timeout_s ??
+      null
+  );
+
+  if (serverTime !== null && expiresAt !== null && expiresAt >= serverTime) {
+    return {
+      server_time: serverTime,
+      expires_at: expiresAt,
+      timeout_ms:
+        timeout !== null
+          ? Math.max(1, Math.floor(timeout))
+          : Math.max(1, Math.floor(expiresAt - serverTime)),
+    };
+  }
+
+  return makeTimer(timeout ?? RIDE_TIMEOUT_S);
+};
+
+function emitRetryPricingSnapshotFromCache(io, rideId, fallbackPayload = {}) {
+  const safeRideId = toNumber(rideId);
+  if (!io || !safeRideId) return false;
+
+  const cached = getPricingSnapshot(safeRideId);
+  if (!cached) {
+    console.log("[pricingSnapshot][retry-cache-miss]", {
+      ride_id: safeRideId,
+    });
+    return false;
+  }
+
+  const rideDetails =
+    typeof getRideDetails === "function" ? getRideDetails(safeRideId) : null;
+
+  const timer = resolveRetryPricingTimer(rideDetails || {}, fallbackPayload || {});
+  const userId =
+    toNumber(rideDetails?.user_id) ??
+    toNumber(fallbackPayload?.user_id) ??
+    toNumber(cached?.user_id) ??
+    (typeof getUserIdForRide === "function" ? toNumber(getUserIdForRide(safeRideId)) : null);
+
+  const nextSnapshot = {
+    ...cached,
+    ride_id: safeRideId,
+    user_id: userId ?? cached?.user_id ?? null,
+
+    // ✅ فقط التايمر يتجدد
+    ...timer,
+    customer_offer_timeout_s: timer.timeout_ms,
+    user_timeout: timer.timeout_ms,
+
+    // ✅ لا نعيد حساب vehicle_types ولا fares
+    vehicle_types: Array.isArray(cached?.vehicle_types) ? cached.vehicle_types : [],
+
+    // ✅ حافظ على السعر المخزن، إلا إذا retry payload/rideDetails معه سعر أحدث
+    user_bid_price:
+      rideDetails?.updatedPrice ??
+      fallbackPayload?.updatedPrice ??
+      rideDetails?.user_bid_price ??
+      fallbackPayload?.user_bid_price ??
+      cached?.user_bid_price ??
+      null,
+
+    updatedPrice:
+      rideDetails?.updatedPrice ??
+      fallbackPayload?.updatedPrice ??
+      cached?.updatedPrice ??
+      null,
+
+    isPriceUpdated:
+      rideDetails?.isPriceUpdated === true ||
+      rideDetails?.isPriceUpdated === 1 ||
+      fallbackPayload?.isPriceUpdated === true ||
+      fallbackPayload?.isPriceUpdated === 1 ||
+      cached?.isPriceUpdated === true ||
+      cached?.isPriceUpdated === 1,
+
+    source: "retry-cache",
+    retry: 1,
+    retry_snapshot: 1,
+    updatedAt: Date.now(),
+    at: Date.now(),
+  };
+
+  let emitter = io.to(rideRoom(safeRideId));
+  if (userId) {
+    emitter = emitter.to(userRoom(userId));
+  }
+
+  emitter.emit("ride:pricingSnapshot", nextSnapshot);
+
+  console.log("[pricingSnapshot][retry-cache-emit]", {
+    ride_id: safeRideId,
+    user_id: userId ?? null,
+    timeout_ms: timer.timeout_ms,
+    expires_at: timer.expires_at,
+    vehicle_types: nextSnapshot.vehicle_types.length,
+  });
+
+  return true;
+}
 
 async function syncDriverRejectNotification({
   driverId,
@@ -5346,7 +5472,13 @@ async function restartRideDispatch(io, payload = {}) {
   };
   updateAutoAcceptFirstBidForRide(io, safeRideId, restartPayload);
 
-  return !!(await dispatchToNearbyDrivers(io, restartPayload));
+const ok = !!(await dispatchToNearbyDrivers(io, restartPayload));
+
+if (ok) {
+  emitRetryPricingSnapshotFromCache(io, safeRideId, restartPayload);
+}
+
+return ok;
 }
 
 // ✅ remove ride from all drivers inboxes (safe global scan) + PATCH remove
@@ -5460,6 +5592,7 @@ if (toNumber(driverId) !== skipUnavailableForDriverId) {
   rideCandidates.delete(rideId);
   clearRideDriverStates(rideId);
   clearRideStateTouch(rideId);
+  clearPricingSnapshot(rideId);
 }
 
 // ─────────────────────────────

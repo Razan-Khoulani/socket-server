@@ -9,6 +9,9 @@ const {
   deleteUserDetails,
 } = require("../store/users.store");
 const { getRideStatusSnapshot } = require("../store/rideStatusSnapshots.store");
+const {
+  savePricingSnapshot,
+} = require("../store/pricingSnapshots.store");
 
 // ? UPDATED: add getActiveRideByDriver so we can exclude busy drivers from nearby/types
 const { getActiveDriverByRide, getActiveRideByDriver } = require("../store/activeRides.store");
@@ -3307,32 +3310,38 @@ item.max_price = hasExplicitBounds
       pricingEmitter = pricingEmitter.to(userRoom(socket.userId));
     }
 
-    pricingEmitter.emit("ride:pricingSnapshot", {
-      ride_id: rideId,
-      ...(timer ? timer : {}),
-      customer_offer_timeout_s: pricingCustomerOfferTimeout,
-      user_timeout: pricingUserTimeout,
-      user_bid_price: userPrice,
-      base_fare: snapshotBaseFare,
-      estimated_fare: snapshotEstimatedFare,
-      min_price: snapshotMinPrice,
-      max_price: snapshotMaxPrice,
-      isPriceUpdated: !!rideDetails?.isPriceUpdated,
-      updatedPrice: rideDetails?.updatedPrice ?? null,
-      updatedAt: rideDetails?.updatedAt ?? null,
-      pickup: {
-        lat: rideDetails?.pickup_lat ?? socket.nearbyCenter?.lat ?? null,
-        long: rideDetails?.pickup_long ?? socket.nearbyCenter?.long ?? null,
-        address: rideDetails?.pickup_address ?? null,
-      },
-      destination: {
-        lat: rideDetails?.destination_lat ?? null,
-        long: rideDetails?.destination_long ?? null,
-        address: rideDetails?.destination_address ?? null,
-      },
-      vehicle_types: pricingTypes,
-      at: Date.now(),
-    });
+const pricingSnapshotPayload = {
+  ride_id: rideId,
+  user_id: socket.userId ?? null,
+  ...(timer ? timer : {}),
+  customer_offer_timeout_s: pricingCustomerOfferTimeout,
+  user_timeout: pricingUserTimeout,
+  user_bid_price: userPrice,
+  base_fare: snapshotBaseFare,
+  estimated_fare: snapshotEstimatedFare,
+  min_price: snapshotMinPrice,
+  max_price: snapshotMaxPrice,
+  isPriceUpdated: !!rideDetails?.isPriceUpdated,
+  updatedPrice: rideDetails?.updatedPrice ?? null,
+  updatedAt: rideDetails?.updatedAt ?? null,
+  pickup: {
+    lat: rideDetails?.pickup_lat ?? socket.nearbyCenter?.lat ?? null,
+    long: rideDetails?.pickup_long ?? socket.nearbyCenter?.long ?? null,
+    address: rideDetails?.pickup_address ?? null,
+  },
+  destination: {
+    lat: rideDetails?.destination_lat ?? null,
+    long: rideDetails?.destination_long ?? null,
+    address: rideDetails?.destination_address ?? null,
+  },
+  vehicle_types: pricingTypes,
+  source: "nearbyVehicleTypes",
+  at: Date.now(),
+};
+
+savePricingSnapshot(rideId, pricingSnapshotPayload);
+
+pricingEmitter.emit("ride:pricingSnapshot", pricingSnapshotPayload);
     if (DEBUG_EVENTS) {
       console.log("[ride:pricingSnapshot] emitted", {
         ride_id: rideId,

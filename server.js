@@ -1392,6 +1392,19 @@ const normalizeLegacyRideNewPayload = (incoming = {}) => {
 
 app.post("/ride/new", async (req, res) => {
   const dispatchPayload = normalizeLegacyRideNewPayload(req.body);
+  const isRetryDispatch =
+  Number(dispatchPayload?.hard_reset) === 1 ||
+  Number(dispatchPayload?.reset_candidates) === 1 ||
+  Number(dispatchPayload?.no_of_retry) > 0 ||
+  String(dispatchPayload?.dispatch_expand_reason || "").toLowerCase() === "retry";
+
+if (isRetryDispatch) {
+  dispatchPayload.hard_reset = 1;
+  dispatchPayload.reset_candidates = 1;
+  dispatchPayload.rebroadcast_all = 1;
+  dispatchPayload.force_rebroadcast = 1;
+  dispatchPayload.dispatch_expand_reason = "retry";
+}
 
   console.log("[ride/new][compat] Incoming legacy request", {
     ride_id: dispatchPayload?.ride_id ?? null,
@@ -1434,6 +1447,20 @@ app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
     }
   }
 
+  const isRetryDispatch =
+  Number(dispatchPayload?.hard_reset) === 1 ||
+  Number(dispatchPayload?.reset_candidates) === 1 ||
+  Number(dispatchPayload?.no_of_retry) > 0 ||
+  String(dispatchPayload?.dispatch_expand_reason || "").toLowerCase() === "retry";
+
+if (isRetryDispatch) {
+  dispatchPayload.hard_reset = 1;
+  dispatchPayload.reset_candidates = 1;
+  dispatchPayload.rebroadcast_all = 1;
+  dispatchPayload.force_rebroadcast = 1;
+  dispatchPayload.dispatch_expand_reason = "retry";
+}
+
   console.log(
     "[ride-bid-dispatch] Incoming request from Laravel",
     dispatchPayload
@@ -1450,6 +1477,12 @@ app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
       dispatchPayload?.additional_remark ??
       dispatchPayload?.additional_request ??
       null,
+      hard_reset: dispatchPayload?.hard_reset ?? null,
+reset_candidates: dispatchPayload?.reset_candidates ?? null,
+rebroadcast_all: dispatchPayload?.rebroadcast_all ?? null,
+force_rebroadcast: dispatchPayload?.force_rebroadcast ?? null,
+dispatch_expand_reason: dispatchPayload?.dispatch_expand_reason ?? null,
+no_of_retry: dispatchPayload?.no_of_retry ?? null,
   });
 
   try {
@@ -2687,6 +2720,7 @@ app.post("/events/internal/ride-dispatch-retry", async (req, res) => {
     hard_reset: 1,
     reset_candidates: 1,
     rebroadcast_all: 1,
+    force_rebroadcast: 1,
     ...(rad !== null ? { radius: rad } : {}),
     ...(dispatchTimeoutSec !== null ? { dispatch_timeout_s: dispatchTimeoutSec } : {}),
   });
