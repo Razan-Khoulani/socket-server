@@ -1390,7 +1390,17 @@ const normalizeLegacyRideNewPayload = (incoming = {}) => {
   return normalized;
 };
 
-app.post("/ride/new", async (req, res) => {
+const runDetachedInternalJob = (label, job) => {
+  setImmediate(() => {
+    Promise.resolve()
+      .then(() => job())
+      .catch((error) => {
+        console.error(`[${label}] Failed:`, error?.message || error);
+      });
+  });
+};
+
+app.post("/ride/new", (req, res) => {
   const dispatchPayload = normalizeLegacyRideNewPayload(req.body);
   const isRetryDispatch =
   Number(dispatchPayload?.hard_reset) === 1 ||
@@ -1422,16 +1432,19 @@ if (isRetryDispatch) {
       : 0,
   });
 
-  try {
+  res.json({ status: 1, queued: 1, compat: 1 });
+
+  runDetachedInternalJob("ride/new][compat", async () => {
     const ok = await biddingSocket.restartRideDispatch(io, dispatchPayload);
-    res.json({ status: ok ? 1 : 0, compat: 1 });
-  } catch (e) {
-    console.error("[ride/new][compat] Failed:", e.message);
-    res.status(500).json({ status: 0, message: "Dispatch failed", compat: 1 });
-  }
+    if (!ok) {
+      console.warn("[ride/new][compat] restartRideDispatch returned false", {
+        ride_id: dispatchPayload?.ride_id ?? null,
+      });
+    }
+  });
 });
 
-app.post("/events/internal/ride-bid-dispatch", async (req, res) => {
+app.post("/events/internal/ride-bid-dispatch", (req, res) => {
   const dispatchPayload =
     req.body && typeof req.body === "object"
       ? { ...req.body, force_new_search_window: 1 }
@@ -1479,19 +1492,22 @@ if (isRetryDispatch) {
       null,
       hard_reset: dispatchPayload?.hard_reset ?? null,
 reset_candidates: dispatchPayload?.reset_candidates ?? null,
-rebroadcast_all: dispatchPayload?.rebroadcast_all ?? null,
-force_rebroadcast: dispatchPayload?.force_rebroadcast ?? null,
-dispatch_expand_reason: dispatchPayload?.dispatch_expand_reason ?? null,
-no_of_retry: dispatchPayload?.no_of_retry ?? null,
+    rebroadcast_all: dispatchPayload?.rebroadcast_all ?? null,
+    force_rebroadcast: dispatchPayload?.force_rebroadcast ?? null,
+    dispatch_expand_reason: dispatchPayload?.dispatch_expand_reason ?? null,
+    no_of_retry: dispatchPayload?.no_of_retry ?? null,
   });
 
-  try {
+  res.json({ status: 1, queued: 1 });
+
+  runDetachedInternalJob("ride-bid-dispatch", async () => {
     const ok = await biddingSocket.restartRideDispatch(io, dispatchPayload);
-    res.json({ status: ok ? 1 : 0 });
-  } catch (e) {
-    console.error("[ride-bid-dispatch] Failed:", e.message);
-    res.status(500).json({ status: 0, message: "Dispatch failed" });
-  }
+    if (!ok) {
+      console.warn("[ride-bid-dispatch] restartRideDispatch returned false", {
+        ride_id: dispatchPayload?.ride_id ?? null,
+      });
+    }
+  });
 });
 
 app.post("/events/internal/service-settings-updated", (req, res) => {
@@ -1572,21 +1588,24 @@ app.post("/events/internal/ride-user-accepted", (req, res) => {
         }
       : null;
 
-  if (typeof biddingSocket.finalizeAcceptedRide === "function") {
-    biddingSocket.finalizeAcceptedRide(io, rideId, driverId, finalPrice, {
-      message: message || "User accepted the offer",
-      rideDetails: rideDetailsPayload,
-      driverIdentity: {
-        provider_id: driverId,
-        driver_detail_id: Number.isFinite(driverDetailId) ? driverDetailId : null,
-        driver_service_id: Number.isFinite(driverServiceId) ? driverServiceId : null,
-      },
-    });
-  } else {
-    console.warn("[ride-user-accepted] finalizeAcceptedRide is not available");
-  }
+  res.json({ status: 1, queued: 1 });
 
-  return res.json({ status: 1 });
+  runDetachedInternalJob("ride-user-accepted", async () => {
+    if (typeof biddingSocket.finalizeAcceptedRide === "function") {
+      biddingSocket.finalizeAcceptedRide(io, rideId, driverId, finalPrice, {
+        message: message || "User accepted the offer",
+        rideDetails: rideDetailsPayload,
+        driverIdentity: {
+          provider_id: driverId,
+          driver_detail_id: Number.isFinite(driverDetailId) ? driverDetailId : null,
+          driver_service_id: Number.isFinite(driverServiceId) ? driverServiceId : null,
+        },
+      });
+      return;
+    }
+
+    console.warn("[ride-user-accepted] finalizeAcceptedRide is not available");
+  });
 });
 
 app.post("/events/internal/ride-extra-distance-accepted", (req, res) => {

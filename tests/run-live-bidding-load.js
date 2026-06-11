@@ -89,15 +89,29 @@ const USER_READY_WAIT_MS = Number.isFinite(Number(process.env.USER_READY_WAIT_MS
 const SOCKET_CONNECT_TIMEOUT_MS = Number.isFinite(Number(process.env.SOCKET_CONNECT_TIMEOUT_MS))
   ? Math.max(1000, Number(process.env.SOCKET_CONNECT_TIMEOUT_MS))
   : 10000;
+const SOCKET_HTTP_TIMEOUT_MS = Number.isFinite(Number(process.env.SOCKET_HTTP_TIMEOUT_MS))
+  ? Math.max(1000, Number(process.env.SOCKET_HTTP_TIMEOUT_MS))
+  : 10000;
+const LARAVEL_HTTP_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_HTTP_TIMEOUT_MS))
+  ? Math.max(1000, Number(process.env.LARAVEL_HTTP_TIMEOUT_MS))
+  : 10000;
 const HEARTBEAT_INTERVAL_MS = Number.isFinite(Number(process.env.HEARTBEAT_INTERVAL_MS))
   ? Math.max(1000, Number(process.env.HEARTBEAT_INTERVAL_MS))
   : 2000;
 const DRIVER_APP_STATE = String(process.env.DRIVER_APP_STATE || "foreground").trim().toLowerCase();
+const MATCH_SCENARIO_DRIVER_SERVICE_TYPE =
+  String(process.env.MATCH_SCENARIO_DRIVER_SERVICE_TYPE || "0") === "1";
+const TARGET_ASSIGNED_DRIVER_ONLY =
+  String(process.env.TARGET_ASSIGNED_DRIVER_ONLY || "0") === "1";
+const MANUAL_DISPATCH_AFTER_BOOKING =
+  String(process.env.MANUAL_DISPATCH_AFTER_BOOKING || "1") === "1";
 
 const ENABLE_USER_COUNTER = String(process.env.ENABLE_USER_COUNTER || "1") === "1";
 const ENABLE_DRIVER_ACCEPT_COUNTER =
   String(process.env.ENABLE_DRIVER_ACCEPT_COUNTER || "1") === "1";
 const ENABLE_USER_ACCEPT = String(process.env.ENABLE_USER_ACCEPT || "1") === "1";
+const AUTO_USER_ACCEPT_FIRST_BID =
+  String(process.env.AUTO_USER_ACCEPT_FIRST_BID || "0") === "1";
 const USER_COUNTER_DELTA = Number.isFinite(Number(process.env.USER_COUNTER_DELTA))
   ? Math.max(0, Number(process.env.USER_COUNTER_DELTA))
   : 700;
@@ -116,6 +130,9 @@ const USER_COUNTER_DELAY_MS = Number.isFinite(Number(process.env.USER_COUNTER_DE
 const DRIVER_ACCEPT_DELAY_MS = Number.isFinite(Number(process.env.DRIVER_ACCEPT_DELAY_MS))
   ? Math.max(0, Number(process.env.DRIVER_ACCEPT_DELAY_MS))
   : 150;
+const USER_ACCEPT_DELAY_MS = Number.isFinite(Number(process.env.USER_ACCEPT_DELAY_MS))
+  ? Math.max(0, Number(process.env.USER_ACCEPT_DELAY_MS))
+  : 0;
 
 const USER_IDS = String(process.env.USER_IDS || "")
   .split(",")
@@ -128,11 +145,11 @@ const DRIVER_IDS = String(process.env.DRIVER_IDS || "")
 
 const httpSocket = axios.create({
   baseURL: SOCKET_HTTP_URL,
-  timeout: 10000,
+  timeout: SOCKET_HTTP_TIMEOUT_MS,
 });
 const httpLaravel = axios.create({
   baseURL: LARAVEL_URL,
-  timeout: 10000,
+  timeout: LARAVEL_HTTP_TIMEOUT_MS,
 });
 
 const metrics = {
@@ -170,6 +187,85 @@ const randomInt = (min, max) => {
   const safeMax = Math.floor(Math.max(min, max));
   return safeMin + Math.floor(Math.random() * (safeMax - safeMin + 1));
 };
+
+const toFiniteNumber = (value) => {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : null;
+};
+
+const resolveBidBounds = (payload = {}) => {
+  const minPrice = toFiniteNumber(
+    payload?.min_price ??
+      payload?.minimum_price ??
+      payload?.price_anchor_min_price ??
+      null
+  );
+  const maxPrice = toFiniteNumber(
+    payload?.max_price ??
+      payload?.maximum_price ??
+      payload?.price_anchor_max_price ??
+      null
+  );
+
+  if (minPrice !== null && maxPrice !== null) {
+    return {
+      min: Math.min(minPrice, maxPrice),
+      max: Math.max(minPrice, maxPrice),
+      source: "payload",
+    };
+  }
+
+  return {
+    min: DRIVER_BID_MIN,
+    max: DRIVER_BID_MAX,
+    source: "fallback",
+  };
+};
+
+const chooseDriverBidPrice = (payload = {}) => {
+  const bounds = resolveBidBounds(payload);
+  const integerMin = Math.ceil(bounds.min);
+  const integerMax = Math.floor(bounds.max);
+
+  if (Number.isFinite(integerMin) && Number.isFinite(integerMax) && integerMin <= integerMax) {
+    return randomInt(integerMin, integerMax);
+  }
+
+  const fallbackValue =
+    toFiniteNumber(bounds.min) ??
+    toFiniteNumber(bounds.max) ??
+    DRIVER_BID_MIN;
+
+  return Math.max(1, Math.round(fallbackValue));
+};
+
+const chooseUserCounterPrice = (payload = {}) => {
+  const bounds = resolveBidBounds(payload);
+  const offeredPrice = toFiniteNumber(payload?.offered_price ?? payload?.price ?? null);
+  const minBound = toFiniteNumber(bounds.min) ?? 1;
+  const maxBound = toFiniteNumber(bounds.max) ?? offeredPrice ?? minBound;
+
+  if (offeredPrice === null) {
+    return Math.max(1, Math.round(Math.min(Math.max(minBound, 1), maxBound)));
+  }
+
+  const desiredCounter = offeredPrice - USER_COUNTER_DELTA;
+  const highestAllowedCounter = Math.min(maxBound, offeredPrice - 1);
+  const clampedCounter = Math.max(minBound, Math.min(highestAllowedCounter, desiredCounter));
+
+  if (!Number.isFinite(clampedCounter) || highestAllowedCounter < minBound) {
+    return null;
+  }
+
+  return Math.max(1, Math.round(clampedCounter));
+};
+
+const resolveScenarioDispatchStartedAt = (scenario = {}) =>
+  scenario?.timestamps?.dispatchRequestedAt ??
+  scenario?.timestamps?.dispatchSentAt ??
+  scenario?.timestamps?.rideCreatedAt ??
+  scenario?.timestamps?.startedAt ??
+  null;
 
 const round2 = (value) =>
   Number.isFinite(value) ? Math.round(value * 100) / 100 : null;
@@ -250,7 +346,7 @@ const fetchUsers = async (pool) => {
       `
         SELECT
           u.id AS user_id,
-          u.access_token,
+          CAST(u.access_token AS CHAR) AS access_token,
           u.first_name,
           u.last_name
         FROM users u
@@ -271,7 +367,7 @@ const fetchUsers = async (pool) => {
     `
       SELECT
         u.id AS user_id,
-        u.access_token,
+        CAST(u.access_token AS CHAR) AS access_token,
         u.first_name,
         u.last_name
       FROM users u
@@ -293,25 +389,31 @@ const fetchDrivers = async (pool) => {
     const placeholders = DRIVER_IDS.map(() => "?").join(",");
     const params = [...DRIVER_IDS, SERVICE_CATEGORY_ID];
     let typeFilterSql = "";
-    if (Number.isFinite(REQUEST_SERVICE_TYPE_ID) && REQUEST_SERVICE_TYPE_ID > 0) {
-      typeFilterSql = " AND td.vehicle_type_id = ? ";
+    if (
+      !MATCH_SCENARIO_DRIVER_SERVICE_TYPE &&
+      Number.isFinite(REQUEST_SERVICE_TYPE_ID) &&
+      REQUEST_SERVICE_TYPE_ID > 0
+    ) {
+      typeFilterSql = " AND tdvl.vehicle_type_id = ? ";
       params.push(REQUEST_SERVICE_TYPE_ID);
     }
     const [rows] = await pool.query(
       `
         SELECT
           p.id AS driver_id,
-          p.access_token,
+          CAST(p.access_token AS CHAR) AS access_token,
           p.first_name,
           p.last_name,
           ps.id AS driver_service_id,
           ps.service_cat_id AS service_category_id,
-          COALESCE(td.vehicle_type_id, 0) AS service_type_id
+          COALESCE(tdvl.vehicle_type_id, 0) AS service_type_id
         FROM providers p
         INNER JOIN provider_services ps
           ON ps.provider_id = p.id
         LEFT JOIN transport_driver_details td
           ON td.provider_service_id = ps.id
+        LEFT JOIN transport_driver_vehicle_lists tdvl
+          ON tdvl.id = td.vehicle_type_id
         WHERE p.id IN (${placeholders})
           AND p.deleted_at IS NULL
           AND p.access_token IS NOT NULL
@@ -330,25 +432,31 @@ const fetchDrivers = async (pool) => {
 
   const params = [SERVICE_CATEGORY_ID, limit];
   let typeFilterSql = "";
-  if (Number.isFinite(REQUEST_SERVICE_TYPE_ID) && REQUEST_SERVICE_TYPE_ID > 0) {
-    typeFilterSql = " AND td.vehicle_type_id = ? ";
+  if (
+    !MATCH_SCENARIO_DRIVER_SERVICE_TYPE &&
+    Number.isFinite(REQUEST_SERVICE_TYPE_ID) &&
+    REQUEST_SERVICE_TYPE_ID > 0
+  ) {
+    typeFilterSql = " AND tdvl.vehicle_type_id = ? ";
     params.splice(1, 0, REQUEST_SERVICE_TYPE_ID);
   }
   const [rows] = await pool.query(
     `
       SELECT
         p.id AS driver_id,
-        p.access_token,
+        CAST(p.access_token AS CHAR) AS access_token,
         p.first_name,
         p.last_name,
         ps.id AS driver_service_id,
         ps.service_cat_id AS service_category_id,
-        COALESCE(td.vehicle_type_id, 0) AS service_type_id
+        COALESCE(tdvl.vehicle_type_id, 0) AS service_type_id
       FROM providers p
       INNER JOIN provider_services ps
         ON ps.provider_id = p.id
       LEFT JOIN transport_driver_details td
         ON td.provider_service_id = ps.id
+      LEFT JOIN transport_driver_vehicle_lists tdvl
+        ON tdvl.id = td.vehicle_type_id
       WHERE p.deleted_at IS NULL
         AND p.access_token IS NOT NULL
         AND TRIM(p.access_token) <> ''
@@ -479,7 +587,7 @@ const connectDriverClients = async (drivers) => {
       if (client.submittedRideIds.has(rideId)) return;
 
       client.submittedRideIds.add(rideId);
-      const offeredPrice = randomInt(DRIVER_BID_MIN, DRIVER_BID_MAX);
+      const offeredPrice = chooseDriverBidPrice(payload);
       const bidDelayMs =
         DRIVER_BID_DELAY_MS > 0 ? randomInt(0, DRIVER_BID_DELAY_MS) : 0;
 
@@ -509,7 +617,6 @@ const connectDriverClients = async (drivers) => {
       if (!ENABLE_DRIVER_ACCEPT_COUNTER) return;
       if (client.acceptedRideId && client.acceptedRideId !== rideId) return;
       if (client.acceptedCounterRideIds.has(rideId)) return;
-      if (Number(payload?.driver_id) !== Number(client.driver_id)) return;
 
       client.acceptedCounterRideIds.add(rideId);
       const acceptDelayMs =
@@ -597,22 +704,49 @@ const connectUserClients = async (users) => {
 
       if (!scenario.timestamps.firstBidAt) {
         scenario.timestamps.firstBidAt = Date.now();
-        if (scenario.timestamps.dispatchSentAt) {
+        const dispatchStartedAt = resolveScenarioDispatchStartedAt(scenario);
+        if (dispatchStartedAt) {
           metrics.firstBidMs.push(
-            scenario.timestamps.firstBidAt - scenario.timestamps.dispatchSentAt
+            scenario.timestamps.firstBidAt - dispatchStartedAt
           );
         }
+      }
+
+      if (AUTO_USER_ACCEPT_FIRST_BID) {
+        if (!ENABLE_USER_ACCEPT) return;
+        if (scenario.userAcceptSent || scenario.userAccepted) return;
+
+        const driverId = Number(payload?.driver_id);
+        const offeredPrice = Number(payload?.offered_price ?? payload?.price ?? null);
+        if (!Number.isFinite(driverId) || driverId <= 0) return;
+        if (!Number.isFinite(offeredPrice) || offeredPrice <= 0) return;
+
+        scenario.selectedDriverId = driverId;
+        scenario.userAcceptSent = true;
+
+        setTimeout(() => {
+          if (!socket.connected) return;
+          socket.emit("user:acceptOffer", {
+            ride_id: rideId,
+            driver_id: driverId,
+            offered_price: offeredPrice,
+            user_id: scenario.user.user_id,
+            access_token: scenario.user.access_token,
+          });
+          scenario.timestamps.userAcceptSentAt = Date.now();
+          metrics.userAcceptsSent += 1;
+        }, USER_ACCEPT_DELAY_MS);
+
+        return;
       }
 
       if (!ENABLE_USER_COUNTER) return;
       if (scenario.counterSent) return;
 
+      const counterPrice = chooseUserCounterPrice(payload);
+      if (counterPrice === null) return;
       scenario.counterSent = true;
       scenario.selectedDriverId = Number(payload?.driver_id);
-      const counterPrice = Math.max(
-        1,
-        Number(payload?.offered_price ?? 0) - USER_COUNTER_DELTA
-      );
       const counterDelayMs =
         USER_COUNTER_DELAY_MS > 0 ? randomInt(0, USER_COUNTER_DELAY_MS) : 0;
 
@@ -644,15 +778,26 @@ const connectUserClients = async (users) => {
       if (!ENABLE_USER_ACCEPT) return;
       if (scenario.userAcceptSent) return;
 
+      const driverId = Number(payload?.driver_id);
+      const offeredPrice = Number(payload?.offered_price ?? payload?.price ?? null);
+      if (!Number.isFinite(driverId) || driverId <= 0) return;
+      if (!Number.isFinite(offeredPrice) || offeredPrice <= 0) return;
+
       scenario.userAcceptSent = true;
-      socket.emit("user:acceptOffer", {
-        ride_id: rideId,
-        driver_id: Number(payload?.driver_id),
-        offered_price: Number(payload?.offered_price ?? payload?.price ?? null),
-        user_id: scenario.user.user_id,
-        access_token: scenario.user.access_token,
-      });
-      metrics.userAcceptsSent += 1;
+      scenario.selectedDriverId = driverId;
+
+      setTimeout(() => {
+        if (!socket.connected) return;
+        socket.emit("user:acceptOffer", {
+          ride_id: rideId,
+          driver_id: driverId,
+          offered_price: offeredPrice,
+          user_id: scenario.user.user_id,
+          access_token: scenario.user.access_token,
+        });
+        scenario.timestamps.userAcceptSentAt = Date.now();
+        metrics.userAcceptsSent += 1;
+      }, USER_ACCEPT_DELAY_MS);
     });
 
     socket.on("ride:userAccepted", (payload = {}) => {
@@ -665,9 +810,10 @@ const connectUserClients = async (users) => {
       scenario.userAccepted = true;
       scenario.timestamps.userAcceptedAt = Date.now();
       metrics.userAcceptedEvents += 1;
-      if (scenario.timestamps.dispatchSentAt) {
+      const dispatchStartedAt = resolveScenarioDispatchStartedAt(scenario);
+      if (dispatchStartedAt) {
         metrics.userAcceptedMs.push(
-          scenario.timestamps.userAcceptedAt - scenario.timestamps.dispatchSentAt
+          scenario.timestamps.userAcceptedAt - dispatchStartedAt
         );
       }
     });
@@ -688,8 +834,8 @@ const createRideForScenario = async (scenario, attempt = 0) => {
   const body = new URLSearchParams();
   body.set("user_id", String(scenario.user.user_id));
   body.set("access_token", String(scenario.user.access_token));
-  body.set("service_category_id", String(SERVICE_CATEGORY_ID));
-  body.set("service_type_id", String(REQUEST_SERVICE_TYPE_ID));
+  body.set("service_category_id", String(scenario.serviceCategoryId));
+  body.set("service_type_id", String(scenario.requestServiceTypeId));
   body.set("payment_type", String(PAYMENT_TYPE));
   body.set("estimated_time", ESTIMATED_TIME);
   body.set("total_distance", TOTAL_DISTANCE);
@@ -753,17 +899,18 @@ const joinRideRoomForScenario = (scenario) => {
     lat: scenario.pickup.lat,
     long: scenario.pickup.long,
     token: scenario.user.access_token,
-    service_type_id: REQUEST_SERVICE_TYPE_ID,
-    service_category_id: SERVICE_CATEGORY_ID,
+    service_type_id: scenario.requestServiceTypeId,
+    service_category_id: scenario.serviceCategoryId,
   });
 };
 
 const dispatchScenario = async (scenario) => {
   const startedAt = Date.now();
+  scenario.timestamps.dispatchRequestedAt = startedAt;
   const payload = {
     ride_id: scenario.rideId,
-    service_category_id: SERVICE_CATEGORY_ID,
-    service_type_id: REQUEST_SERVICE_TYPE_ID,
+    service_category_id: scenario.serviceCategoryId,
+    service_type_id: scenario.requestServiceTypeId,
     pickup_lat: scenario.pickup.lat,
     pickup_long: scenario.pickup.long,
     pickup_address: scenario.pickup.address,
@@ -783,6 +930,12 @@ const dispatchScenario = async (scenario) => {
       token: scenario.user.access_token,
       access_token: scenario.user.access_token,
     },
+    ...(TARGET_ASSIGNED_DRIVER_ONLY && scenario.driver?.driver_id
+      ? {
+          driver_ids: [scenario.driver.driver_id],
+          restrict_to_driver_ids: 1,
+        }
+      : {}),
   };
 
   try {
@@ -847,9 +1000,15 @@ const printSummary = (scenarios) => {
       user_count: USER_COUNT,
       connected_user_count: userClients.size,
       service_category_id: SERVICE_CATEGORY_ID,
+      match_scenario_driver_service_type: MATCH_SCENARIO_DRIVER_SERVICE_TYPE,
+      target_assigned_driver_only: TARGET_ASSIGNED_DRIVER_ONLY,
+      auto_user_accept_first_bid: AUTO_USER_ACCEPT_FIRST_BID,
       request_service_type_id: REQUEST_SERVICE_TYPE_ID,
       auto_cleanup: AUTO_CLEANUP,
+      manual_dispatch_after_booking: MANUAL_DISPATCH_AFTER_BOOKING,
       test_window_ms: TEST_WINDOW_MS,
+      socket_http_timeout_ms: SOCKET_HTTP_TIMEOUT_MS,
+      laravel_http_timeout_ms: LARAVEL_HTTP_TIMEOUT_MS,
     },
     counters: {
       rides_created: metrics.ridesCreated,
@@ -881,11 +1040,17 @@ const printSummary = (scenarios) => {
     scenario_sample: scenarios.slice(0, 5).map((scenario) => ({
       scenario_id: scenario.id,
       user_id: scenario.user.user_id,
+      driver_id: scenario.driver?.driver_id ?? null,
+      request_service_type_id: scenario.requestServiceTypeId,
+      service_category_id: scenario.serviceCategoryId,
       ride_id: scenario.rideId ?? null,
       selected_driver_id: scenario.selectedDriverId ?? null,
       counter_sent: scenario.counterSent,
       user_accept_sent: scenario.userAcceptSent,
       user_accepted: scenario.userAccepted,
+      dispatch_requested_at: scenario.timestamps.dispatchRequestedAt,
+      first_bid_at: scenario.timestamps.firstBidAt,
+      user_accepted_at: scenario.timestamps.userAcceptedAt,
       bid_drivers: Array.from(scenario.bidDrivers).slice(0, 10),
     })),
   };
@@ -904,6 +1069,7 @@ const main = async () => {
     ]);
 
     const requiredUserCount = Math.max(USER_COUNT, SCENARIO_COUNT);
+    const requiredScenarioCount = Math.min(SCENARIO_COUNT, DRIVER_COUNT);
     const users = usersRaw.slice(0, requiredUserCount);
     const drivers = driversRaw.slice(0, DRIVER_COUNT);
 
@@ -918,11 +1084,26 @@ const main = async () => {
       );
     }
 
-    const scenarios = users.slice(0, SCENARIO_COUNT).map((user, index) => {
+    const scenarios = users.slice(0, requiredScenarioCount).map((user, index) => {
       const coordinates = buildScenarioCoordinates(index);
+      const assignedDriver = drivers[index % drivers.length];
+      const scenarioServiceCategoryId =
+        Number.isFinite(Number(assignedDriver?.service_category_id)) &&
+        Number(assignedDriver.service_category_id) > 0
+          ? Number(assignedDriver.service_category_id)
+          : SERVICE_CATEGORY_ID;
+      const scenarioRequestServiceTypeId =
+        MATCH_SCENARIO_DRIVER_SERVICE_TYPE &&
+        Number.isFinite(Number(assignedDriver?.service_type_id)) &&
+        Number(assignedDriver.service_type_id) > 0
+          ? Number(assignedDriver.service_type_id)
+          : REQUEST_SERVICE_TYPE_ID;
       return {
         id: index + 1,
         user,
+        driver: assignedDriver,
+        serviceCategoryId: scenarioServiceCategoryId,
+        requestServiceTypeId: scenarioRequestServiceTypeId,
         pickup: coordinates.pickup,
         destination: coordinates.destination,
         rideId: null,
@@ -934,11 +1115,13 @@ const main = async () => {
         timestamps: {
           startedAt: Date.now(),
           rideCreatedAt: null,
+          dispatchRequestedAt: null,
           dispatchSentAt: null,
           firstBidAt: null,
           counterSentAt: null,
           acceptedByDriverAt: null,
           acceptOfferSentAt: null,
+          userAcceptSentAt: null,
           userAcceptedAt: null,
         },
       };
@@ -964,7 +1147,9 @@ const main = async () => {
         try {
           await createRideForScenario(scenario);
           joinRideRoomForScenario(scenario);
-          await dispatchScenario(scenario);
+          if (MANUAL_DISPATCH_AFTER_BOOKING) {
+            await dispatchScenario(scenario);
+          }
         } catch (error) {
           log("scenario", `scenario ${scenario.id} failed`, error?.response?.data || error?.message || error);
         }
