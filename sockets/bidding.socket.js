@@ -64,6 +64,7 @@ const autoAcceptFirstBidLocks = new Map(); // rideId -> timestamp
 const driverPatchSeq = new Map(); // driverId -> number
 const driverRidesListEmptyLoggedAt = new Map(); // driverId -> timestamp
 const driverInboxLastCount = new Map(); // driverId -> last emitted inbox count
+let latestIo = null;
 const driverRecoveryNoopLoggedAt = new Map(); // `${source}:${driverId}` -> timestamp
 
 const DRIVER_RIDES_LIST_EMPTY_LOG_THROTTLE_MS = Number.isFinite(
@@ -2846,12 +2847,60 @@ function getDriverInboxCount(driverId) {
   if (!safeDriverId) return 0;
 
   const box = driverRideInbox.get(safeDriverId);
-  return box ? box.size : 0;
+  if (!box) return 0;
+
+  let count = 0;
+  const now = Date.now();
+
+  for (const [rideId, ride] of box.entries()) {
+    if (!ride || typeof ride !== "object") {
+      box.delete(rideId);
+      continue;
+    }
+
+    const safeRideId = toNumber(rideId);
+    const currentState = getRideDriverState(safeRideId, safeDriverId);
+    const statusSnapshot = getRideStatusSnapshot(safeRideId);
+    const rideStatus =
+      toNumber(statusSnapshot?.ride_status) ??
+      toNumber(ride?.ride_status) ??
+      toNumber(ride?.status) ??
+      null;
+
+    const ts = toNumber(ride?._ts) ?? 0;
+
+    if (
+      isRideOfferExpired(ride) ||
+      (ts && now - ts > INBOX_ENTRY_TTL_MS) ||
+      isTerminalDriverRideState(currentState?.status) ||
+      cancelledRides.has(safeRideId) ||
+      isTerminalRideStatus(rideStatus)
+    ) {
+      box.delete(rideId);
+      clearDriverBidStatus(safeDriverId, safeRideId);
+      continue;
+    }
+
+    count += 1;
+  }
+
+  if (box.size === 0) {
+    driverRideInbox.delete(safeDriverId);
+  }
+
+  return count;
+}
+
+function rememberIo(io) {
+  if (io) latestIo = io;
+  return io || latestIo;
 }
 
 function emitDriverInboxCount(io, driverId, options = {}) {
   const safeDriverId = toNumber(driverId);
-  if (!io || !safeDriverId) return false;
+  const targetIo = rememberIo(io);
+
+  if (!targetIo || !safeDriverId) return false;
 
   const count = getDriverInboxCount(safeDriverId);
   const force = options?.force === true;
@@ -2864,9 +2913,9 @@ function emitDriverInboxCount(io, driverId, options = {}) {
 
   driverInboxLastCount.set(safeDriverId, count);
 
-  io.to(driverRoom(safeDriverId)).emit("driver:rides:count", {
-    inbox_count: count,
-  });
+targetIo.to(driverRoom(safeDriverId)).emit("driver:rides:count", {
+  inbox_count: count,
+});
 
   return true;
 }
@@ -5365,17 +5414,30 @@ setInterval(() => {
     for (const driverId of driverRideInbox.keys()) {
       const box = driverRideInbox.get(driverId);
       if (!box) continue;
+
       const now = Date.now();
+      let countChanged = false;
+
       for (const [rideId, ride] of box.entries()) {
         const ts = toNumber(ride?._ts) ?? 0;
+
         if (isRideOfferExpired(ride) || (ts && now - ts > INBOX_ENTRY_TTL_MS)) {
           box.delete(rideId);
+          countChanged = true;
+
           clearDriverBidStatus(driverId, rideId);
           markRideDriverState(rideId, driverId, "expired");
           removeDriverFromRideCandidates(null, rideId, driverId, { emitSummary: false });
         }
       }
-      if (box.size === 0) driverRideInbox.delete(driverId);
+
+      if (box.size === 0) {
+        driverRideInbox.delete(driverId);
+      }
+
+      if (countChanged) {
+        emitDriverInboxCount(latestIo, driverId);
+      }
     }
   } catch (e) {
     console.log("⚠️ [inbox prune] interval error:", e?.message || e);
@@ -5410,11 +5472,17 @@ setInterval(() => {
       dispatchInFlightByRide.delete(rideId);
 
       for (const [driverId, box] of driverRideInbox.entries()) {
-        if (!box || !box.has(rideId)) continue;
-        box.delete(rideId);
-        clearDriverBidStatus(driverId, rideId);
-        if (box.size === 0) driverRideInbox.delete(driverId);
-      }
+  if (!box || !box.has(rideId)) continue;
+
+  box.delete(rideId);
+  clearDriverBidStatus(driverId, rideId);
+
+  if (box.size === 0) {
+    driverRideInbox.delete(driverId);
+  }
+
+  emitDriverInboxCount(latestIo, driverId);
+}
 
       for (const [driverId, queued] of driverQueuedRide.entries()) {
         if (toNumber(queued?.ride_id) !== rideId) continue;
@@ -9084,6 +9152,7 @@ if (!isSameMoneyValue(acceptedPrice, targetAutoAcceptPrice)) {
 }
 
 module.exports = (io, socket) => {
+  rememberIo(io);
   socket.on("driver:getRidesList", (payload = {}) => {
     const { driver_id, recover_active_ride } = payload;
     debugLog("driver:getRidesList", { driver_id, recover_active_ride }, socket.id);
