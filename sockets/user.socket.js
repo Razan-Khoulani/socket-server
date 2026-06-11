@@ -11,6 +11,7 @@ const {
 const { getRideStatusSnapshot } = require("../store/rideStatusSnapshots.store");
 const {
   savePricingSnapshot,
+  getPricingSnapshot,
 } = require("../store/pricingSnapshots.store");
 
 // ? UPDATED: add getActiveRideByDriver so we can exclude busy drivers from nearby/types
@@ -2798,9 +2799,10 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
 
     socket.emit("ride:joined", { ride_id: rideId });
     emitRideStatusCatchup(rideId, "user:joinRideRoom");
+    stopNearbyVehicleTypesLoop();
+stopNearbyDriversLoop();
     ensureNearbyCenterFromRide(rideId);
-    void emitNearbyVehicleTypesGuarded();
-
+emitCachedPricingSnapshotToSocket(rideId, "user:joinRideRoom-cache");
     console.log(
       `?? User ${socket.userId || "unknown"} joined ride room ride:${rideId} (socket:${socket.id})`
     );
@@ -2857,9 +2859,11 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
       at: Date.now(),
     });
     emitRideStatusCatchup(rideId, "user:rejoinRideRoom");
-    ensureNearbyCenterFromRide(rideId);
-    void emitNearbyVehicleTypesGuarded();
 
+    stopNearbyVehicleTypesLoop();
+stopNearbyDriversLoop();
+    ensureNearbyCenterFromRide(rideId);
+emitCachedPricingSnapshotToSocket(rideId, "user:rejoinRideRoom-cache");
     console.log(`?? User ${userId} rejoined ride room ride:${rideId} (socket:${socket.id})`);
   });
 
@@ -3428,6 +3432,68 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
       socket.nearbyVehicleTypesInFlight = false;
     }
   };
+
+  const emitCachedPricingSnapshotToSocket = (rideId, source = "join-cache") => {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return false;
+
+  const cached = getPricingSnapshot(safeRideId);
+  if (!cached) {
+    console.log("[pricingSnapshot][join-cache-miss]", {
+      ride_id: safeRideId,
+      socket_id: socket.id,
+      source,
+    });
+    return false;
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expiresAt = toNumber(cached?.expires_at);
+  const cachedTimeout = toNumber(cached?.timeout_ms);
+
+  const remainingTimeout =
+    expiresAt !== null
+      ? Math.max(0, Math.floor(expiresAt - nowSec))
+      : cachedTimeout !== null
+      ? Math.max(0, Math.floor(cachedTimeout))
+      : null;
+
+  const payload = {
+    ...cached,
+    ride_id: safeRideId,
+    user_id: toNumber(cached?.user_id) ?? toNumber(socket.userId) ?? null,
+
+    ...(expiresAt !== null
+      ? {
+          server_time: nowSec,
+          expires_at: expiresAt,
+          timeout_ms: remainingTimeout,
+          customer_offer_timeout_s: remainingTimeout,
+          user_timeout: remainingTimeout,
+        }
+      : {}),
+
+    source,
+    cached: 1,
+    recalculated: 0,
+    at: Date.now(),
+  };
+
+  socket.emit("ride:pricingSnapshot", payload);
+
+  console.log("[pricingSnapshot][join-cache-emit]", {
+    ride_id: safeRideId,
+    user_id: payload.user_id ?? null,
+    socket_id: socket.id,
+    source,
+    timeout_ms: payload.timeout_ms ?? null,
+    vehicle_types: Array.isArray(payload.vehicle_types)
+      ? payload.vehicle_types.length
+      : 0,
+  });
+
+  return true;
+};
 
   socket.on("user:findNearbyDrivers", async (payload = {}) => {
     debugLog("user:findNearbyDrivers", payload, socket.id);
