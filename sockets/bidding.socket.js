@@ -259,7 +259,7 @@ const toPositiveRouteDistanceKm = (v) => {
 const normalizeCoordForRouteKey = (value) => {
   const safe = toNumber(value);
   if (safe === null) return null;
-  return safe.toFixed(5);
+  return safe.toFixed(ROUTE_CACHE_COORD_PRECISION);
 };
 const buildRouteMetricsCacheKey = (startLat, startLong, endLat, endLong) => {
   const aLat = normalizeCoordForRouteKey(startLat);
@@ -291,6 +291,40 @@ const setCachedRouteMetrics = (cacheKey, value) => {
     at: Date.now(),
     value: { ...value },
   });
+};
+const pruneRouteApiFailureTimestamps = (now = Date.now()) => {
+  while (
+    routeApiFailureTimestamps.length > 0 &&
+    now - routeApiFailureTimestamps[0] > ROUTE_API_FAILURE_WINDOW_MS
+  ) {
+    routeApiFailureTimestamps.shift();
+  }
+};
+const isRouteApiCircuitOpen = (now = Date.now()) => routeApiCooldownUntil > now;
+const recordRouteApiSuccess = () => {
+  routeApiFailureTimestamps.length = 0;
+  routeApiCooldownUntil = 0;
+};
+const recordRouteApiFailure = (details = null) => {
+  const now = Date.now();
+  pruneRouteApiFailureTimestamps(now);
+  routeApiFailureTimestamps.push(now);
+  if (
+    routeApiFailureTimestamps.length >= ROUTE_API_FAILURE_THRESHOLD &&
+    routeApiCooldownUntil <= now
+  ) {
+    routeApiCooldownUntil = now + ROUTE_API_COOLDOWN_MS;
+    warnThrottled(
+      "route-api-circuit-open-dispatch",
+      "[dispatch][routeApi][circuit-open] using air fallback only",
+      {
+        failure_count: routeApiFailureTimestamps.length,
+        failure_window_ms: ROUTE_API_FAILURE_WINDOW_MS,
+        cooldown_ms: ROUTE_API_COOLDOWN_MS,
+        details,
+      }
+    );
+  }
 };
 const mapWithConcurrency = async (items = [], concurrency = 4, mapper = async () => null) => {
   const list = Array.isArray(items) ? items : [];
@@ -2007,6 +2041,65 @@ const MAX_DISPATCH_RADIUS_METERS = Number.isFinite(Number(process.env.MAX_DISPAT
 const MAX_DISPATCH_CANDIDATES = Number.isFinite(Number(process.env.MAX_DISPATCH_CANDIDATES))
   ? Math.max(0, Number(process.env.MAX_DISPATCH_CANDIDATES))
   : 0;
+const DISPATCH_ROUTE_SHORTLIST_ENABLED =
+  String(process.env.DISPATCH_ROUTE_SHORTLIST_ENABLED || "1") === "1";
+const DISPATCH_ROUTE_SHORTLIST_STAGE0 = Number.isFinite(
+  Number(process.env.DISPATCH_ROUTE_SHORTLIST_STAGE0)
+)
+  ? Math.max(1, Math.floor(Number(process.env.DISPATCH_ROUTE_SHORTLIST_STAGE0)))
+  : 12;
+const DISPATCH_ROUTE_SHORTLIST_STAGE1 = Number.isFinite(
+  Number(process.env.DISPATCH_ROUTE_SHORTLIST_STAGE1)
+)
+  ? Math.max(1, Math.floor(Number(process.env.DISPATCH_ROUTE_SHORTLIST_STAGE1)))
+  : 20;
+const DISPATCH_ROUTE_SHORTLIST_STAGE2 = Number.isFinite(
+  Number(process.env.DISPATCH_ROUTE_SHORTLIST_STAGE2)
+)
+  ? Math.max(1, Math.floor(Number(process.env.DISPATCH_ROUTE_SHORTLIST_STAGE2)))
+  : 35;
+const DISPATCH_ROUTE_SHORTLIST_STAGE3 = Number.isFinite(
+  Number(process.env.DISPATCH_ROUTE_SHORTLIST_STAGE3)
+)
+  ? Math.max(1, Math.floor(Number(process.env.DISPATCH_ROUTE_SHORTLIST_STAGE3)))
+  : 50;
+const DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE0 = Number.isFinite(
+  Number(process.env.DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE0)
+)
+  ? Math.max(
+      DISPATCH_ROUTE_SHORTLIST_STAGE0,
+      Math.floor(Number(process.env.DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE0))
+    )
+  : 24;
+const DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE1 = Number.isFinite(
+  Number(process.env.DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE1)
+)
+  ? Math.max(
+      DISPATCH_ROUTE_SHORTLIST_STAGE1,
+      Math.floor(Number(process.env.DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE1))
+    )
+  : 35;
+const DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE2 = Number.isFinite(
+  Number(process.env.DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE2)
+)
+  ? Math.max(
+      DISPATCH_ROUTE_SHORTLIST_STAGE2,
+      Math.floor(Number(process.env.DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE2))
+    )
+  : 50;
+const DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE3 = Number.isFinite(
+  Number(process.env.DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE3)
+)
+  ? Math.max(
+      DISPATCH_ROUTE_SHORTLIST_STAGE3,
+      Math.floor(Number(process.env.DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE3))
+    )
+  : 75;
+const DISPATCH_ROUTE_MIN_NEEDED_DRIVERS = Number.isFinite(
+  Number(process.env.DISPATCH_ROUTE_MIN_NEEDED_DRIVERS)
+)
+  ? Math.max(1, Math.floor(Number(process.env.DISPATCH_ROUTE_MIN_NEEDED_DRIVERS)))
+  : 5;
 const DISPATCH_WAVE_SIZE = Number.isFinite(Number(process.env.DISPATCH_WAVE_SIZE))
   ? Math.max(0, Number(process.env.DISPATCH_WAVE_SIZE))
   : 0;
@@ -2052,6 +2145,16 @@ const LARAVEL_INTERNAL_SECRET = String(
 const LARAVEL_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_TIMEOUT_MS))
   ? Math.max(1000, Number(process.env.LARAVEL_TIMEOUT_MS))
   : 7000;
+const DRIVER_PUSH_SYNC_MAX_CONCURRENCY = Number.isFinite(
+  Number(process.env.DRIVER_PUSH_SYNC_MAX_CONCURRENCY)
+)
+  ? Math.max(1, Math.floor(Number(process.env.DRIVER_PUSH_SYNC_MAX_CONCURRENCY)))
+  : 5;
+const DRIVER_PUSH_SYNC_RECENT_TTL_MS = Number.isFinite(
+  Number(process.env.DRIVER_PUSH_SYNC_RECENT_TTL_MS)
+)
+  ? Math.max(500, Number(process.env.DRIVER_PUSH_SYNC_RECENT_TTL_MS))
+  : 3000;
 const LARAVEL_ACCEPT_BID_TIMEOUT_MS = Number.isFinite(
   Number(process.env.LARAVEL_ACCEPT_BID_TIMEOUT_MS)
 )
@@ -2060,6 +2163,11 @@ const LARAVEL_ACCEPT_BID_TIMEOUT_MS = Number.isFinite(
 const LARAVEL_ROUTE_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
   ? Math.max(1000, Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
   : 10000;
+const ROUTE_CACHE_COORD_PRECISION = Number.isFinite(
+  Number(process.env.ROUTE_CACHE_COORD_PRECISION)
+)
+  ? Math.max(3, Math.min(6, Math.floor(Number(process.env.ROUTE_CACHE_COORD_PRECISION))))
+  : 4;
 const ROUTE_API_CACHE_TTL_MS = Number.isFinite(Number(process.env.ROUTE_API_CACHE_TTL_MS))
   ? Math.max(0, Number(process.env.ROUTE_API_CACHE_TTL_MS))
   : 15000;
@@ -2072,8 +2180,23 @@ const ROUTE_CACHE_L2_TTL_S = Number.isFinite(Number(process.env.ROUTE_CACHE_L2_T
 const ROUTE_LOCK_TTL_S = Number.isFinite(Number(process.env.ROUTE_LOCK_TTL_S))
   ? Math.max(1, Math.floor(Number(process.env.ROUTE_LOCK_TTL_S)))
   : 3;
+const ROUTE_API_FAILURE_WINDOW_MS = Number.isFinite(
+  Number(process.env.ROUTE_API_FAILURE_WINDOW_MS)
+)
+  ? Math.max(1000, Number(process.env.ROUTE_API_FAILURE_WINDOW_MS))
+  : 10000;
+const ROUTE_API_FAILURE_THRESHOLD = Number.isFinite(
+  Number(process.env.ROUTE_API_FAILURE_THRESHOLD)
+)
+  ? Math.max(1, Math.floor(Number(process.env.ROUTE_API_FAILURE_THRESHOLD)))
+  : 5;
+const ROUTE_API_COOLDOWN_MS = Number.isFinite(Number(process.env.ROUTE_API_COOLDOWN_MS))
+  ? Math.max(1000, Number(process.env.ROUTE_API_COOLDOWN_MS))
+  : 30000;
 const routeMetricsCache = new Map();
 const routeMetricsInFlight = new Map();
+let routeApiCooldownUntil = 0;
+const routeApiFailureTimestamps = [];
 const DRIVER_WALLET_GUARD_ENABLED =
   String(process.env.DRIVER_WALLET_GUARD_ENABLED || "1") === "1";
 const DRIVER_WALLET_GUARD_MAX_AGE_MS = Number.isFinite(
@@ -2081,18 +2204,112 @@ const DRIVER_WALLET_GUARD_MAX_AGE_MS = Number.isFinite(
 )
   ? Math.max(1000, Number(process.env.DRIVER_WALLET_GUARD_MAX_AGE_MS))
   : 60_000;
+const DRIVER_WALLET_GUARD_FAILURE_BACKOFF_MS = Number.isFinite(
+  Number(process.env.DRIVER_WALLET_GUARD_FAILURE_BACKOFF_MS)
+)
+  ? Math.max(1000, Number(process.env.DRIVER_WALLET_GUARD_FAILURE_BACKOFF_MS))
+  : 5000;
 const DRIVER_WALLET_GUARD_MAX_CONCURRENCY = Number.isFinite(
   Number(process.env.DRIVER_WALLET_GUARD_MAX_CONCURRENCY)
 )
   ? Math.max(1, Number(process.env.DRIVER_WALLET_GUARD_MAX_CONCURRENCY))
   : 2;
 const walletGuardInFlightByDriver = new Map(); // driverId -> Promise<boolean>
+const walletGuardFailureBackoffUntilByDriver = new Map(); // driverId -> timestamp
+const driverPushSyncInFlightByKey = new Map(); // key -> Promise<boolean>
+const driverPushSyncRecentByKey = new Map(); // key -> { at, result }
+const driverPushSyncQueue = [];
+let driverPushSyncActiveCount = 0;
 const DISPATCH_EXPANSION_INTERVAL_S = 5;
 const buildInternalLaravelHeaders = () => {
   if (!LARAVEL_INTERNAL_SECRET) return undefined;
   return {
     "X-Socket-Internal-Secret": LARAVEL_INTERNAL_SECRET,
   };
+};
+const pruneDriverPushSyncRecent = (now = Date.now()) => {
+  for (const [key, entry] of driverPushSyncRecentByKey.entries()) {
+    const at = toNumber(entry?.at ?? null) ?? 0;
+    if (!at || now - at > DRIVER_PUSH_SYNC_RECENT_TTL_MS) {
+      driverPushSyncRecentByKey.delete(key);
+    }
+  }
+};
+const buildDriverPushSyncKey = ({
+  driverId,
+  rideId,
+  serviceCategoryId,
+  triggerEvent,
+  minPrice,
+  maxPrice,
+} = {}) => {
+  const safeMinPrice = toNumber(minPrice);
+  const safeMaxPrice = toNumber(maxPrice);
+  return [
+    `driver:${toNumber(driverId) ?? "na"}`,
+    `ride:${toNumber(rideId) ?? "na"}`,
+    `service_category:${toNumber(serviceCategoryId) ?? "na"}`,
+    `event:${toTrimmedText(triggerEvent) ?? "ride:bidRequest"}`,
+    `min:${safeMinPrice ?? "na"}`,
+    `max:${safeMaxPrice ?? "na"}`,
+  ].join("|");
+};
+const pumpDriverPushSyncQueue = () => {
+  while (
+    driverPushSyncActiveCount < DRIVER_PUSH_SYNC_MAX_CONCURRENCY &&
+    driverPushSyncQueue.length > 0
+  ) {
+    const task = driverPushSyncQueue.shift();
+    if (!task) break;
+
+    driverPushSyncActiveCount += 1;
+    (async () => {
+      let result = false;
+      try {
+        result = await task.run();
+        task.resolve(result);
+      } catch (error) {
+        task.resolve(false);
+      } finally {
+        driverPushSyncRecentByKey.set(task.key, {
+          at: Date.now(),
+          result,
+        });
+        driverPushSyncInFlightByKey.delete(task.key);
+        driverPushSyncActiveCount = Math.max(0, driverPushSyncActiveCount - 1);
+        pumpDriverPushSyncQueue();
+      }
+    })();
+  }
+};
+const enqueueDriverPushSync = (key, run) => {
+  const safeKey = toTrimmedText(key);
+  if (!safeKey || typeof run !== "function") return Promise.resolve(false);
+
+  pruneDriverPushSyncRecent();
+  const recent = driverPushSyncRecentByKey.get(safeKey);
+  if (
+    recent &&
+    Number.isFinite(Number(recent.at)) &&
+    Date.now() - Number(recent.at) <= DRIVER_PUSH_SYNC_RECENT_TTL_MS
+  ) {
+    return Promise.resolve(recent.result === true);
+  }
+
+  const existingInFlight = driverPushSyncInFlightByKey.get(safeKey);
+  if (existingInFlight) return existingInFlight;
+
+  const queuedPromise = new Promise((resolve) => {
+    driverPushSyncQueue.push({
+      key: safeKey,
+      run,
+      resolve,
+    });
+    pumpDriverPushSyncQueue();
+  });
+
+  driverPushSyncInFlightByKey.set(safeKey, queuedPromise);
+  return queuedPromise;
 };
 
 const getDriverLocationAgeMs = (driver = null, meta = null) => {
@@ -2348,45 +2565,57 @@ async function syncDriverUpdateListNotification({
     max_price: resolvedMaxPrice,
     trigger_event: triggerEvent ?? "ride:bidRequest",
   };
-  console.log("[driver:rides:list][push] Laravel sync request", {
+  const syncKey = buildDriverPushSyncKey({
+    driverId,
+    rideId,
+    serviceCategoryId,
+    triggerEvent,
+    minPrice: resolvedMinPrice,
+    maxPrice: resolvedMaxPrice,
+  });
+  console.log("[driver:rides:list][push] Laravel sync queued", {
     driver_id: driverId,
     ride_id: rideId,
     service_category_id: serviceCategoryId ?? null,
     trigger_event: triggerEvent ?? "ride:bidRequest",
     payload_bytes: Buffer.byteLength(JSON.stringify(laravelSyncPayload), "utf8"),
+    queue_active: driverPushSyncActiveCount,
+    queue_pending: driverPushSyncQueue.length,
   });
 
-  try {
-    await axios.post(
-      `${LARAVEL_BASE_URL}${LARAVEL_DRIVER_UPDATE_LIST_NOTIFICATION_PATH}`,
-      laravelSyncPayload,
-      {
-        timeout: LARAVEL_TIMEOUT_MS,
-        headers: buildInternalLaravelHeaders(),
-      }
-    );
+  return enqueueDriverPushSync(syncKey, async () => {
+    try {
+      await axios.post(
+        `${LARAVEL_BASE_URL}${LARAVEL_DRIVER_UPDATE_LIST_NOTIFICATION_PATH}`,
+        laravelSyncPayload,
+        {
+          timeout: LARAVEL_TIMEOUT_MS,
+          headers: buildInternalLaravelHeaders(),
+        }
+      );
 
-    console.log("[driver:rides:list][push] Laravel sync succeeded", {
-      driver_id: driverId,
-      ride_id: rideId,
-      service_category_id: serviceCategoryId ?? null,
-      min_price: resolvedMinPrice,
-      max_price: resolvedMaxPrice,
-      trigger_event: triggerEvent ?? null,
-    });
-    return true;
-  } catch (error) {
-    console.error("[driver:rides:list][push] Laravel sync failed", {
-      driver_id: driverId,
-      ride_id: rideId,
-      service_category_id: serviceCategoryId ?? null,
-      min_price: resolvedMinPrice,
-      max_price: resolvedMaxPrice,
-      trigger_event: triggerEvent ?? null,
-      error: error?.response?.data || error?.message || error,
-    });
-    return false;
-  }
+      console.log("[driver:rides:list][push] Laravel sync succeeded", {
+        driver_id: driverId,
+        ride_id: rideId,
+        service_category_id: serviceCategoryId ?? null,
+        min_price: resolvedMinPrice,
+        max_price: resolvedMaxPrice,
+        trigger_event: triggerEvent ?? null,
+      });
+      return true;
+    } catch (error) {
+      console.error("[driver:rides:list][push] Laravel sync failed", {
+        driver_id: driverId,
+        ride_id: rideId,
+        service_category_id: serviceCategoryId ?? null,
+        min_price: resolvedMinPrice,
+        max_price: resolvedMaxPrice,
+        trigger_event: triggerEvent ?? null,
+        error: error?.response?.data || error?.message || error,
+      });
+      return false;
+    }
+  });
 }
 
 // ─────────────────────────────
@@ -4075,8 +4304,18 @@ async function ensureFreshDriverWalletEligibility(driverId) {
   const walletFlagKnown =
     currentMeta?.not_valid_wallet_balance !== undefined &&
     currentMeta?.not_valid_wallet_balance !== null;
+  const backoffUntil = toNumber(
+    walletGuardFailureBackoffUntilByDriver.get(safeDriverId) ?? null
+  );
 
   if (walletFlagKnown && isWalletMetaFreshEnough(currentMeta)) {
+    return canDriverReceiveNewRideRequests(safeDriverId);
+  }
+
+  if (backoffUntil !== null && backoffUntil > Date.now()) {
+    if (walletFlagKnown) {
+      return !walletBlockedNow && canDriverReceiveNewRideRequests(safeDriverId);
+    }
     return canDriverReceiveNewRideRequests(safeDriverId);
   }
 
@@ -4091,16 +4330,22 @@ async function ensureFreshDriverWalletEligibility(driverId) {
         driverServiceId: toNumber(currentMeta?.driver_service_id ?? null),
         forceRefresh: true,
       });
+      walletGuardFailureBackoffUntilByDriver.delete(safeDriverId);
       const mergedMeta = mergeWalletMetaFromProfile(currentMeta, refreshedProfile);
       driverLocationService.updateMeta(safeDriverId, mergedMeta);
       return canDriverReceiveNewRideRequests(safeDriverId);
     } catch (error) {
+      walletGuardFailureBackoffUntilByDriver.set(
+        safeDriverId,
+        Date.now() + DRIVER_WALLET_GUARD_FAILURE_BACKOFF_MS
+      );
       warnThrottled(
         `dispatch-wallet-guard-refresh-failed:${safeDriverId}`,
         "[dispatch][wallet-guard] refresh failed; keeping current eligibility:",
         {
           driver_id: safeDriverId,
           error: error?.message || error,
+          backoff_ms: DRIVER_WALLET_GUARD_FAILURE_BACKOFF_MS,
         }
       );
 
@@ -6130,13 +6375,26 @@ async function dispatchToNearbyDrivers(io, data) {
     : null;
   const strictTargetDispatch =
     toBinaryFlag(data?.restrict_to_driver_ids ?? data?.target_only ?? null) === 1;
+  const dispatchRouteMinNeededDrivers = Math.max(
+    1,
+    MAX_DISPATCH_CANDIDATES > 0
+      ? Math.min(DISPATCH_ROUTE_MIN_NEEDED_DRIVERS, MAX_DISPATCH_CANDIDATES)
+      : DISPATCH_ROUTE_MIN_NEEDED_DRIVERS
+  );
 
   const roadFilteredRaw = await filterDriversByRoadRadius(
     availableAir,
     lat,
     long,
-    roadRadius
+    roadRadius,
+    {
+      stageIndex: radiusPlan.currentStageIndex,
+      minNeededDrivers: dispatchRouteMinNeededDrivers,
+      targetDriverIdSet,
+      strictTargetDispatch,
+    }
   );
+  const roadFilterMeta = roadFilteredRaw?._meta ?? {};
 
   const roadFiltered =
     strictTargetDispatch && targetDriverIdSet && targetDriverIdSet.size > 0
@@ -6339,6 +6597,14 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   dispatch_wave_size: DISPATCH_WAVE_SIZE > 0 ? DISPATCH_WAVE_SIZE : null,
   dispatch_wave_interval_ms: DISPATCH_WAVE_INTERVAL_MS > 0 ? DISPATCH_WAVE_INTERVAL_MS : null,
   dispatch_wave_enabled: DISPATCH_WAVE_SIZE > 0 && DISPATCH_WAVE_INTERVAL_MS > 0,
+  route_shortlist_enabled: roadFilterMeta?.shortlist_enabled === true,
+  route_shortlist_stage_index: roadFilterMeta?.stage_index ?? radiusPlan.currentStageIndex,
+  route_shortlist_min_needed_drivers:
+    roadFilterMeta?.min_needed_drivers ?? dispatchRouteMinNeededDrivers,
+  route_shortlist_initial_candidates: roadFilterMeta?.initial_candidate_count ?? availableAir.length,
+  route_shortlist_expanded_candidates:
+    roadFilterMeta?.expanded_candidate_count ?? roadFilterMeta?.initial_candidate_count ?? availableAir.length,
+  route_shortlist_expanded: roadFilterMeta?.expanded === true,
   required_gender: applyRequiredGenderFilter ? requiredGender : null,
   required_gender_filter_applied: applyRequiredGenderFilter,
   need_child_seat: applyNeedChildSeatFilter ? needChildSeat : null,
@@ -7400,6 +7666,29 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
         }
       }
 
+      if (isRouteApiCircuitOpen()) {
+        warnThrottled(
+          "dispatch-driver-to-pickup-road-metrics-circuit-open",
+          "[dispatch][driverToPickupRoadMetrics] circuit open; using air fallback:",
+          {
+            cooldown_until: routeApiCooldownUntil,
+            air_distance_m: airDistanceM,
+          }
+        );
+        const fallback = {
+          road_distance_m: airDistanceM,
+          road_duration_s: airDurationS,
+          road_duration_min: airDurationS !== null ? round2(airDurationS / 60) : null,
+          raw: null,
+          source: airDistanceM !== null ? "air-fallback-circuit-open" : "circuit-open",
+        };
+        setCachedRouteMetrics(routeKey, fallback);
+        if (routeL2CacheKey && routeCacheL2.isEnabled()) {
+          await routeCacheL2.setJson(routeL2CacheKey, fallback, ROUTE_CACHE_L2_TTL_S);
+        }
+        return fallback;
+      }
+
       const res = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
         params: {
           startLongitude: lo1,
@@ -7412,6 +7701,7 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
       });
 
       const data = res?.data ?? null;
+      recordRouteApiSuccess();
       const roadDistanceM = extractRoadDistanceMeters(data);
       const durationMin = toRouteMetricNumber(data?.duration ?? null);
       const durationS = durationMin !== null ? Math.round(durationMin * 60) : null;
@@ -7436,6 +7726,7 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
       }
       return result;
     } catch (error) {
+      recordRouteApiFailure(error?.response?.data || error?.message || error);
       warnThrottled(
         "dispatch-driver-to-pickup-road-metrics-failed",
         "[dispatch][driverToPickupRoadMetrics] failed; using air fallback:",
@@ -7468,11 +7759,107 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
   return inFlightPromise;
 }
 
-async function filterDriversByRoadRadius(drivers, pickupLat, pickupLong, roadRadiusM) {
+const resolveDispatchRouteShortlistLimit = (stageIndex = 0, expanded = false) => {
+  const safeStageIndex = Math.max(0, Math.floor(toNumber(stageIndex) ?? 0));
+  const normalLimits = [
+    DISPATCH_ROUTE_SHORTLIST_STAGE0,
+    DISPATCH_ROUTE_SHORTLIST_STAGE1,
+    DISPATCH_ROUTE_SHORTLIST_STAGE2,
+    DISPATCH_ROUTE_SHORTLIST_STAGE3,
+  ];
+  const expandedLimits = [
+    DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE0,
+    DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE1,
+    DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE2,
+    DISPATCH_ROUTE_SHORTLIST_EXPANDED_STAGE3,
+  ];
+  const limits = expanded ? expandedLimits : normalLimits;
+  return limits[Math.min(safeStageIndex, limits.length - 1)] ?? limits[limits.length - 1];
+};
+
+const getDriverAirDistanceMetersForDispatch = (driver = null, pickupLat = null, pickupLong = null) => {
+  const driverLat = toNumber(driver?.lat ?? null);
+  const driverLong = toNumber(driver?.long ?? null);
+  const safePickupLat = toNumber(pickupLat);
+  const safePickupLong = toNumber(pickupLong);
+  if (
+    driverLat === null ||
+    driverLong === null ||
+    safePickupLat === null ||
+    safePickupLong === null
+  ) {
+    return null;
+  }
+  return Math.round(getDistanceMeters(driverLat, driverLong, safePickupLat, safePickupLong));
+};
+
+const buildDispatchRoadFilterCandidatePool = (
+  drivers,
+  pickupLat,
+  pickupLong,
+  {
+    stageIndex = 0,
+    expanded = false,
+    strictTargetDispatch = false,
+    targetDriverIdSet = null,
+  } = {}
+) => {
+  let list = Array.isArray(drivers) ? [...drivers] : [];
+  if (list.length === 0) return [];
+
+  if (strictTargetDispatch && targetDriverIdSet instanceof Set && targetDriverIdSet.size > 0) {
+    list = list.filter((driver) => {
+      const driverId = toNumber(driver?.driver_id);
+      return !!driverId && targetDriverIdSet.has(driverId);
+    });
+  }
+
+  if (!DISPATCH_ROUTE_SHORTLIST_ENABLED) {
+    return MAX_ROAD_FILTER_CANDIDATES > 0 ? list.slice(0, MAX_ROAD_FILTER_CANDIDATES) : list;
+  }
+
+  const ranked = list
+    .map((driver, index) => {
+      const driverId = toNumber(driver?.driver_id);
+      const airDistanceM = getDriverAirDistanceMetersForDispatch(driver, pickupLat, pickupLong);
+      const targetPriority =
+        !strictTargetDispatch &&
+        targetDriverIdSet instanceof Set &&
+        targetDriverIdSet.size > 0 &&
+        driverId &&
+        targetDriverIdSet.has(driverId)
+          ? 1
+          : 0;
+      return {
+        driver,
+        index,
+        airDistanceM,
+        targetPriority,
+      };
+    })
+    .sort((a, b) => {
+      if (a.targetPriority !== b.targetPriority) return b.targetPriority - a.targetPriority;
+      if (a.airDistanceM === null && b.airDistanceM === null) return a.index - b.index;
+      if (a.airDistanceM === null) return 1;
+      if (b.airDistanceM === null) return -1;
+      if (a.airDistanceM !== b.airDistanceM) return a.airDistanceM - b.airDistanceM;
+      return a.index - b.index;
+    });
+
+  let shortlistLimit = resolveDispatchRouteShortlistLimit(stageIndex, expanded);
+  if (MAX_ROAD_FILTER_CANDIDATES > 0) {
+    shortlistLimit = Math.min(shortlistLimit, MAX_ROAD_FILTER_CANDIDATES);
+  }
+
+  return ranked.slice(0, shortlistLimit).map(({ driver, airDistanceM }) => ({
+    ...driver,
+    _air_distance_m: airDistanceM,
+  }));
+};
+
+async function filterDriversByRoadRadiusCore(drivers, pickupLat, pickupLong, roadRadiusM) {
   const list = Array.isArray(drivers)
-    ? MAX_ROAD_FILTER_CANDIDATES > 0
-      ? drivers.slice(0, MAX_ROAD_FILTER_CANDIDATES)
-      : drivers
+    ? drivers
     : [];
 
   const results = await mapWithConcurrency(list, ROUTE_API_MAX_CONCURRENCY, async (d) => {
@@ -7497,10 +7884,93 @@ async function filterDriversByRoadRadius(drivers, pickupLat, pickupLong, roadRad
         driver_to_pickup_distance_km: round2(metrics.road_distance_m / 1000),
         driver_to_pickup_duration_s: metrics.road_duration_s,
         driver_to_pickup_duration_min: metrics.road_duration_min,
+        _air_distance_m: toNumber(d?._air_distance_m ?? null),
       };
     });
 
   return results.filter(Boolean);
+}
+
+async function filterDriversByRoadRadius(
+  drivers,
+  pickupLat,
+  pickupLong,
+  roadRadiusM,
+  options = {}
+) {
+  const stageIndex = Math.max(0, Math.floor(toNumber(options?.stageIndex) ?? 0));
+  const minNeededDrivers = Math.max(
+    0,
+    Math.floor(toNumber(options?.minNeededDrivers) ?? DISPATCH_ROUTE_MIN_NEEDED_DRIVERS)
+  );
+  const targetDriverIdSet =
+    options?.targetDriverIdSet instanceof Set ? options.targetDriverIdSet : null;
+  const strictTargetDispatch = options?.strictTargetDispatch === true;
+
+  const initialCandidatePool = buildDispatchRoadFilterCandidatePool(drivers, pickupLat, pickupLong, {
+    stageIndex,
+    expanded: false,
+    strictTargetDispatch,
+    targetDriverIdSet,
+  });
+  const initialResults = await filterDriversByRoadRadiusCore(
+    initialCandidatePool,
+    pickupLat,
+    pickupLong,
+    roadRadiusM
+  );
+
+  let finalResults = initialResults;
+  let expanded = false;
+  let expandedCandidatePoolCount = initialCandidatePool.length;
+
+  if (DISPATCH_ROUTE_SHORTLIST_ENABLED && initialResults.length < minNeededDrivers) {
+    const expandedCandidatePool = buildDispatchRoadFilterCandidatePool(drivers, pickupLat, pickupLong, {
+      stageIndex,
+      expanded: true,
+      strictTargetDispatch,
+      targetDriverIdSet,
+    });
+    expandedCandidatePoolCount = expandedCandidatePool.length;
+
+    if (expandedCandidatePool.length > initialCandidatePool.length) {
+      const initialDriverIds = new Set(
+        initialCandidatePool
+          .map((driver) => toNumber(driver?.driver_id))
+          .filter((driverId) => !!driverId)
+      );
+      const remainingDrivers = expandedCandidatePool.filter((driver) => {
+        const driverId = toNumber(driver?.driver_id);
+        return !!driverId && !initialDriverIds.has(driverId);
+      });
+
+      if (remainingDrivers.length > 0) {
+        const extraResults = await filterDriversByRoadRadiusCore(
+          remainingDrivers,
+          pickupLat,
+          pickupLong,
+          roadRadiusM
+        );
+        finalResults = [...initialResults, ...extraResults];
+        expanded = true;
+      }
+    }
+  }
+
+  Object.defineProperty(finalResults, "_meta", {
+    value: {
+      shortlist_enabled: DISPATCH_ROUTE_SHORTLIST_ENABLED,
+      stage_index: stageIndex,
+      min_needed_drivers: minNeededDrivers,
+      initial_candidate_count: initialCandidatePool.length,
+      expanded_candidate_count: expandedCandidatePoolCount,
+      expanded,
+    },
+    enumerable: false,
+    configurable: true,
+  });
+
+  return finalResults;
 }
 
 const getAcceptedDriverToPickupMinutes = (payload = {}, rideSnapshot = null) => {

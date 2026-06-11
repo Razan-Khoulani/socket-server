@@ -111,6 +111,11 @@ const LARAVEL_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_TIMEOUT_MS
 const LARAVEL_ROUTE_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
   ? Math.max(1000, Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
   : LARAVEL_TIMEOUT_MS;
+const ROUTE_CACHE_COORD_PRECISION = Number.isFinite(
+  Number(process.env.ROUTE_CACHE_COORD_PRECISION)
+)
+  ? Math.max(3, Math.min(6, Math.floor(Number(process.env.ROUTE_CACHE_COORD_PRECISION))))
+  : 4;
 const ROUTE_API_CACHE_TTL_MS = Number.isFinite(Number(process.env.ROUTE_API_CACHE_TTL_MS))
   ? Math.max(0, Number(process.env.ROUTE_API_CACHE_TTL_MS))
   : 15000;
@@ -123,10 +128,25 @@ const ROUTE_CACHE_L2_TTL_S = Number.isFinite(Number(process.env.ROUTE_CACHE_L2_T
 const ROUTE_LOCK_TTL_S = Number.isFinite(Number(process.env.ROUTE_LOCK_TTL_S))
   ? Math.max(1, Math.floor(Number(process.env.ROUTE_LOCK_TTL_S)))
   : 3;
+const ROUTE_API_FAILURE_WINDOW_MS = Number.isFinite(
+  Number(process.env.ROUTE_API_FAILURE_WINDOW_MS)
+)
+  ? Math.max(1000, Number(process.env.ROUTE_API_FAILURE_WINDOW_MS))
+  : 10000;
+const ROUTE_API_FAILURE_THRESHOLD = Number.isFinite(
+  Number(process.env.ROUTE_API_FAILURE_THRESHOLD)
+)
+  ? Math.max(1, Math.floor(Number(process.env.ROUTE_API_FAILURE_THRESHOLD)))
+  : 5;
+const ROUTE_API_COOLDOWN_MS = Number.isFinite(Number(process.env.ROUTE_API_COOLDOWN_MS))
+  ? Math.max(1000, Number(process.env.ROUTE_API_COOLDOWN_MS))
+  : 30000;
 const ROUTE_LOCK_RECHECK_MIN_MS = 100;
 const ROUTE_LOCK_RECHECK_MAX_MS = 200;
 const routeMetricsCache = new Map();
 const routeMetricsInFlight = new Map();
+let routeApiCooldownUntil = 0;
+const routeApiFailureTimestamps = [];
 const VEHICLE_ICON_RELATIVE_DIR = "assets/images/service-category/transport-service-type";
 const DRIVER_IMAGE_RELATIVE_DIR = "assets/images/profile-images/provider";
 const CUSTOMER_IMAGE_RELATIVE_DIR = "assets/images/profile-images/customer";
@@ -159,7 +179,7 @@ const toNumber = (v) => {
 const normalizeCoordForRouteKey = (value) => {
   const safe = toNumber(value);
   if (safe === null) return null;
-  return safe.toFixed(5);
+  return safe.toFixed(ROUTE_CACHE_COORD_PRECISION);
 };
 const buildRouteMetricsCacheKey = (startLat, startLong, endLat, endLong) => {
   const aLat = normalizeCoordForRouteKey(startLat);
@@ -193,6 +213,36 @@ const setCachedRouteMetrics = (cacheKey, value) => {
     at: Date.now(),
     value: { ...value },
   });
+};
+const pruneRouteApiFailureTimestamps = (now = Date.now()) => {
+  while (
+    routeApiFailureTimestamps.length > 0 &&
+    now - routeApiFailureTimestamps[0] > ROUTE_API_FAILURE_WINDOW_MS
+  ) {
+    routeApiFailureTimestamps.shift();
+  }
+};
+const isRouteApiCircuitOpen = (now = Date.now()) => routeApiCooldownUntil > now;
+const recordRouteApiSuccess = () => {
+  routeApiFailureTimestamps.length = 0;
+  routeApiCooldownUntil = 0;
+};
+const recordRouteApiFailure = (details = null) => {
+  const now = Date.now();
+  pruneRouteApiFailureTimestamps(now);
+  routeApiFailureTimestamps.push(now);
+  if (
+    routeApiFailureTimestamps.length >= ROUTE_API_FAILURE_THRESHOLD &&
+    routeApiCooldownUntil <= now
+  ) {
+    routeApiCooldownUntil = now + ROUTE_API_COOLDOWN_MS;
+    warnThrottled("route-api-circuit-open-user", "[routeApi][circuit-open] user socket fallback-only mode", {
+      failure_count: routeApiFailureTimestamps.length,
+      failure_window_ms: ROUTE_API_FAILURE_WINDOW_MS,
+      cooldown_ms: ROUTE_API_COOLDOWN_MS,
+      details,
+    });
+  }
 };
 const mapWithConcurrency = async (items = [], concurrency = 4, mapper = async () => null) => {
   const list = Array.isArray(items) ? items : [];
@@ -1362,6 +1412,29 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
         }
       }
 
+      if (isRouteApiCircuitOpen()) {
+        warnThrottled(
+          "driver-to-pickup-road-metrics-circuit-open",
+          "[driverToPickupRoadMetrics] circuit open; using air fallback:",
+          {
+            cooldown_until: routeApiCooldownUntil,
+            air_distance_m: safeAirDistanceM,
+          }
+        );
+        const fallback = {
+          road_distance_m: safeAirDistanceM,
+          road_duration_s: safeAirDurationS,
+          road_duration_min: safeAirDurationS !== null ? roundMoney(safeAirDurationS / 60) : null,
+          raw: null,
+          source: safeAirDistanceM !== null ? "air-fallback-circuit-open" : "circuit-open",
+        };
+        setCachedRouteMetrics(routeKey, fallback);
+        if (routeL2CacheKey && routeCacheL2.isEnabled()) {
+          await routeCacheL2.setJson(routeL2CacheKey, fallback, ROUTE_CACHE_L2_TTL_S);
+        }
+        return fallback;
+      }
+
       const res = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
         params: {
           startLongitude: lo1,
@@ -1374,6 +1447,7 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
       });
 
       const data = res?.data ?? null;
+      recordRouteApiSuccess();
       const roadDistanceM = extractRoadDistanceMeters(data);
       const durationMin = toNumber(data?.duration ?? null);
       const durationS = durationMin !== null ? Math.round(durationMin * 60) : null;
@@ -1399,6 +1473,7 @@ const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, 
       }
       return result;
     } catch (e) {
+      recordRouteApiFailure(e?.response?.data || e?.message || e);
       warnThrottled(
         "driver-to-pickup-road-metrics-failed",
         "[driverToPickupRoadMetrics] failed:",
