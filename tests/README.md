@@ -147,3 +147,73 @@ AUTO_ACCEPT=1 \
 AUTO_STATUS_7=1 \
 node tests/05-passed-destination-live.js
 ```
+
+---
+
+## 7) Live bidding load (real rides, real users/drivers)
+This script creates **real rides** through Laravel, connects **real driver + user sockets**,
+dispatches bidding, sends bids/counters/accepts, then optionally cancels the created rides.
+
+It is intended for controlled load verification against production-like environments.
+
+Hard safety gate:
+- You **must** set `LIVE_LOAD_CONFIRM=I_UNDERSTAND_THIS_CREATES_REAL_RIDES`
+
+Core env:
+- `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+- `SOCKET_URL`
+- `SOCKET_HTTP_URL`
+- `LARAVEL_URL`
+- `SCENARIO_COUNT`
+- `DRIVER_COUNT`
+- `USER_COUNT`
+- `SERVICE_CATEGORY_ID`
+- `REQUEST_SERVICE_TYPE_ID`
+- `AUTO_CLEANUP=1|0`
+- `USER_IDS` and `DRIVER_IDS` (optional explicit cohorts)
+
+Example:
+
+```bash
+LIVE_LOAD_CONFIRM=I_UNDERSTAND_THIS_CREATES_REAL_RIDES \
+DB_HOST=127.0.0.1 \
+DB_PORT=3306 \
+DB_USER=catch_taxi_user \
+DB_PASSWORD='SECRET' \
+DB_NAME=osbackend_db \
+SOCKET_URL="https://socket.gocab.net" \
+SOCKET_HTTP_URL="https://socket.gocab.net" \
+LARAVEL_URL="https://osbackend.gocab.net" \
+SCENARIO_COUNT=30 \
+DRIVER_COUNT=30 \
+USER_COUNT=30 \
+SERVICE_CATEGORY_ID=5 \
+REQUEST_SERVICE_TYPE_ID=2 \
+AUTO_CLEANUP=1 \
+node tests/run-live-bidding-load.js
+```
+
+Or through `package.json`:
+
+```bash
+LIVE_LOAD_CONFIRM=I_UNDERSTAND_THIS_CREATES_REAL_RIDES \
+DB_HOST=127.0.0.1 \
+DB_PORT=3306 \
+DB_USER=catch_taxi_user \
+DB_PASSWORD='SECRET' \
+DB_NAME=osbackend_db \
+SOCKET_URL="https://socket.gocab.net" \
+SOCKET_HTTP_URL="https://socket.gocab.net" \
+LARAVEL_URL="https://osbackend.gocab.net" \
+SCENARIO_COUNT=30 \
+DRIVER_COUNT=30 \
+USER_COUNT=30 \
+SERVICE_CATEGORY_ID=5 \
+REQUEST_SERVICE_TYPE_ID=2 \
+npm run test:live-bidding-load
+```
+
+Recommendations:
+- Use dedicated test cohorts via `USER_IDS` and `DRIVER_IDS` when possible.
+- Keep `AUTO_CLEANUP=1` unless you intentionally want the rides to remain.
+- Start with smaller values such as `SCENARIO_COUNT=5` before pushing higher.

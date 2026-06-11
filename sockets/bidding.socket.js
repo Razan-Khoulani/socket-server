@@ -292,6 +292,211 @@ const setCachedRouteMetrics = (cacheKey, value) => {
     value: { ...value },
   });
 };
+const registerDispatchCandidateCacheKey = (rideId, cacheKey) => {
+  const safeRideId = toNumber(rideId);
+  const safeCacheKey = toTrimmedText(cacheKey);
+  if (!safeRideId || !safeCacheKey) return;
+
+  const existingKeys = dispatchCandidateCacheKeysByRide.get(safeRideId) ?? new Set();
+  existingKeys.add(safeCacheKey);
+  dispatchCandidateCacheKeysByRide.set(safeRideId, existingKeys);
+};
+const unregisterDispatchCandidateCacheKey = (rideId, cacheKey) => {
+  const safeRideId = toNumber(rideId);
+  const safeCacheKey = toTrimmedText(cacheKey);
+  if (!safeRideId || !safeCacheKey) return;
+
+  const existingKeys = dispatchCandidateCacheKeysByRide.get(safeRideId);
+  if (!existingKeys) return;
+  existingKeys.delete(safeCacheKey);
+  if (existingKeys.size === 0) {
+    dispatchCandidateCacheKeysByRide.delete(safeRideId);
+  }
+};
+const cloneDispatchCandidateRows = (rows = []) =>
+  Array.isArray(rows) ? rows.map((row) => ({ ...row })) : [];
+const buildDispatchCandidateCacheKey = ({
+  rideId,
+  pickupLat,
+  pickupLong,
+  roadRadiusM,
+  airCandidateRadiusM,
+  serviceTypeId,
+  stageIndex = 0,
+  requiredGender = null,
+  needChildSeat = null,
+  needHandicap = null,
+  strictTargetDispatch = false,
+  targetDriverIdSet = null,
+} = {}) => {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return null;
+
+  const safePickupLat = normalizeCoordForRouteKey(pickupLat);
+  const safePickupLong = normalizeCoordForRouteKey(pickupLong);
+  const safeRoadRadiusM = toNumber(roadRadiusM);
+  const safeAirCandidateRadiusM = toNumber(airCandidateRadiusM);
+  const safeServiceTypeId = toNumber(serviceTypeId);
+  const safeStageIndex = Math.max(0, Math.floor(toNumber(stageIndex) ?? 0));
+  const safeRequiredGender = toGenderFilter(requiredGender);
+  const safeNeedChildSeat = toBinaryFlag(needChildSeat);
+  const safeNeedHandicap = toBinaryFlag(needHandicap);
+  const safeTargetDriverIds =
+    targetDriverIdSet instanceof Set
+      ? Array.from(targetDriverIdSet.values())
+          .map((value) => toNumber(value))
+          .filter((value) => !!value)
+          .sort((a, b) => a - b)
+          .join(",")
+      : "";
+
+  return [
+    `ride:${safeRideId}`,
+    `pickup:${safePickupLat ?? "na"},${safePickupLong ?? "na"}`,
+    `road:${safeRoadRadiusM ?? "na"}`,
+    `air:${safeAirCandidateRadiusM ?? "na"}`,
+    `stage:${safeStageIndex}`,
+    `service:${safeServiceTypeId ?? "na"}`,
+    `gender:${safeRequiredGender ?? "na"}`,
+    `child:${safeNeedChildSeat ?? "na"}`,
+    `handicap:${safeNeedHandicap ?? "na"}`,
+    `strict:${strictTargetDispatch ? 1 : 0}`,
+    `targets:${safeTargetDriverIds || "na"}`,
+  ].join("|");
+};
+const getCachedDispatchCandidates = (cacheKey) => {
+  if (!cacheKey || DISPATCH_CANDIDATE_CACHE_TTL_MS <= 0) return null;
+
+  const cached = dispatchCandidateCache.get(cacheKey);
+  if (!cached) return null;
+
+  if (Date.now() - cached.at > DISPATCH_CANDIDATE_CACHE_TTL_MS) {
+    dispatchCandidateCache.delete(cacheKey);
+    unregisterDispatchCandidateCacheKey(cached.rideId, cacheKey);
+    return null;
+  }
+
+  return {
+    rideId: toNumber(cached.rideId),
+    rows: cloneDispatchCandidateRows(cached.rows),
+    meta:
+      cached.meta && typeof cached.meta === "object"
+        ? { ...cached.meta }
+        : {},
+    at: cached.at,
+  };
+};
+const setCachedDispatchCandidates = (cacheKey, rideId, rows = [], meta = {}) => {
+  if (!cacheKey || !rideId || DISPATCH_CANDIDATE_CACHE_TTL_MS <= 0) return;
+
+  dispatchCandidateCache.set(cacheKey, {
+    at: Date.now(),
+    rideId: toNumber(rideId),
+    rows: cloneDispatchCandidateRows(rows),
+    meta: meta && typeof meta === "object" ? { ...meta } : {},
+  });
+  registerDispatchCandidateCacheKey(rideId, cacheKey);
+};
+const clearDispatchCandidateCacheForRide = (rideId) => {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return;
+
+  const cacheKeys = dispatchCandidateCacheKeysByRide.get(safeRideId);
+  if (!cacheKeys || cacheKeys.size === 0) {
+    dispatchCandidateCacheKeysByRide.delete(safeRideId);
+    return;
+  }
+
+  for (const cacheKey of cacheKeys.values()) {
+    dispatchCandidateCache.delete(cacheKey);
+  }
+  dispatchCandidateCacheKeysByRide.delete(safeRideId);
+};
+const mergeDispatchCandidateWithLiveDriver = (candidate = null, liveDriver = null) => {
+  const baseCandidate = candidate && typeof candidate === "object" ? candidate : {};
+  const baseLiveDriver = liveDriver && typeof liveDriver === "object" ? liveDriver : {};
+  const safeDriverId = toNumber(baseCandidate?.driver_id ?? baseLiveDriver?.driver_id);
+  if (!safeDriverId) return null;
+
+  return {
+    ...baseCandidate,
+    ...baseLiveDriver,
+    driver_id: safeDriverId,
+    _air_distance_m:
+      toNumber(baseLiveDriver?._air_distance_m ?? null) ??
+      toNumber(baseCandidate?._air_distance_m ?? null) ??
+      null,
+    ...(baseCandidate?.driver_to_pickup_distance_m != null
+      ? { driver_to_pickup_distance_m: baseCandidate.driver_to_pickup_distance_m }
+      : {}),
+    ...(baseCandidate?.driver_to_pickup_distance_km != null
+      ? { driver_to_pickup_distance_km: baseCandidate.driver_to_pickup_distance_km }
+      : {}),
+    ...(baseCandidate?.driver_to_pickup_duration_s != null
+      ? { driver_to_pickup_duration_s: baseCandidate.driver_to_pickup_duration_s }
+      : {}),
+    ...(baseCandidate?.driver_to_pickup_duration_min != null
+      ? { driver_to_pickup_duration_min: baseCandidate.driver_to_pickup_duration_min }
+      : {}),
+  };
+};
+const quickRevalidateDispatchCandidates = (
+  candidates = [],
+  {
+    rideId,
+    availableAirByDriverId = null,
+    strictTargetDispatch = false,
+    targetDriverIdSet = null,
+  } = {}
+) => {
+  const safeRideId = toNumber(rideId);
+  if (!safeRideId) return [];
+
+  const list = Array.isArray(candidates) ? candidates : [];
+  return list
+    .map((candidate) => {
+      const safeDriverId = toNumber(candidate?.driver_id);
+      if (!safeDriverId) return null;
+      if (
+        strictTargetDispatch &&
+        targetDriverIdSet instanceof Set &&
+        targetDriverIdSet.size > 0 &&
+        !targetDriverIdSet.has(safeDriverId)
+      ) {
+        return null;
+      }
+
+      const availableLiveDriver =
+        availableAirByDriverId instanceof Map
+          ? availableAirByDriverId.get(safeDriverId) ?? null
+          : null;
+      if (availableAirByDriverId instanceof Map && !availableLiveDriver) {
+        return null;
+      }
+
+      if (!shouldKeepExistingCandidateForRide(safeRideId, safeDriverId)) {
+        return null;
+      }
+
+      const merged = mergeDispatchCandidateWithLiveDriver(candidate, availableLiveDriver);
+      return merged ?? null;
+    })
+    .filter(Boolean);
+};
+const quickRevalidateDriverForDispatchEmit = (rideId, candidate = null) => {
+  const safeRideId = toNumber(rideId);
+  const safeDriverId = toNumber(candidate?.driver_id);
+  if (!safeRideId || !safeDriverId) return null;
+
+  if (!shouldKeepExistingCandidateForRide(safeRideId, safeDriverId)) {
+    return null;
+  }
+
+  const liveDriver = driverLocationService.getDriver(safeDriverId);
+  if (!liveDriver) return null;
+
+  return mergeDispatchCandidateWithLiveDriver(candidate, liveDriver);
+};
 const pruneRouteApiFailureTimestamps = (now = Date.now()) => {
   while (
     routeApiFailureTimestamps.length > 0 &&
@@ -2180,6 +2385,11 @@ const ROUTE_CACHE_L2_TTL_S = Number.isFinite(Number(process.env.ROUTE_CACHE_L2_T
 const ROUTE_LOCK_TTL_S = Number.isFinite(Number(process.env.ROUTE_LOCK_TTL_S))
   ? Math.max(1, Math.floor(Number(process.env.ROUTE_LOCK_TTL_S)))
   : 3;
+const DISPATCH_CANDIDATE_CACHE_TTL_MS = Number.isFinite(
+  Number(process.env.DISPATCH_CANDIDATE_CACHE_TTL_MS)
+)
+  ? Math.max(500, Number(process.env.DISPATCH_CANDIDATE_CACHE_TTL_MS))
+  : 3000;
 const ROUTE_API_FAILURE_WINDOW_MS = Number.isFinite(
   Number(process.env.ROUTE_API_FAILURE_WINDOW_MS)
 )
@@ -2195,6 +2405,8 @@ const ROUTE_API_COOLDOWN_MS = Number.isFinite(Number(process.env.ROUTE_API_COOLD
   : 30000;
 const routeMetricsCache = new Map();
 const routeMetricsInFlight = new Map();
+const dispatchCandidateCache = new Map();
+const dispatchCandidateCacheKeysByRide = new Map();
 let routeApiCooldownUntil = 0;
 const routeApiFailureTimestamps = [];
 const DRIVER_WALLET_GUARD_ENABLED =
@@ -4142,6 +4354,7 @@ function markRideCancelled(io, rideId, options = {}) {
 
   removeRideFromAllInboxes(io, safeRideId);
   rideCandidates.delete(safeRideId);
+  clearDispatchCandidateCacheForRide(safeRideId);
   clearRideStateTouch(safeRideId);
   clearActiveRideByRideId(safeRideId);
 
@@ -5157,6 +5370,7 @@ setInterval(() => {
 
       rideDetailsMap.delete(rideId);
       rideCandidates.delete(rideId);
+      clearDispatchCandidateCacheForRide(rideId);
       clearRideDriverStates(rideId);
       clearUserRideByRideId(rideId);
       cancelRetryStateCleanup(rideId);
@@ -5789,6 +6003,7 @@ function removeRideFromAllInboxes(io, rideId, options = {}) {
   }
 
   rideCandidates.delete(rideId);
+  clearDispatchCandidateCacheForRide(rideId);
   clearRideDriverStates(rideId);
   clearRideStateTouch(rideId);
 }
@@ -5835,6 +6050,7 @@ if (toNumber(driverId) !== skipUnavailableForDriverId) {
   }
 
   rideCandidates.delete(rideId);
+  clearDispatchCandidateCacheForRide(rideId);
   clearRideDriverStates(rideId);
   clearRideStateTouch(rideId);
   clearPricingSnapshot(rideId);
@@ -6365,6 +6581,14 @@ async function dispatchToNearbyDrivers(io, data) {
     }
   );
   const availableAir = availableAirResults.filter(Boolean);
+  const availableAirByDriverId = new Map(
+    availableAir
+      .map((driver) => {
+        const driverId = toNumber(driver?.driver_id);
+        return driverId ? [driverId, driver] : null;
+      })
+      .filter(Boolean)
+  );
 
   const targetDriverIdSet = Array.isArray(data?.driver_ids)
     ? new Set(
@@ -6381,28 +6605,105 @@ async function dispatchToNearbyDrivers(io, data) {
       ? Math.min(DISPATCH_ROUTE_MIN_NEEDED_DRIVERS, MAX_DISPATCH_CANDIDATES)
       : DISPATCH_ROUTE_MIN_NEEDED_DRIVERS
   );
+  const dispatchCandidateCacheKey = buildDispatchCandidateCacheKey({
+    rideId,
+    pickupLat: lat,
+    pickupLong: long,
+    roadRadiusM: roadRadius,
+    airCandidateRadiusM: airCandidateRadius,
+    serviceTypeId,
+    stageIndex: radiusPlan.currentStageIndex,
+    requiredGender: applyRequiredGenderFilter ? requiredGender : null,
+    needChildSeat: applyNeedChildSeatFilter ? needChildSeat : null,
+    needHandicap: applyNeedHandicapFilter ? needHandicap : null,
+    strictTargetDispatch,
+    targetDriverIdSet,
+  });
+  const loadFreshRoadFilteredRaw = async () => {
+    const freshRoadFilteredRaw = await filterDriversByRoadRadius(
+      availableAir,
+      lat,
+      long,
+      roadRadius,
+      {
+        stageIndex: radiusPlan.currentStageIndex,
+        minNeededDrivers: dispatchRouteMinNeededDrivers,
+        targetDriverIdSet,
+        strictTargetDispatch,
+      }
+    );
+    setCachedDispatchCandidates(
+      dispatchCandidateCacheKey,
+      rideId,
+      freshRoadFilteredRaw,
+      freshRoadFilteredRaw?._meta ?? {}
+    );
+    return freshRoadFilteredRaw;
+  };
 
-  const roadFilteredRaw = await filterDriversByRoadRadius(
-    availableAir,
-    lat,
-    long,
-    roadRadius,
-    {
-      stageIndex: radiusPlan.currentStageIndex,
-      minNeededDrivers: dispatchRouteMinNeededDrivers,
-      targetDriverIdSet,
-      strictTargetDispatch,
-    }
-  );
-  const roadFilterMeta = roadFilteredRaw?._meta ?? {};
+  let roadFilteredSourceRaw = null;
+  let roadFilterMeta = {};
+  let candidateCacheHit = false;
+  let candidateCacheRefreshed = false;
+  let candidateCacheSourceCount = 0;
+  const cachedDispatchCandidates = getCachedDispatchCandidates(dispatchCandidateCacheKey);
+  if (cachedDispatchCandidates) {
+    candidateCacheHit = true;
+    candidateCacheSourceCount = cachedDispatchCandidates.rows.length;
+    roadFilteredSourceRaw = cachedDispatchCandidates.rows;
+    roadFilterMeta = {
+      ...(cachedDispatchCandidates.meta ?? {}),
+      candidate_cache_hit: true,
+      candidate_cache_source_count: cachedDispatchCandidates.rows.length,
+      candidate_cache_age_ms: Date.now() - Number(cachedDispatchCandidates.at ?? Date.now()),
+    };
+  } else {
+    roadFilteredSourceRaw = await loadFreshRoadFilteredRaw();
+    roadFilterMeta = roadFilteredSourceRaw?._meta ?? {};
+    candidateCacheSourceCount = Array.isArray(roadFilteredSourceRaw)
+      ? roadFilteredSourceRaw.length
+      : 0;
+  }
 
-  const roadFiltered =
+  const applyStrictTargetFilter = (rows = []) =>
     strictTargetDispatch && targetDriverIdSet && targetDriverIdSet.size > 0
-      ? roadFilteredRaw.filter((driver) => {
+      ? rows.filter((driver) => {
           const driverId = toNumber(driver?.driver_id);
           return !!driverId && targetDriverIdSet.has(driverId);
         })
-      : roadFilteredRaw;
+      : rows;
+
+  let roadFilteredRaw = applyStrictTargetFilter(roadFilteredSourceRaw);
+  let roadFiltered = quickRevalidateDispatchCandidates(roadFilteredRaw, {
+    rideId,
+    availableAirByDriverId,
+    strictTargetDispatch,
+    targetDriverIdSet,
+  });
+
+  if (
+    candidateCacheHit &&
+    roadFiltered.length < dispatchRouteMinNeededDrivers &&
+    availableAir.length > roadFiltered.length
+  ) {
+    candidateCacheRefreshed = true;
+    roadFilteredSourceRaw = await loadFreshRoadFilteredRaw();
+    roadFilterMeta = {
+      ...(roadFilteredSourceRaw?._meta ?? {}),
+      candidate_cache_hit: false,
+      candidate_cache_refreshed_after_hit: true,
+    };
+    candidateCacheSourceCount = Array.isArray(roadFilteredSourceRaw)
+      ? roadFilteredSourceRaw.length
+      : 0;
+    roadFilteredRaw = applyStrictTargetFilter(roadFilteredSourceRaw);
+    roadFiltered = quickRevalidateDispatchCandidates(roadFilteredRaw, {
+      rideId,
+      availableAirByDriverId,
+      strictTargetDispatch,
+      targetDriverIdSet,
+    });
+  }
 
 // Keep old candidates only during incremental expansion stages.
 // For a fresh/initial dispatch window, start from current filtered drivers only.
@@ -6605,6 +6906,11 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   route_shortlist_expanded_candidates:
     roadFilterMeta?.expanded_candidate_count ?? roadFilterMeta?.initial_candidate_count ?? availableAir.length,
   route_shortlist_expanded: roadFilterMeta?.expanded === true,
+  dispatch_candidate_cache_hit: candidateCacheHit,
+  dispatch_candidate_cache_refreshed_after_hit: candidateCacheRefreshed,
+  dispatch_candidate_cache_source_count: candidateCacheSourceCount,
+  dispatch_candidate_cache_revalidated_count: roadFiltered.length,
+  dispatch_candidate_cache_ttl_ms: DISPATCH_CANDIDATE_CACHE_TTL_MS,
   required_gender: applyRequiredGenderFilter ? requiredGender : null,
   required_gender_filter_applied: applyRequiredGenderFilter,
   need_child_seat: applyNeedChildSeatFilter ? needChildSeat : null,
@@ -7204,42 +7510,55 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
   }
 
   const notifyDriverCandidate = (d) => {
+    const revalidatedDriver = quickRevalidateDriverForDispatchEmit(rideId, d);
+    if (!revalidatedDriver) {
+      removeDriverFromRideCandidates(io, rideId, toNumber(d?.driver_id), {
+        emitSummary: false,
+      });
+      console.log("[dispatch][skip-before-emit]", {
+        ride_id: rideId,
+        driver_id: toNumber(d?.driver_id),
+        reason: "quick-revalidation-failed",
+      });
+      return;
+    }
+
     const ridePayloadForDriver = attachCustomerFields(
       {
         ...ridePayload,
         radius: roadRadius,
 
-        ...(d.driver_to_pickup_distance_m != null
-          ? { driver_to_pickup_distance_m: d.driver_to_pickup_distance_m }
+        ...(revalidatedDriver.driver_to_pickup_distance_m != null
+          ? { driver_to_pickup_distance_m: revalidatedDriver.driver_to_pickup_distance_m }
           : {}),
-        ...(d.driver_to_pickup_distance_km != null
-          ? { driver_to_pickup_distance_km: d.driver_to_pickup_distance_km }
+        ...(revalidatedDriver.driver_to_pickup_distance_km != null
+          ? { driver_to_pickup_distance_km: revalidatedDriver.driver_to_pickup_distance_km }
           : {}),
-        ...(d.driver_to_pickup_duration_s != null
-          ? { driver_to_pickup_duration_s: d.driver_to_pickup_duration_s }
+        ...(revalidatedDriver.driver_to_pickup_duration_s != null
+          ? { driver_to_pickup_duration_s: revalidatedDriver.driver_to_pickup_duration_s }
           : {}),
-        ...(d.driver_to_pickup_duration_min != null
+        ...(revalidatedDriver.driver_to_pickup_duration_min != null
           ? {
-              driver_to_pickup_duration_min: d.driver_to_pickup_duration_min,
-              estimated_arrival_min: d.driver_to_pickup_duration_min,
+              driver_to_pickup_duration_min: revalidatedDriver.driver_to_pickup_duration_min,
+              estimated_arrival_min: revalidatedDriver.driver_to_pickup_duration_min,
             }
           : {}),
 
         meta: {
           ...(ridePayload?.meta && typeof ridePayload.meta === "object" ? ridePayload.meta : {}),
-          ...(d.driver_to_pickup_distance_m != null
-            ? { driver_to_pickup_distance_m: d.driver_to_pickup_distance_m }
+          ...(revalidatedDriver.driver_to_pickup_distance_m != null
+            ? { driver_to_pickup_distance_m: revalidatedDriver.driver_to_pickup_distance_m }
             : {}),
-          ...(d.driver_to_pickup_distance_km != null
-            ? { driver_to_pickup_distance_km: d.driver_to_pickup_distance_km }
+          ...(revalidatedDriver.driver_to_pickup_distance_km != null
+            ? { driver_to_pickup_distance_km: revalidatedDriver.driver_to_pickup_distance_km }
             : {}),
-          ...(d.driver_to_pickup_duration_s != null
-            ? { driver_to_pickup_duration_s: d.driver_to_pickup_duration_s }
+          ...(revalidatedDriver.driver_to_pickup_duration_s != null
+            ? { driver_to_pickup_duration_s: revalidatedDriver.driver_to_pickup_duration_s }
             : {}),
-          ...(d.driver_to_pickup_duration_min != null
+          ...(revalidatedDriver.driver_to_pickup_duration_min != null
             ? {
-                driver_to_pickup_duration_min: d.driver_to_pickup_duration_min,
-                estimated_arrival_min: d.driver_to_pickup_duration_min,
+                driver_to_pickup_duration_min: revalidatedDriver.driver_to_pickup_duration_min,
+                estimated_arrival_min: revalidatedDriver.driver_to_pickup_duration_min,
               }
             : {}),
         },
@@ -7255,7 +7574,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       is_running_ride: false,
     });
     console.log("[ride:bidRequest] payload", {
-      driver_id: d.driver_id,
+      driver_id: revalidatedDriver.driver_id,
       ride_id: bidRequestPayload?.ride_id ?? null,
       user_image: bidRequestPayload?.user_image ?? null,
       customer_image: bidRequestPayload?.customer_image ?? null,
@@ -7268,17 +7587,17 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
         bidRequestPayload?.max_price ?? bidRequestPayload?.ride_details?.max_price ?? null,
       min_fare:
         bidRequestPayload?.min_fare ?? bidRequestPayload?.ride_details?.min_fare ?? null,
-      max_fare:
-        bidRequestPayload?.max_fare ?? bidRequestPayload?.ride_details?.max_fare ?? null,
+        max_fare:
+          bidRequestPayload?.max_fare ?? bidRequestPayload?.ride_details?.max_fare ?? null,
       additional_remarks: resolveAdditionalRemarks(bidRequestPayload),
     });
 
-    inboxUpsert(d.driver_id, rideId, ridePayloadForDriver);
-    emitDispatchDeliverySummary(io, d.driver_id, ridePayloadForDriver);
+    inboxUpsert(revalidatedDriver.driver_id, rideId, ridePayloadForDriver);
+    emitDispatchDeliverySummary(io, revalidatedDriver.driver_id, ridePayloadForDriver);
 
     const emitResult = tryEmitBidRequestToDriver(io, {
       rideId,
-      driverId: d.driver_id,
+      driverId: revalidatedDriver.driver_id,
       bidRequestPayload,
       ridePayloadForDriver,
       dispatchStageIndex: radiusPlan.currentStageIndex,
@@ -7288,17 +7607,17 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
     });
 
     if (emitResult.delivered) {
-      deliveredDriverIds.push(toNumber(d.driver_id));
+      deliveredDriverIds.push(toNumber(revalidatedDriver.driver_id));
       console.log(
-        `[dispatch][delivery] ride ${rideId} -> driver ${d.driver_id} delivered (room_sockets:${emitResult.room_sockets})`
+        `[dispatch][delivery] ride ${rideId} -> driver ${revalidatedDriver.driver_id} delivered (room_sockets:${emitResult.room_sockets})`
       );
       return;
     }
 
-    pendingDriverIds.push(toNumber(d.driver_id));
+    pendingDriverIds.push(toNumber(revalidatedDriver.driver_id));
     scheduleBidRequestRetry(io, {
       rideId,
-      driverId: d.driver_id,
+      driverId: revalidatedDriver.driver_id,
       bidRequestPayload,
       ridePayloadForDriver,
       dispatchStageIndex: radiusPlan.currentStageIndex,
@@ -7307,7 +7626,7 @@ const candidatesToNotify = Array.from(notifyDriverIdSet)
       attempt: 1,
     });
     console.log(
-      `[dispatch][delivery] ride ${rideId} -> driver ${d.driver_id} pending (${emitResult.reason})`
+      `[dispatch][delivery] ride ${rideId} -> driver ${revalidatedDriver.driver_id} pending (${emitResult.reason})`
     );
   };
 

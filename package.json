@@ -6,7 +6,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:passed-live": "node tests/05-passed-destination-live.js",
-    "test:extra-live": "node tests/06-force-extra-distance-live.js"
+    "test:extra-live": "node tests/06-force-extra-distance-live.js",
+    "test:live-bidding-load": "node tests/run-live-bidding-load.js"
   },
   "keywords": [],
   "author": "",
