@@ -63,6 +63,7 @@ const autoAcceptFirstBidLocks = new Map(); // rideId -> timestamp
 // ✅ NEW: per-driver patch sequence (ordering)
 const driverPatchSeq = new Map(); // driverId -> number
 const driverRidesListEmptyLoggedAt = new Map(); // driverId -> timestamp
+const driverInboxLastCount = new Map(); // driverId -> last emitted inbox count
 const driverRecoveryNoopLoggedAt = new Map(); // `${source}:${driverId}` -> timestamp
 
 const DRIVER_RIDES_LIST_EMPTY_LOG_THROTTLE_MS = Number.isFinite(
@@ -2840,6 +2841,36 @@ const nextDriverSeq = (driverId) => {
   return next;
 };
 
+function getDriverInboxCount(driverId) {
+  const safeDriverId = toNumber(driverId);
+  if (!safeDriverId) return 0;
+
+  const box = driverRideInbox.get(safeDriverId);
+  return box ? box.size : 0;
+}
+
+function emitDriverInboxCount(io, driverId, options = {}) {
+  const safeDriverId = toNumber(driverId);
+  if (!io || !safeDriverId) return false;
+
+  const count = getDriverInboxCount(safeDriverId);
+  const force = options?.force === true;
+  const previousCount = driverInboxLastCount.get(safeDriverId);
+
+  // لا تبعت إذا العدد ما تغير
+  if (!force && previousCount === count) {
+    return false;
+  }
+
+  driverInboxLastCount.set(safeDriverId, count);
+
+  io.to(driverRoom(safeDriverId)).emit("driver:rides:count", {
+    inbox_count: count,
+  });
+
+  return true;
+}
+
 /**
  * ✅ Patch event (delta) — no full inbox resend
  * ops:
@@ -2865,6 +2896,8 @@ function emitDriverPatch(io, driverId, ops = []) {
     seq: nextDriverSeq(driverId),
     at: Date.now(),
   });
+    emitDriverInboxCount(io, driverId);
+
   return true;
 }
 
@@ -5561,6 +5594,7 @@ function emitDriverInbox(io, driverId, eventName = "driver:rides:list") {
     total: list.length,
     at: Date.now(),
   });
+  emitDriverInboxCount(io, driverId, { force: true });
 }
 
 function emitPendingBidRequestsForDriver(io, driverId, source = "driver:getRidesList") {
@@ -12061,6 +12095,8 @@ if (acceptedRouteDataDuration !== null) {
     const driverId = toNumber(socket.driverId);
     if (driverId) {
       driverPatchSeq.delete(driverId);
+        driverInboxLastCount.delete(driverId);
+
       // Keep inbox + bid status across transient disconnects.
       // Stale data is cleaned by inbox TTL/prune logic.
     }
