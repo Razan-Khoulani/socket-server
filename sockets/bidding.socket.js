@@ -63,6 +63,8 @@ const autoAcceptFirstBidLocks = new Map(); // rideId -> timestamp
 // ✅ NEW: per-driver patch sequence (ordering)
 const driverPatchSeq = new Map(); // driverId -> number
 const driverRidesListEmptyLoggedAt = new Map(); // driverId -> timestamp
+const driverInboxLastCount = new Map(); // driverId -> last emitted inbox count
+let latestIo = null;
 const driverRecoveryNoopLoggedAt = new Map(); // `${source}:${driverId}` -> timestamp
 
 const DRIVER_RIDES_LIST_EMPTY_LOG_THROTTLE_MS = Number.isFinite(
@@ -2840,6 +2842,84 @@ const nextDriverSeq = (driverId) => {
   return next;
 };
 
+function getDriverInboxCount(driverId) {
+  const safeDriverId = toNumber(driverId);
+  if (!safeDriverId) return 0;
+
+  const box = driverRideInbox.get(safeDriverId);
+  if (!box) return 0;
+
+  let count = 0;
+  const now = Date.now();
+
+  for (const [rideId, ride] of box.entries()) {
+    if (!ride || typeof ride !== "object") {
+      box.delete(rideId);
+      continue;
+    }
+
+    const safeRideId = toNumber(rideId);
+    const currentState = getRideDriverState(safeRideId, safeDriverId);
+    const statusSnapshot = getRideStatusSnapshot(safeRideId);
+    const rideStatus =
+      toNumber(statusSnapshot?.ride_status) ??
+      toNumber(ride?.ride_status) ??
+      toNumber(ride?.status) ??
+      null;
+
+    const ts = toNumber(ride?._ts) ?? 0;
+
+    if (
+      isRideOfferExpired(ride) ||
+      (ts && now - ts > INBOX_ENTRY_TTL_MS) ||
+      isTerminalDriverRideState(currentState?.status) ||
+      cancelledRides.has(safeRideId) ||
+      isTerminalRideStatus(rideStatus)
+    ) {
+      box.delete(rideId);
+      clearDriverBidStatus(safeDriverId, safeRideId);
+      continue;
+    }
+
+    count += 1;
+  }
+
+  if (box.size === 0) {
+    driverRideInbox.delete(safeDriverId);
+  }
+
+  return count;
+}
+
+function rememberIo(io) {
+  if (io) latestIo = io;
+  return io || latestIo;
+}
+
+function emitDriverInboxCount(io, driverId, options = {}) {
+  const safeDriverId = toNumber(driverId);
+  const targetIo = rememberIo(io);
+
+  if (!targetIo || !safeDriverId) return false;
+
+  const count = getDriverInboxCount(safeDriverId);
+  const force = options?.force === true;
+  const previousCount = driverInboxLastCount.get(safeDriverId);
+
+  // لا تبعت إذا العدد ما تغير
+  if (!force && previousCount === count) {
+    return false;
+  }
+
+  driverInboxLastCount.set(safeDriverId, count);
+
+targetIo.to(driverRoom(safeDriverId)).emit("driver:rides:count", {
+  inbox_count: count,
+});
+
+  return true;
+}
+
 /**
  * ✅ Patch event (delta) — no full inbox resend
  * ops:
@@ -2865,6 +2945,8 @@ function emitDriverPatch(io, driverId, ops = []) {
     seq: nextDriverSeq(driverId),
     at: Date.now(),
   });
+    emitDriverInboxCount(io, driverId);
+
   return true;
 }
 
@@ -5332,17 +5414,30 @@ setInterval(() => {
     for (const driverId of driverRideInbox.keys()) {
       const box = driverRideInbox.get(driverId);
       if (!box) continue;
+
       const now = Date.now();
+      let countChanged = false;
+
       for (const [rideId, ride] of box.entries()) {
         const ts = toNumber(ride?._ts) ?? 0;
+
         if (isRideOfferExpired(ride) || (ts && now - ts > INBOX_ENTRY_TTL_MS)) {
           box.delete(rideId);
+          countChanged = true;
+
           clearDriverBidStatus(driverId, rideId);
           markRideDriverState(rideId, driverId, "expired");
           removeDriverFromRideCandidates(null, rideId, driverId, { emitSummary: false });
         }
       }
-      if (box.size === 0) driverRideInbox.delete(driverId);
+
+      if (box.size === 0) {
+        driverRideInbox.delete(driverId);
+      }
+
+      if (countChanged) {
+        emitDriverInboxCount(latestIo, driverId);
+      }
     }
   } catch (e) {
     console.log("⚠️ [inbox prune] interval error:", e?.message || e);
@@ -5377,11 +5472,17 @@ setInterval(() => {
       dispatchInFlightByRide.delete(rideId);
 
       for (const [driverId, box] of driverRideInbox.entries()) {
-        if (!box || !box.has(rideId)) continue;
-        box.delete(rideId);
-        clearDriverBidStatus(driverId, rideId);
-        if (box.size === 0) driverRideInbox.delete(driverId);
-      }
+  if (!box || !box.has(rideId)) continue;
+
+  box.delete(rideId);
+  clearDriverBidStatus(driverId, rideId);
+
+  if (box.size === 0) {
+    driverRideInbox.delete(driverId);
+  }
+
+  emitDriverInboxCount(latestIo, driverId);
+}
 
       for (const [driverId, queued] of driverQueuedRide.entries()) {
         if (toNumber(queued?.ride_id) !== rideId) continue;
@@ -5561,6 +5662,7 @@ function emitDriverInbox(io, driverId, eventName = "driver:rides:list") {
     total: list.length,
     at: Date.now(),
   });
+  emitDriverInboxCount(io, driverId, { force: true });
 }
 
 function emitPendingBidRequestsForDriver(io, driverId, source = "driver:getRidesList") {
@@ -9050,6 +9152,7 @@ if (!isSameMoneyValue(acceptedPrice, targetAutoAcceptPrice)) {
 }
 
 module.exports = (io, socket) => {
+  rememberIo(io);
   socket.on("driver:getRidesList", (payload = {}) => {
     const { driver_id, recover_active_ride } = payload;
     debugLog("driver:getRidesList", { driver_id, recover_active_ride }, socket.id);
@@ -12061,6 +12164,8 @@ if (acceptedRouteDataDuration !== null) {
     const driverId = toNumber(socket.driverId);
     if (driverId) {
       driverPatchSeq.delete(driverId);
+        driverInboxLastCount.delete(driverId);
+
       // Keep inbox + bid status across transient disconnects.
       // Stale data is cleaned by inbox TTL/prune logic.
     }

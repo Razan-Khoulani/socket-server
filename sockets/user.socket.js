@@ -154,7 +154,7 @@ const VERBOSE_IMAGE_SOURCE_LOGS = process.env.VERBOSE_IMAGE_SOURCE_LOGS === "1";
 const lastUserImageSignatureByUserId = new Map();
 
 // ? NEW: keep timer unit aligned with bidding.socket (SECONDS)
-const RIDE_TIMEOUT_S = 90;
+const RIDE_TIMEOUT_S = 180;
 const NEARBY_DISPATCH_TIMEOUT_S = Number.isFinite(
   Number(process.env.NEARBY_DISPATCH_TIMEOUT_S)
 )
@@ -2837,51 +2837,69 @@ const emitRideStatusCatchup = (rideId, source = "user:joinRideRoom") => {
     registerUser(payload, "user:initialData");
   });
 
-  socket.on("user:joinRideRoom", (payload = {}) => {
-    debugLog("user:joinRideRoom", payload, socket.id);
+ socket.on("user:joinRideRoom", async (payload = {}) => {
+  debugLog("user:joinRideRoom", payload, socket.id);
 
-    const rideId = toNumber(payload?.ride_id);
-    const joinToken = normalizeToken(
-      payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
-    );
-    const userId =
-      resolvePayloadUserId(payload) ?? toNumber(payload?.user_id) ?? toNumber(socket.userId);
+  const rideId = toNumber(payload?.ride_id);
+  const joinToken = normalizeToken(
+    payload?.access_token ?? payload?.token ?? payload?.user_token ?? null
+  );
+  const userId =
+    resolvePayloadUserId(payload) ?? toNumber(payload?.user_id) ?? toNumber(socket.userId);
 
-    if (!rideId) {
-      console.log("[user:joinRideRoom] missing/invalid ride_id", payload);
-      return;
-    }
+  if (!rideId) {
+    console.log("[user:joinRideRoom] missing/invalid ride_id", payload);
+    return;
+  }
 
-    switchSocketUserSession(userId ?? socket.userId, joinToken, "user:joinRideRoom");
-    if (socket.userId && socket.userToken) {
-      setUserDetails(socket.userId, {
-        user_id: socket.userId,
-        user_token: socket.userToken,
-        token: socket.userToken,
-        access_token: socket.userToken,
-      });
-    }
+  switchSocketUserSession(userId ?? socket.userId, joinToken, "user:joinRideRoom");
 
-    if (socket.currentRideId && socket.currentRideId !== rideId) {
-      socket.leave(`ride:${socket.currentRideId}`);
-    }
-    socket.join(`ride:${rideId}`);
-    socket.currentRideId = rideId;
-    socket.lastVehicleTypesSig = null;
-    if (typeof biddingSocket.touchUserActiveRide === "function" && socket.userId) {
-      biddingSocket.touchUserActiveRide(socket.userId, rideId);
-    }
+  if (socket.userId && socket.userToken) {
+    setUserDetails(socket.userId, {
+      user_id: socket.userId,
+      user_token: socket.userToken,
+      token: socket.userToken,
+      access_token: socket.userToken,
+    });
+  }
 
-    socket.emit("ride:joined", { ride_id: rideId });
-    emitRideStatusCatchup(rideId, "user:joinRideRoom");
-    stopNearbyVehicleTypesLoop();
-stopNearbyDriversLoop();
-    ensureNearbyCenterFromRide(rideId);
-emitCachedPricingSnapshotToSocket(rideId, "user:joinRideRoom-cache");
-    console.log(
-      `?? User ${socket.userId || "unknown"} joined ride room ride:${rideId} (socket:${socket.id})`
-    );
-  });
+  if (socket.currentRideId && socket.currentRideId !== rideId) {
+    socket.leave(`ride:${socket.currentRideId}`);
+  }
+
+  socket.join(`ride:${rideId}`);
+  socket.currentRideId = rideId;
+
+  // ✅ امسح التواقيع حتى ما يمنع الديدوب إرسال نفس pricingSnapshot
+  socket.lastVehicleTypesSig = null;
+
+  if (socket.lastPricingSnapshotSigByRide?.delete) {
+    socket.lastPricingSnapshotSigByRide.delete(rideId);
+  }
+
+  if (typeof biddingSocket.touchUserActiveRide === "function" && socket.userId) {
+    biddingSocket.touchUserActiveRide(socket.userId, rideId);
+  }
+
+  socket.emit("ride:joined", { ride_id: rideId });
+
+  emitRideStatusCatchup(rideId, "user:joinRideRoom");
+
+  // ✅ وقف اللوبات فقط، بس لا تمنع الحساب اليدوي مرة واحدة
+  stopNearbyVehicleTypesLoop();
+  stopNearbyDriversLoop();
+
+  // ✅ مهم: جهّز center قبل الحساب
+  ensureNearbyCenterFromRide(rideId);
+
+  // ✅ رجّع الحساب متل قبل، بس مرة واحدة وقت join
+  await emitNearbyVehicleTypesGuarded();
+
+  console.log(
+    `?? User ${socket.userId || "unknown"} joined ride room ride:${rideId} (socket:${socket.id})`
+  );
+});
+
 
   socket.on("user:rejoinRideRoom", (payload = {}) => {
     debugLog("user:rejoinRideRoom", payload, socket.id);
