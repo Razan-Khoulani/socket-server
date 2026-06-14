@@ -1328,28 +1328,79 @@ const getRoomSocketCount = (io, roomName) => {
   const roomSet = io?.sockets?.adapter?.rooms?.get(roomName);
   return roomSet ? roomSet.size : 0;
 };
-const shouldSkipDriverPushForForegroundApp = (io, driverId) => {
+const shouldSkipDriverPushForForegroundApp = (
+  io,
+  driverId
+) => {
   const safeDriverId = toNumber(driverId);
-  if (!safeDriverId) return false;
 
-  const roomSockets = getRoomSocketCount(io, driverRoom(safeDriverId));
-  if (roomSockets <= 0) return false;
+  if (!io || !safeDriverId) {
+    return false;
+  }
 
-  const driverMeta = driverLocationService.getMeta(safeDriverId) || {};
-  const appState = String(driverMeta?.app_state ?? "").trim().toLowerCase();
-  const appStateUpdatedAt = toNumber(
-    driverMeta?.app_state_updated_at ?? driverMeta?.appStateUpdatedAt ?? null
+  const roomName = driverRoom(safeDriverId);
+
+  const socketIds =
+    io?.sockets?.adapter?.rooms?.get(roomName);
+
+  if (!socketIds || socketIds.size === 0) {
+    console.log(
+      "[driver:rides:list][push] foreground-check",
+      {
+        driver_id: safeDriverId,
+        room_sockets: 0,
+        foreground_sockets: 0,
+        should_skip: false,
+      }
+    );
+
+    return false;
+  }
+
+  let foregroundSockets = 0;
+
+  for (const socketId of socketIds) {
+    const driverSocket =
+      io?.sockets?.sockets?.get(socketId);
+
+    const socketAppState = String(
+      driverSocket?.driverAppState ?? ""
+    )
+      .trim()
+      .toLowerCase();
+
+    if (socketAppState === "foreground") {
+      foregroundSockets++;
+    }
+  }
+
+  /*
+   * Fallback للـ meta حتى يضل متوافق
+   * مع الحالة المحفوظة حالياً.
+   */
+  const driverMeta =
+    driverLocationService.getMeta(safeDriverId) || {};
+
+  const metaAppState = String(
+    driverMeta?.app_state ?? ""
+  )
+    .trim()
+    .toLowerCase();
+
+  const shouldSkip =
+    foregroundSockets > 0 ||
+    metaAppState === "foreground";
+
+  console.log(
+    "[driver:rides:list][push] foreground-check",
+    {
+      driver_id: safeDriverId,
+      room_sockets: socketIds.size,
+      foreground_sockets: foregroundSockets,
+      meta_app_state: metaAppState || null,
+      should_skip: shouldSkip,
+    }
   );
-  const shouldSkip = appState === "foreground";
-  console.log("[driver:rides:list][push] foreground-check", {
-    driver_id: safeDriverId,
-    room_sockets: roomSockets,
-    app_state: appState || null,
-    app_state_updated_at: Number.isFinite(appStateUpdatedAt)
-      ? appStateUpdatedAt
-      : null,
-    should_skip: shouldSkip,
-  });
 
   return shouldSkip;
 };
