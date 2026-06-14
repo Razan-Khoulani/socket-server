@@ -569,6 +569,85 @@ const mapWithConcurrency = async (items = [], concurrency = 4, mapper = async ()
     launch();
   });
 };
+const getRouteApiLimiterPendingCount = () =>
+  routeApiLimiterWaiters[ROUTE_API_LIMITER_PRIORITY_HIGH].length +
+  routeApiLimiterWaiters[ROUTE_API_LIMITER_PRIORITY_NORMAL].length;
+const getRouteApiLimiterStats = () => ({
+  active: activeGlobalRouteApiRequests,
+  waiting: getRouteApiLimiterPendingCount(),
+  max_concurrency: GLOBAL_ROUTE_API_MAX_CONCURRENCY,
+  max_waiters: ROUTE_API_MAX_WAITERS,
+});
+const pumpRouteApiLimiterWaiters = () => {
+  while (activeGlobalRouteApiRequests < GLOBAL_ROUTE_API_MAX_CONCURRENCY) {
+    const resume =
+      routeApiLimiterWaiters[ROUTE_API_LIMITER_PRIORITY_HIGH].shift() ||
+      routeApiLimiterWaiters[ROUTE_API_LIMITER_PRIORITY_NORMAL].shift();
+    if (!resume) return;
+    activeGlobalRouteApiRequests += 1;
+    try {
+      resume();
+    } catch (_) {
+      activeGlobalRouteApiRequests = Math.max(0, activeGlobalRouteApiRequests - 1);
+    }
+  }
+};
+const acquireRouteApiLimiterSlot = async ({
+  priority = ROUTE_API_LIMITER_PRIORITY_NORMAL,
+  label = null,
+} = {}) => {
+  if (activeGlobalRouteApiRequests < GLOBAL_ROUTE_API_MAX_CONCURRENCY) {
+    activeGlobalRouteApiRequests += 1;
+    return;
+  }
+
+  if (getRouteApiLimiterPendingCount() >= ROUTE_API_MAX_WAITERS) {
+    const overloadError = new Error("route-api-limiter-overloaded");
+    overloadError.code = "ROUTE_API_LIMITER_OVERLOADED";
+    warnThrottled(
+      "route-api-limiter-overloaded",
+      "[dispatch][routeApi][limiter-overloaded] using fallback:",
+      {
+        label,
+        priority,
+        ...getRouteApiLimiterStats(),
+      }
+    );
+    throw overloadError;
+  }
+
+  const normalizedPriority =
+    priority === ROUTE_API_LIMITER_PRIORITY_HIGH
+      ? ROUTE_API_LIMITER_PRIORITY_HIGH
+      : ROUTE_API_LIMITER_PRIORITY_NORMAL;
+
+  await new Promise((resolve) => {
+    routeApiLimiterWaiters[normalizedPriority].push(resolve);
+  });
+};
+const releaseRouteApiLimiterSlot = () => {
+  activeGlobalRouteApiRequests = Math.max(0, activeGlobalRouteApiRequests - 1);
+  pumpRouteApiLimiterWaiters();
+};
+const runWithRouteApiLimiter = async (task = async () => null, options = {}) => {
+  await acquireRouteApiLimiterSlot(options);
+  try {
+    return await task();
+  } finally {
+    releaseRouteApiLimiterSlot();
+  }
+};
+const requestRouteApi = async (params = {}, options = {}) =>
+  runWithRouteApiLimiter(
+    async () => {
+      const response = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
+        params,
+        timeout: LARAVEL_ROUTE_TIMEOUT_MS,
+      });
+      return response?.data ?? null;
+    },
+    options
+  );
 const pickFirstValue = (...values) => {
   for (const v of values) {
     if (v !== undefined && v !== null && v !== "") return v;
@@ -2380,6 +2459,14 @@ const ROUTE_API_CACHE_TTL_MS = Number.isFinite(Number(process.env.ROUTE_API_CACH
 const ROUTE_API_MAX_CONCURRENCY = Number.isFinite(Number(process.env.ROUTE_API_MAX_CONCURRENCY))
   ? Math.max(1, Number(process.env.ROUTE_API_MAX_CONCURRENCY))
   : 4;
+const GLOBAL_ROUTE_API_MAX_CONCURRENCY = Number.isFinite(
+  Number(process.env.GLOBAL_ROUTE_API_MAX_CONCURRENCY)
+)
+  ? Math.max(1, Math.floor(Number(process.env.GLOBAL_ROUTE_API_MAX_CONCURRENCY)))
+  : Math.max(2, Math.min(12, Math.floor(ROUTE_API_MAX_CONCURRENCY * 2)));
+const ROUTE_API_MAX_WAITERS = Number.isFinite(Number(process.env.ROUTE_API_MAX_WAITERS))
+  ? Math.max(10, Math.floor(Number(process.env.ROUTE_API_MAX_WAITERS)))
+  : 500;
 const ROUTE_CACHE_L2_TTL_S = Number.isFinite(Number(process.env.ROUTE_CACHE_L2_TTL_S))
   ? Math.max(1, Math.floor(Number(process.env.ROUTE_CACHE_L2_TTL_S)))
   : 15;
@@ -2410,6 +2497,13 @@ const dispatchCandidateCache = new Map();
 const dispatchCandidateCacheKeysByRide = new Map();
 let routeApiCooldownUntil = 0;
 const routeApiFailureTimestamps = [];
+const ROUTE_API_LIMITER_PRIORITY_HIGH = "high";
+const ROUTE_API_LIMITER_PRIORITY_NORMAL = "normal";
+const routeApiLimiterWaiters = {
+  [ROUTE_API_LIMITER_PRIORITY_HIGH]: [],
+  [ROUTE_API_LIMITER_PRIORITY_NORMAL]: [],
+};
+let activeGlobalRouteApiRequests = 0;
 const DRIVER_WALLET_GUARD_ENABLED =
   String(process.env.DRIVER_WALLET_GUARD_ENABLED || "1") === "1";
 const DRIVER_WALLET_GUARD_MAX_AGE_MS = Number.isFinite(
@@ -4482,6 +4576,31 @@ function getActiveRideSnapshotByDriver(driverId) {
   return getRideDetails(activeRideId) ?? findRideInInboxes(activeRideId) ?? null;
 }
 
+function getActiveRideDestinationByDriver(driverId) {
+  if (!driverId) return null;
+
+  const activeRide = getActiveRideSnapshotByDriver(driverId);
+  const meta = driverLocationService.getMeta(driverId) || {};
+
+  const destinationLat =
+    toNumber(activeRide?.destination_lat) ??
+    toNumber(activeRide?.ride_details?.destination_lat) ??
+    toNumber(meta?.current_ride_destination_lat ?? null);
+  const destinationLong =
+    toNumber(activeRide?.destination_long) ??
+    toNumber(activeRide?.ride_details?.destination_long) ??
+    toNumber(meta?.current_ride_destination_long ?? null);
+
+  if (destinationLat === null || destinationLong === null) {
+    return null;
+  }
+
+  return {
+    lat: destinationLat,
+    long: destinationLong,
+  };
+}
+
 function isDriverNearActiveRideDestination(driverId) {
   if (!driverId) return false;
 
@@ -4489,14 +4608,14 @@ function isDriverNearActiveRideDestination(driverId) {
   if (!activeRideId) return true;
 
   const driver = driverLocationService.getDriver(driverId);
-  const activeRide = getActiveRideSnapshotByDriver(driverId);
+  const destination = getActiveRideDestinationByDriver(driverId);
 
-  if (!driver || !activeRide) return false;
+  if (!driver || !destination) return false;
 
   const driverLat = toNumber(driver?.lat);
   const driverLong = toNumber(driver?.long);
-  const destLat = toNumber(activeRide?.destination_lat);
-  const destLong = toNumber(activeRide?.destination_long);
+  const destLat = toNumber(destination?.lat);
+  const destLong = toNumber(destination?.long);
 
   if (driverLat === null || driverLong === null || destLat === null || destLong === null) {
     return false;
@@ -6701,8 +6820,53 @@ async function dispatchToNearbyDrivers(io, data) {
     need_handicap: applyNeedHandicapFilter ? needHandicap : null,
   });
 
-  const availableAirResults = await mapWithConcurrency(
+  const targetDriverIdSet = Array.isArray(data?.driver_ids)
+    ? new Set(
+        data.driver_ids
+          .map((value) => toNumber(value))
+          .filter((value) => !!value)
+      )
+    : null;
+  const strictTargetDispatch =
+    toBinaryFlag(data?.restrict_to_driver_ids ?? data?.target_only ?? null) === 1;
+  const dispatchRouteMinNeededDrivers = Math.max(
+    1,
+    MAX_DISPATCH_CANDIDATES > 0
+      ? Math.min(DISPATCH_ROUTE_MIN_NEEDED_DRIVERS, MAX_DISPATCH_CANDIDATES)
+      : DISPATCH_ROUTE_MIN_NEEDED_DRIVERS
+  );
+  const walletEligibilityInitialPool = buildDispatchRoadFilterCandidatePool(
     nearbyAir,
+    lat,
+    long,
+    {
+      stageIndex: radiusPlan.currentStageIndex,
+      expanded: false,
+      strictTargetDispatch,
+      targetDriverIdSet,
+    }
+  );
+  const walletEligibilityExpandedPool = buildDispatchRoadFilterCandidatePool(
+    nearbyAir,
+    lat,
+    long,
+    {
+      stageIndex: radiusPlan.currentStageIndex,
+      expanded: true,
+      strictTargetDispatch,
+      targetDriverIdSet,
+    }
+  );
+  const walletEligibilityPoolByDriverId = new Map();
+  for (const driver of [...walletEligibilityInitialPool, ...walletEligibilityExpandedPool]) {
+    const driverId = toNumber(driver?.driver_id);
+    if (!driverId || walletEligibilityPoolByDriverId.has(driverId)) continue;
+    walletEligibilityPoolByDriverId.set(driverId, driver);
+  }
+  const walletEligibilityPool = Array.from(walletEligibilityPoolByDriverId.values());
+
+  const availableAirResults = await mapWithConcurrency(
+    walletEligibilityPool,
     DRIVER_WALLET_GUARD_MAX_CONCURRENCY,
     async (driver) => {
       const dId = toNumber(driver?.driver_id);
@@ -6721,21 +6885,6 @@ async function dispatchToNearbyDrivers(io, data) {
       .filter(Boolean)
   );
 
-  const targetDriverIdSet = Array.isArray(data?.driver_ids)
-    ? new Set(
-        data.driver_ids
-          .map((value) => toNumber(value))
-          .filter((value) => !!value)
-      )
-    : null;
-  const strictTargetDispatch =
-    toBinaryFlag(data?.restrict_to_driver_ids ?? data?.target_only ?? null) === 1;
-  const dispatchRouteMinNeededDrivers = Math.max(
-    1,
-    MAX_DISPATCH_CANDIDATES > 0
-      ? Math.min(DISPATCH_ROUTE_MIN_NEEDED_DRIVERS, MAX_DISPATCH_CANDIDATES)
-      : DISPATCH_ROUTE_MIN_NEEDED_DRIVERS
-  );
   const dispatchCandidateCacheKey = buildDispatchCandidateCacheKey({
     rideId,
     pickupLat: lat,
@@ -7013,7 +7162,9 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   target_driver_strict_mode: strictTargetDispatch,
   target_driver_ids_count: targetDriverIdSet ? targetDriverIdSet.size : 0,
   nearby_air: nearbyAir.length,
+  wallet_prefilter_candidates: walletEligibilityPool.length,
   available_air: availableAir.length,
+  wallet_guard_max_concurrency: DRIVER_WALLET_GUARD_MAX_CONCURRENCY,
   road_filtered_raw: roadFilteredRaw.length,
   road_filtered: roadFiltered.length,
   dispatch_eligible: eligibleForDispatch.length,
@@ -7037,6 +7188,10 @@ console.log("[dispatch][dispatchToNearbyDrivers]", {
   route_shortlist_expanded_candidates:
     roadFilterMeta?.expanded_candidate_count ?? roadFilterMeta?.initial_candidate_count ?? availableAir.length,
   route_shortlist_expanded: roadFilterMeta?.expanded === true,
+  route_api_local_max_concurrency: ROUTE_API_MAX_CONCURRENCY,
+  route_api_global_max_concurrency: GLOBAL_ROUTE_API_MAX_CONCURRENCY,
+  route_api_global_active: activeGlobalRouteApiRequests,
+  route_api_global_waiting: getRouteApiLimiterPendingCount(),
   dispatch_candidate_cache_hit: candidateCacheHit,
   dispatch_candidate_cache_refreshed_after_hit: candidateCacheRefreshed,
   dispatch_candidate_cache_source_count: candidateCacheSourceCount,
@@ -7896,21 +8051,19 @@ async function fetchRouteAndEmit(io, rideId, driverId, rideSnapshot = null) {
   }
 
   try {
-    const response = await axios.get(
-      `${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`,
+    const routeApiData = await requestRouteApi(
       {
-        params: {
-          startLongitude,
-          startLatitude,
-          endLongitude,
-          endLatitude,
-          requested_at,
-        },
-        timeout: LARAVEL_ROUTE_TIMEOUT_MS,
+        startLongitude,
+        startLatitude,
+        endLongitude,
+        endLatitude,
+        requested_at,
+      },
+      {
+        priority: ROUTE_API_LIMITER_PRIORITY_HIGH,
+        label: "ride-route-data",
       }
     );
-
-    const routeApiData = response?.data ?? null;
     const normalizedDuration = normalizeDuration(
       pickFirstValue(
         routeApiData?.duration,
@@ -7998,18 +8151,19 @@ async function fetchRouteDataByCoords({
   }
 
   try {
-    const response = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
-      params: {
+    return await requestRouteApi(
+      {
         startLongitude: safeStartLongitude,
         startLatitude: safeStartLatitude,
         endLongitude: safeEndLongitude,
         endLatitude: safeEndLatitude,
         requested_at: safeRequestedAt,
       },
-      timeout: LARAVEL_ROUTE_TIMEOUT_MS,
-    });
-
-    return response?.data ?? null;
+      {
+        priority: ROUTE_API_LIMITER_PRIORITY_HIGH,
+        label: "dispatch-route-data",
+      }
+    );
   } catch (error) {
     console.error(
       "[fetchRouteDataByCoords] failed:",
@@ -8139,18 +8293,19 @@ async function fetchDriverToPickupRoadMetrics(driverLat, driverLong, pickupLat, 
         return fallback;
       }
 
-      const res = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
-        params: {
+      const data = await requestRouteApi(
+        {
           startLongitude: lo1,
           startLatitude: la1,
           endLongitude: lo2,
           endLatitude: la2,
           requested_at: new Date().toISOString(),
         },
-        timeout: LARAVEL_ROUTE_TIMEOUT_MS,
-      });
-
-      const data = res?.data ?? null;
+        {
+          priority: ROUTE_API_LIMITER_PRIORITY_NORMAL,
+          label: "driver-to-pickup-road-metrics",
+        }
+      );
       recordRouteApiSuccess();
       const roadDistanceM = extractRoadDistanceMeters(data);
       const durationMin = toRouteMetricNumber(data?.duration ?? null);
@@ -8311,8 +8466,11 @@ async function filterDriversByRoadRadiusCore(drivers, pickupLat, pickupLong, roa
   const list = Array.isArray(drivers)
     ? drivers
     : [];
-
-  const results = await mapWithConcurrency(list, ROUTE_API_MAX_CONCURRENCY, async (d) => {
+  if (list.length === 0) return [];
+  const results = await mapWithConcurrency(
+    list,
+    Math.min(ROUTE_API_MAX_CONCURRENCY, list.length),
+    async (d) => {
       const driverId = toNumber(d?.driver_id);
       const driverLat = toNumber(d?.lat);
       const driverLong = toNumber(d?.long);
@@ -8336,7 +8494,8 @@ async function filterDriversByRoadRadiusCore(drivers, pickupLat, pickupLong, roa
         driver_to_pickup_duration_min: metrics.road_duration_min,
         _air_distance_m: toNumber(d?._air_distance_m ?? null),
       };
-    });
+    }
+  );
 
   return results.filter(Boolean);
 }
