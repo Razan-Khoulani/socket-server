@@ -65,6 +65,25 @@ const INTERNAL_SECRET_ENFORCE = String(
 const SOCKET_INTERNAL_SECRET = String(
   process.env.SOCKET_INTERNAL_SECRET || process.env.LARAVEL_INTERNAL_SECRET || ""
 ).trim();
+const DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS =
+  Number.isFinite(
+    Number(
+      process.env
+        .DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS
+    )
+  )
+    ? Math.max(
+        10_000,
+        Number(
+          process.env
+            .DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS
+        )
+      )
+    : 60_000;
+
+const driverAdminProfileSyncInFlight =
+  new Map();
+
 const INVOICE_STATUSES = new Set([7, 8, 9]);
 const TRIP_SUMMARY_START_STATUSES = new Set([5]);
 const TRIP_SUMMARY_COMPLETE_STATUSES = new Set([7, 8, 11]);
@@ -740,6 +759,129 @@ const shouldSkipDedupe = (map, key, ttlMs) => {
   return false;
 };
 
+const refreshDriverAdminProfileIfStale = (
+  driverId,
+  driverServiceId = null
+) => {
+  const safeDriverId = Number(driverId);
+
+  if (
+    !Number.isFinite(safeDriverId) ||
+    safeDriverId <= 0
+  ) {
+    return Promise.resolve(null);
+  }
+
+  const currentMeta =
+    driverLocationService.getMeta(
+      safeDriverId
+    ) || {};
+
+  const lastCheckedAt = Number(
+    currentMeta?.admin_profile_checked_at ??
+      currentMeta?.wallet_checked_at ??
+      0
+  );
+
+  const profileMissing =
+    !currentMeta?.driver_service_id ||
+    !currentMeta?.service_category_id ||
+    !currentMeta?.driver_name;
+
+  const profileStale =
+    !Number.isFinite(lastCheckedAt) ||
+    Date.now() - lastCheckedAt >=
+      DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS;
+
+  if (!profileMissing && !profileStale) {
+    return Promise.resolve(currentMeta);
+  }
+
+  if (
+    driverAdminProfileSyncInFlight.has(
+      safeDriverId
+    )
+  ) {
+    return driverAdminProfileSyncInFlight.get(
+      safeDriverId
+    );
+  }
+
+  const safeDriverServiceId =
+    Number.isFinite(Number(driverServiceId)) &&
+    Number(driverServiceId) > 0
+      ? Number(driverServiceId)
+      : Number(
+          currentMeta?.driver_service_id
+        ) || null;
+
+  const refreshPromise = (async () => {
+    try {
+      const profile =
+        await getDriverAdminProfile({
+          driverId: safeDriverId,
+
+          driverServiceId:
+            safeDriverServiceId,
+
+          forceRefresh: true,
+        });
+
+      if (
+        !profile ||
+        typeof profile !== "object"
+      ) {
+        return currentMeta;
+      }
+
+      const now = Date.now();
+
+      const nextMeta = {
+        ...currentMeta,
+        ...profile,
+
+        admin_profile_checked_at: now,
+        wallet_checked_at: now,
+
+        updatedAt: now,
+      };
+
+      driverLocationService.updateMeta(
+        safeDriverId,
+        nextMeta
+      );
+
+      return nextMeta;
+    } catch (error) {
+      console.warn(
+        "[driver-profile-refresh] failed",
+        {
+          driver_id: safeDriverId,
+
+          driver_service_id:
+            safeDriverServiceId,
+
+          error:
+            error?.message || error,
+        }
+      );
+
+      return currentMeta;
+    } finally {
+      driverAdminProfileSyncInFlight.delete(
+        safeDriverId
+      );
+    }
+  })();
+
+  driverAdminProfileSyncInFlight.set(
+    safeDriverId,
+    refreshPromise
+  );
+
+  return refreshPromise;
+};
+
 const app = express();
 app.use(express.json());
 app.use("/events/internal", (req, res, next) => {
@@ -970,13 +1112,21 @@ app.post("/events/internal/driver-status-updated", async (req, res) => {
         driverLocationService.updateMemory(safeDriverId, profileLat, profileLong);
       }
 
-      driverLocationService.updateMeta(safeDriverId, {
-        ...(profile || {}),
-        dashboard_is_online: true,
-        is_online: true,
-        last_activity_at: Date.now(),
-        updatedAt: Date.now(),
-      });
+const now = Date.now();
+
+driverLocationService.updateMeta(safeDriverId, {
+  ...(profile || {}),
+
+  dashboard_is_online: true,
+  is_online: true,
+  socket_disconnected: false,
+
+  admin_profile_checked_at: now,
+  wallet_checked_at: now,
+
+  last_activity_at: now,
+  updatedAt: now,
+});
     } catch (error) {
       console.warn("[driver-status-updated] admin profile sync failed", {
         driver_id: safeDriverId,
@@ -1068,15 +1218,27 @@ app.post("/events/internal/driver-profile-updated", async (req, res) => {
       currentMeta.is_online === true;
 
     const now = Date.now();
-    const nextMeta = {
-      ...currentMeta,
-      ...profile,
-      is_online: resolvedIsOnline,
-      dashboard_is_online: resolvedIsOnline,
-      socket_disconnected: !resolvedIsOnline,
-      updatedAt: now,
-      ...(resolvedIsOnline ? { last_activity_at: now } : { lastSeen: now }),
-    };
+const nextMeta = {
+  ...currentMeta,
+  ...profile,
+
+  is_online: resolvedIsOnline,
+  dashboard_is_online: resolvedIsOnline,
+  socket_disconnected: !resolvedIsOnline,
+
+  admin_profile_checked_at: now,
+  wallet_checked_at: now,
+
+  updatedAt: now,
+
+  ...(resolvedIsOnline
+    ? {
+        last_activity_at: now,
+      }
+    : {
+        lastSeen: now,
+      }),
+};
 
     driverLocationService.updateMeta(safeDriverId, nextMeta);
     if (typeof biddingSocket.syncDriverProfileIntoInbox === "function") {
@@ -1170,6 +1332,7 @@ app.post("/events/internal/driver-location", async (req, res) => {
   );
 
   const driverId = Number(driver_id);
+  const now = Date.now();
   const driverServiceId = Number(req.body.driver_service_id);
   const vehicleTypeId = Number(req.body.vehicle_type_id);
   const explicitStatusNumber = Number(req.body.current_status ?? req.body.new_status);
@@ -1177,28 +1340,31 @@ app.post("/events/internal/driver-location", async (req, res) => {
 
   // ✅ update memory
   driverLocationService.updateMemory(driverId, la, lo);
-
-  try {
-    const profile = await getDriverAdminProfile({
-      driverId,
-      driverServiceId,
-    });
-
-    if (profile) {
-      driverLocationService.updateMeta(driverId, {
-        ...profile,
-        updatedAt: Date.now(),
-      });
-    }
-  } catch (error) {
-    console.warn("[driver-location] admin profile sync failed", {
+  /*
+ * لا ننتظر Laravel.
+ * الموقع يكمل فوراً،
+ * والبروفايل يتحدث بالخلفية عند الحاجة فقط.
+ */
+void refreshDriverAdminProfileIfStale(
+  driverId,
+  driverServiceId
+).catch((error) => {
+  console.warn(
+    "[driver-location] background profile refresh failed",
+    {
       driver_id: driverId,
-      driver_service_id: Number.isFinite(driverServiceId) ? driverServiceId : null,
-      error: error?.message || error,
-    });
-  }
 
-  // ✅ mark online only if socket is connected to driver room
+      driver_service_id:
+        Number.isFinite(driverServiceId) &&
+        driverServiceId > 0
+          ? driverServiceId
+          : null,
+
+      error: error?.message || error,
+    }
+  );
+});
+// ✅ mark online only if socket is connected to driver room
   const existingMeta = driverLocationService.getMeta(driverId) || {};
   const driverRoom = `driver:${driverId}`;
   const room = io.sockets.adapter.rooms.get(driverRoom);
@@ -1225,28 +1391,52 @@ app.post("/events/internal/driver-location", async (req, res) => {
     ? profileStatusNumber === 1
     : (existingMeta.dashboard_is_online === false ? false : isOnlineByRoom);
 
-  driverLocationService.updateMeta(driverId, {
-    ...(Number.isFinite(driverServiceId) ? { driver_service_id: driverServiceId } : {}),
-    ...(Number.isFinite(vehicleTypeId) ? { vehicle_type_id: vehicleTypeId } : {}),
-    dashboard_is_online: resolvedDashboardOnline,
-    last_activity_at: Date.now(),
-    is_online: resolvedOnline,
-    lastSeen: resolvedOnline ? undefined : Date.now(),
-    updatedAt: Date.now(),
-  });
+driverLocationService.updateMeta(driverId, {
+  ...(Number.isFinite(driverServiceId) &&
+  driverServiceId > 0
+    ? {
+        driver_service_id: driverServiceId,
+      }
+    : {}),
+
+  ...(Number.isFinite(vehicleTypeId) &&
+  vehicleTypeId > 0
+    ? {
+        vehicle_type_id: vehicleTypeId,
+      }
+    : {}),
+
+  dashboard_is_online:
+    resolvedDashboardOnline,
+
+  is_online:
+    resolvedOnline,
+
+  last_activity_at: now,
+
+  ...(resolvedOnline
+    ? {}
+    : {
+        lastSeen: now,
+      }),
+
+  updatedAt: now,
+});
 
   // ✅ broadcast to driver's room
   emitAdminDriverUpdate(io, driverId);
-  io.to(`driver:${driverId}`).emit("driver:moved", {
+io.to(`driver:${driverId}`).emit(
+  "driver:moved",
+  {
     driver_id: driverId,
     lat: la,
     long: lo,
-    timestamp: Date.now(),
-  });
+    timestamp: now,
+  }
+);
 
   const activeRideId = getActiveRideByDriver(driverId);
   if (activeRideId) {
-    const now = Date.now();
     appendRidePoint(activeRideId, { lat: la, lng: lo, at: now });
     io.to(`ride:${activeRideId}`).emit("ride:locationUpdate", {
       ride_id: activeRideId,

@@ -82,6 +82,7 @@ const statusOrder = (status) => {
   return n;
 };
 const pendingRelocationByDriver = new Map(); // driverId -> { lat, long, at, reason }
+const driverAdminProfileSyncInFlight = new Map();
 const shouldSkipDuplicateStatus = (key, status) => {
   const now = Date.now();
   const prev = lastRideStatusByKey.get(key);
@@ -277,12 +278,20 @@ module.exports = (io, socket) => {
         return currentMeta;
       }
 
-      const mergedMeta = {
-        ...currentMeta,
-        ...profile,
-        wallet_checked_at: Date.now(),
-        updatedAt: Date.now(),
-      };
+     const now = Date.now();
+
+const mergedMeta = {
+  ...currentMeta,
+  ...profile,
+
+  // تستخدمها فلترة المحفظة
+  wallet_checked_at: now,
+
+  // تستخدمها لمعرفة آخر تحديث كامل للبروفايل
+  admin_profile_checked_at: now,
+
+  updatedAt: now,
+};
       driverLocationService.updateMeta(safeDriverId, mergedMeta);
       return mergedMeta;
     } catch (error) {
@@ -295,26 +304,70 @@ module.exports = (io, socket) => {
     }
   };
 
-  const syncDriverAdminWalletMetaIfStale = async (driverId, driverServiceId = null) => {
-    const safeDriverId = toNumber(driverId);
-    if (!safeDriverId) return null;
+const syncDriverAdminWalletMetaIfStale = async (
+  driverId,
+  driverServiceId = null
+) => {
+  const safeDriverId = toNumber(driverId);
 
-    const meta = driverLocationService.getMeta(safeDriverId) || {};
-    const hasWalletFlag =
-      meta?.not_valid_wallet_balance !== undefined &&
-      meta?.not_valid_wallet_balance !== null;
-    const lastCheckedAt = toNumber(meta?.wallet_checked_at ?? null);
-    const shouldRefresh =
-      !hasWalletFlag ||
-      !Number.isFinite(lastCheckedAt) ||
-      Date.now() - lastCheckedAt >= DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS;
+  if (!safeDriverId) {
+    return null;
+  }
 
-    if (!shouldRefresh) return meta;
-    return syncDriverAdminWalletMeta(safeDriverId, {
+  const meta =
+    driverLocationService.getMeta(safeDriverId) || {};
+
+  const hasWalletFlag =
+    meta?.not_valid_wallet_balance !== undefined &&
+    meta?.not_valid_wallet_balance !== null;
+
+  const lastCheckedAt = toNumber(
+    meta?.admin_profile_checked_at ??
+      meta?.wallet_checked_at ??
+      null
+  );
+
+  const shouldRefresh =
+    !hasWalletFlag ||
+    !Number.isFinite(lastCheckedAt) ||
+    Date.now() - lastCheckedAt >=
+      DRIVER_ADMIN_PROFILE_SYNC_EVERY_MS;
+
+  if (!shouldRefresh) {
+    return meta;
+  }
+
+  /*
+   * إذا وصل أكثر من location update بنفس الوقت،
+   * لا نفتح أكثر من request لنفس السائق.
+   */
+  if (
+    driverAdminProfileSyncInFlight.has(
+      safeDriverId
+    )
+  ) {
+    return driverAdminProfileSyncInFlight.get(
+      safeDriverId
+    );
+  }
+
+  const refreshPromise =
+    syncDriverAdminWalletMeta(safeDriverId, {
       driverServiceId,
       forceRefresh: true,
+    }).finally(() => {
+      driverAdminProfileSyncInFlight.delete(
+        safeDriverId
+      );
     });
-  };
+
+  driverAdminProfileSyncInFlight.set(
+    safeDriverId,
+    refreshPromise
+  );
+
+  return refreshPromise;
+};
 
   const parseLatLongString = (value) => {
     if (typeof value !== "string" || !value.includes(",")) return null;
@@ -988,13 +1041,31 @@ module.exports = (io, socket) => {
     const shouldStayOnlineNow =
       profileStatusNow === 1 || hasActiveSocketRoomNow || walletBlockedNow;
 
-    driverLocationService.updateMeta(socket.driverId, {
-      is_online: shouldStayOnlineNow,
-      dashboard_is_online: shouldStayOnlineNow,
-      socket_disconnected: !shouldStayOnlineNow,
-      can_receive_new_requests: walletBlockedNow ? 0 : 1,
-      updatedAt: now,
-    });
+driverLocationService.updateMeta(
+  socket.driverId,
+  {
+    is_online: shouldStayOnlineNow,
+
+    dashboard_is_online:
+      shouldStayOnlineNow,
+
+    socket_disconnected:
+      !shouldStayOnlineNow,
+
+    can_receive_new_requests:
+      walletBlockedNow ? 0 : 1,
+
+    last_activity_at: now,
+
+    ...(shouldStayOnlineNow
+      ? {}
+      : {
+          lastSeen: now,
+        }),
+
+    updatedAt: now,
+  }
+);
 
     // ✅ ابعث تحديث المرشحين مع كل update-location مقبول
     emitCandidatesSummaryForDriver(socket.driverId);
