@@ -823,8 +823,6 @@ const refreshDriverAdminProfileIfStale = (
 
           driverServiceId:
             safeDriverServiceId,
-
-          forceRefresh: true,
         });
 
       if (

@@ -2,7 +2,6 @@
 const driverLocationService = require("../services/driverLocation.service");
 const axios = require("axios");
 const { getDistanceMeters } = require("../utils/geo.util");
-const routeCacheL2 = require("../services/routeCacheL2.service");
 const {
   setUserDetails,
   getUserDetailsByToken,
@@ -85,11 +84,23 @@ const NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS = Number.isFinite(
 )
   ? Math.max(0, Number(process.env.NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS))
   : 1500;
+const GLOBAL_NEARBY_CANDIDATE_CACHE_MAX_ENTRIES = Number.isFinite(
+  Number(process.env.GLOBAL_NEARBY_CANDIDATE_CACHE_MAX_ENTRIES)
+)
+  ? Math.max(50, Math.floor(Number(process.env.GLOBAL_NEARBY_CANDIDATE_CACHE_MAX_ENTRIES)))
+  : 1000;
+const GLOBAL_NEARBY_FARE_RESULT_CACHE_MAX_ENTRIES = Number.isFinite(
+  Number(process.env.GLOBAL_NEARBY_FARE_RESULT_CACHE_MAX_ENTRIES)
+)
+  ? Math.max(50, Math.floor(Number(process.env.GLOBAL_NEARBY_FARE_RESULT_CACHE_MAX_ENTRIES)))
+  : 1000;
 const serviceSearchRadiusCache = new Map();
 const serviceSearchRadiusInFlight = new Map();
 const nearbyFareVersionCache = new Map();
 const nearbyFareVersionInFlight = new Map();
 const nearbyVehicleFaresInFlight = new Map();
+const globalNearbyCandidateCache = new Map();
+const globalNearbyFareResultCache = new Map();
 
 const LARAVEL_BASE_URL =
   process.env.LARAVEL_BASE_URL ||
@@ -102,51 +113,15 @@ const LARAVEL_SERVICE_SEARCH_RADIUS_PATH =
 const LARAVEL_VEHICLE_FARE_VERSION_PATH =
   process.env.LARAVEL_VEHICLE_FARE_VERSION_PATH ||
   "/api/customer/transport/vehicle-fares-version";
-const LARAVEL_GET_ROUTE_PATH =
-  process.env.LARAVEL_GET_ROUTE_PATH || "/api/getRoute";
 
 const LARAVEL_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_TIMEOUT_MS))
   ? Math.max(1000, Number(process.env.LARAVEL_TIMEOUT_MS))
   : 7000;
-const LARAVEL_ROUTE_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
-  ? Math.max(1000, Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
-  : LARAVEL_TIMEOUT_MS;
 const ROUTE_CACHE_COORD_PRECISION = Number.isFinite(
   Number(process.env.ROUTE_CACHE_COORD_PRECISION)
 )
   ? Math.max(3, Math.min(6, Math.floor(Number(process.env.ROUTE_CACHE_COORD_PRECISION))))
   : 4;
-const ROUTE_API_CACHE_TTL_MS = Number.isFinite(Number(process.env.ROUTE_API_CACHE_TTL_MS))
-  ? Math.max(0, Number(process.env.ROUTE_API_CACHE_TTL_MS))
-  : 15000;
-const ROUTE_API_MAX_CONCURRENCY = Number.isFinite(Number(process.env.ROUTE_API_MAX_CONCURRENCY))
-  ? Math.max(1, Number(process.env.ROUTE_API_MAX_CONCURRENCY))
-  : 4;
-const ROUTE_CACHE_L2_TTL_S = Number.isFinite(Number(process.env.ROUTE_CACHE_L2_TTL_S))
-  ? Math.max(1, Math.floor(Number(process.env.ROUTE_CACHE_L2_TTL_S)))
-  : 15;
-const ROUTE_LOCK_TTL_S = Number.isFinite(Number(process.env.ROUTE_LOCK_TTL_S))
-  ? Math.max(1, Math.floor(Number(process.env.ROUTE_LOCK_TTL_S)))
-  : 3;
-const ROUTE_API_FAILURE_WINDOW_MS = Number.isFinite(
-  Number(process.env.ROUTE_API_FAILURE_WINDOW_MS)
-)
-  ? Math.max(1000, Number(process.env.ROUTE_API_FAILURE_WINDOW_MS))
-  : 10000;
-const ROUTE_API_FAILURE_THRESHOLD = Number.isFinite(
-  Number(process.env.ROUTE_API_FAILURE_THRESHOLD)
-)
-  ? Math.max(1, Math.floor(Number(process.env.ROUTE_API_FAILURE_THRESHOLD)))
-  : 5;
-const ROUTE_API_COOLDOWN_MS = Number.isFinite(Number(process.env.ROUTE_API_COOLDOWN_MS))
-  ? Math.max(1000, Number(process.env.ROUTE_API_COOLDOWN_MS))
-  : 30000;
-const ROUTE_LOCK_RECHECK_MIN_MS = 100;
-const ROUTE_LOCK_RECHECK_MAX_MS = 200;
-const routeMetricsCache = new Map();
-const routeMetricsInFlight = new Map();
-let routeApiCooldownUntil = 0;
-const routeApiFailureTimestamps = [];
 const VEHICLE_ICON_RELATIVE_DIR = "assets/images/service-category/transport-service-type";
 const DRIVER_IMAGE_RELATIVE_DIR = "assets/images/profile-images/provider";
 const CUSTOMER_IMAGE_RELATIVE_DIR = "assets/images/profile-images/customer";
@@ -181,101 +156,130 @@ const normalizeCoordForRouteKey = (value) => {
   if (safe === null) return null;
   return safe.toFixed(ROUTE_CACHE_COORD_PRECISION);
 };
-const buildRouteMetricsCacheKey = (startLat, startLong, endLat, endLong) => {
-  const aLat = normalizeCoordForRouteKey(startLat);
-  const aLong = normalizeCoordForRouteKey(startLong);
-  const bLat = normalizeCoordForRouteKey(endLat);
-  const bLong = normalizeCoordForRouteKey(endLong);
-  if (aLat === null || aLong === null || bLat === null || bLong === null) return null;
-  return `${aLat},${aLong}->${bLat},${bLong}`;
-};
-const buildRouteL2CacheKey = (cacheKey) =>
-  cacheKey ? `route:v1:${cacheKey}` : null;
-const buildRouteL2LockKey = (cacheKey) =>
-  cacheKey ? `route:lock:v1:${cacheKey}` : null;
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
-const getRandomLockRecheckDelayMs = () =>
-  ROUTE_LOCK_RECHECK_MIN_MS +
-  Math.floor(Math.random() * (ROUTE_LOCK_RECHECK_MAX_MS - ROUTE_LOCK_RECHECK_MIN_MS + 1));
-const getCachedRouteMetrics = (cacheKey) => {
-  if (!cacheKey || ROUTE_API_CACHE_TTL_MS <= 0) return null;
-  const cached = routeMetricsCache.get(cacheKey);
-  if (!cached) return null;
-  if (Date.now() - cached.at > ROUTE_API_CACHE_TTL_MS) {
-    routeMetricsCache.delete(cacheKey);
-    return null;
-  }
-  return cached.value ? { ...cached.value } : null;
-};
-const setCachedRouteMetrics = (cacheKey, value) => {
-  if (!cacheKey || ROUTE_API_CACHE_TTL_MS <= 0 || !value || typeof value !== "object") return;
-  routeMetricsCache.set(cacheKey, {
-    at: Date.now(),
-    value: { ...value },
-  });
-};
-const pruneRouteApiFailureTimestamps = (now = Date.now()) => {
-  while (
-    routeApiFailureTimestamps.length > 0 &&
-    now - routeApiFailureTimestamps[0] > ROUTE_API_FAILURE_WINDOW_MS
-  ) {
-    routeApiFailureTimestamps.shift();
-  }
-};
-const isRouteApiCircuitOpen = (now = Date.now()) => routeApiCooldownUntil > now;
-const recordRouteApiSuccess = () => {
-  routeApiFailureTimestamps.length = 0;
-  routeApiCooldownUntil = 0;
-};
-const recordRouteApiFailure = (details = null) => {
+const pruneGlobalNearbyCandidateCache = () => {
   const now = Date.now();
-  pruneRouteApiFailureTimestamps(now);
-  routeApiFailureTimestamps.push(now);
-  if (
-    routeApiFailureTimestamps.length >= ROUTE_API_FAILURE_THRESHOLD &&
-    routeApiCooldownUntil <= now
-  ) {
-    routeApiCooldownUntil = now + ROUTE_API_COOLDOWN_MS;
-    warnThrottled("route-api-circuit-open-user", "[routeApi][circuit-open] user socket fallback-only mode", {
-      failure_count: routeApiFailureTimestamps.length,
-      failure_window_ms: ROUTE_API_FAILURE_WINDOW_MS,
-      cooldown_ms: ROUTE_API_COOLDOWN_MS,
-      details,
-    });
+
+  for (const [key, entry] of globalNearbyCandidateCache.entries()) {
+    if (!entry || typeof entry !== "object") {
+      globalNearbyCandidateCache.delete(key);
+      continue;
+    }
+    if (entry.promise) continue;
+    if (!Number.isFinite(Number(entry.expiresAt)) || Number(entry.expiresAt) <= now) {
+      globalNearbyCandidateCache.delete(key);
+    }
+  }
+
+  if (globalNearbyCandidateCache.size <= GLOBAL_NEARBY_CANDIDATE_CACHE_MAX_ENTRIES) {
+    return;
+  }
+
+  for (const [key, entry] of globalNearbyCandidateCache.entries()) {
+    if (globalNearbyCandidateCache.size <= GLOBAL_NEARBY_CANDIDATE_CACHE_MAX_ENTRIES) {
+      break;
+    }
+    if (entry?.promise) continue;
+    globalNearbyCandidateCache.delete(key);
   }
 };
-const mapWithConcurrency = async (items = [], concurrency = 4, mapper = async () => null) => {
-  const list = Array.isArray(items) ? items : [];
-  if (list.length === 0) return [];
-  const safeConcurrency = Math.max(1, Math.floor(toNumber(concurrency) ?? 1));
-  const results = new Array(list.length);
-  let index = 0;
-  let active = 0;
-  return new Promise((resolve) => {
-    const launch = () => {
-      if (index >= list.length && active === 0) {
-        resolve(results);
-        return;
+const getSharedNearbyCandidateSnapshot = async (cacheKey, loader = async () => null) => {
+  const safeCacheKey = String(cacheKey || "").trim();
+  if (!safeCacheKey) {
+    return loader();
+  }
+
+  pruneGlobalNearbyCandidateCache();
+  const now = Date.now();
+  const cachedEntry = globalNearbyCandidateCache.get(safeCacheKey);
+  if (cachedEntry?.value && Number(cachedEntry.expiresAt) > now) {
+    return cachedEntry.value;
+  }
+  if (cachedEntry?.promise) {
+    return cachedEntry.promise;
+  }
+
+  const requestPromise = (async () => {
+    try {
+      const value = await loader();
+      if (NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS > 0) {
+        globalNearbyCandidateCache.set(safeCacheKey, {
+          value,
+          expiresAt: Date.now() + NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS,
+        });
+        pruneGlobalNearbyCandidateCache();
+      } else {
+        globalNearbyCandidateCache.delete(safeCacheKey);
       }
-      while (active < safeConcurrency && index < list.length) {
-        const current = index++;
-        active += 1;
-        Promise.resolve(mapper(list[current], current))
-          .then((result) => {
-            results[current] = result;
-          })
-          .catch((error) => {
-            console.warn("[mapWithConcurrency] worker failed:", error?.message || error);
-            results[current] = null;
-          })
-          .finally(() => {
-            active -= 1;
-            launch();
-          });
-      }
-    };
-    launch();
+      return value;
+    } catch (error) {
+      globalNearbyCandidateCache.delete(safeCacheKey);
+      throw error;
+    }
+  })();
+
+  globalNearbyCandidateCache.set(safeCacheKey, {
+    promise: requestPromise,
+    expiresAt: now + NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS,
   });
+  return requestPromise;
+};
+const buildNearbyDriversSignature = (drivers = []) =>
+  (Array.isArray(drivers) ? drivers : [])
+    .map((driver) =>
+      [
+        toNumber(driver?.driver_id) ?? "na",
+        normalizeCoordForRouteKey(driver?.lat ?? driver?.latitude ?? null) ?? "na",
+        normalizeCoordForRouteKey(
+          driver?.long ?? driver?.lng ?? driver?.longitude ?? null
+        ) ?? "na",
+        toNumber(driver?.service_type_id) ?? "na",
+        toNumber(driver?.service_category_id ?? driver?.service_cat_id) ?? "na",
+        Math.round(toNumber(driver?.driver_to_pickup_distance_m) ?? -1),
+        Math.round(toNumber(driver?.driver_to_pickup_duration_s) ?? -1),
+        toNumber(driver?.child_seat) ?? "na",
+        toNumber(driver?.handicap) ?? "na",
+        toNumber(driver?.driver_gender) ?? "na",
+      ].join(":")
+    )
+    .join("|");
+const cloneNearbyFareMap = (input) => {
+  const source = input instanceof Map ? input : new Map();
+  const cloned = new Map();
+  for (const [key, value] of source.entries()) {
+    cloned.set(
+      key,
+      value && typeof value === "object" ? { ...value } : value
+    );
+  }
+  return cloned;
+};
+const pruneGlobalNearbyFareResultCache = () => {
+  if (NEARBY_FARE_CACHE_TTL_MS === 0) {
+    globalNearbyFareResultCache.clear();
+    return;
+  }
+
+  const now = Date.now();
+  for (const [key, entry] of globalNearbyFareResultCache.entries()) {
+    if (!entry || typeof entry !== "object") {
+      globalNearbyFareResultCache.delete(key);
+      continue;
+    }
+    if (!Number.isFinite(Number(entry.cachedAt)) || now - Number(entry.cachedAt) > NEARBY_FARE_CACHE_TTL_MS) {
+      globalNearbyFareResultCache.delete(key);
+    }
+  }
+
+  if (globalNearbyFareResultCache.size <= GLOBAL_NEARBY_FARE_RESULT_CACHE_MAX_ENTRIES) {
+    return;
+  }
+
+  for (const key of globalNearbyFareResultCache.keys()) {
+    if (globalNearbyFareResultCache.size <= GLOBAL_NEARBY_FARE_RESULT_CACHE_MAX_ENTRIES) {
+      break;
+    }
+    globalNearbyFareResultCache.delete(key);
+  }
 };
 const parseLatLongPair = (value) => {
   if (typeof value !== "string" || !value.includes(",")) return null;
@@ -551,7 +555,7 @@ const inferServiceCategoryIdFromNearbyMemory = (
   if (la === null || lo === null) return null;
 
   const st = toNumber(serviceTypeId);
-  const nearbyWithType =
+  const readNearby = (requestedServiceTypeId = null) =>
     typeof driverLocationService.getNearbyDriversFromMemory === "function"
       ? driverLocationService.getNearbyDriversFromMemory(
           la,
@@ -560,28 +564,21 @@ const inferServiceCategoryIdFromNearbyMemory = (
           {
             only_online: true,
             max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
-            service_type_id: st ?? null,
+            ...(requestedServiceTypeId !== null
+              ? { service_type_id: requestedServiceTypeId }
+              : {}),
           }
         )
       : [];
 
+  const nearbyWithType = readNearby(st);
+
   let inferred = pickDominantServiceCategoryId(nearbyWithType);
-  if (inferred !== null) {
+  if (inferred !== null || st === null) {
     return inferred;
   }
 
-  const nearbyAnyType =
-    typeof driverLocationService.getNearbyDriversFromMemory === "function"
-      ? driverLocationService.getNearbyDriversFromMemory(
-          la,
-          lo,
-          DEFAULT_AIR_CANDIDATE_RADIUS_METERS,
-          {
-            only_online: true,
-            max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
-          }
-        )
-      : [];
+  const nearbyAnyType = readNearby();
 
   inferred = pickDominantServiceCategoryId(nearbyAnyType);
   if (inferred !== null) {
@@ -1226,7 +1223,8 @@ const fetchVehicleFaresFromApi = async (
   distanceKm,
   vehicleTypeIds = [],
   pickupLat = null,
-  pickupLong = null
+  pickupLong = null,
+  configVersion = null
 ) => {
   const safeServiceCategoryId = toNumber(serviceCategoryId);
   const safeDistanceKm = toNumber(distanceKm);
@@ -1234,6 +1232,7 @@ const fetchVehicleFaresFromApi = async (
 
   const safePickupLat = toNumber(pickupLat);
   const safePickupLong = toNumber(pickupLong);
+  const safeConfigVersion = toNumber(configVersion);
   const normalizedVehicleTypeIds = (Array.isArray(vehicleTypeIds) ? vehicleTypeIds : [])
     .map((id) => toNumber(id))
     .filter((id) => id !== null)
@@ -1245,10 +1244,23 @@ const fetchVehicleFaresFromApi = async (
       : "none";
   const inFlightKey = [
     `category:${safeServiceCategoryId}`,
+    `version:${safeConfigVersion ?? "na"}`,
     `distance:${distanceKey}`,
     `types:${normalizedVehicleTypeIds.join(",")}`,
     `pickup:${pickupKey}`,
   ].join("|");
+
+  if (NEARBY_FARE_CACHE_TTL_MS > 0) {
+    pruneGlobalNearbyFareResultCache();
+    const cachedEntry = globalNearbyFareResultCache.get(inFlightKey);
+    if (
+      cachedEntry?.value instanceof Map &&
+      Number.isFinite(Number(cachedEntry.cachedAt)) &&
+      Date.now() - Number(cachedEntry.cachedAt) <= NEARBY_FARE_CACHE_TTL_MS
+    ) {
+      return cloneNearbyFareMap(cachedEntry.value);
+    }
+  }
 
   const inFlightRequest = nearbyVehicleFaresInFlight.get(inFlightKey);
   if (inFlightRequest) return inFlightRequest;
@@ -1292,7 +1304,15 @@ const fetchVehicleFaresFromApi = async (
         if (!id) continue;
         map.set(id, item);
       }
-      return map;
+      const safeMap = cloneNearbyFareMap(map);
+      if (NEARBY_FARE_CACHE_TTL_MS > 0) {
+        globalNearbyFareResultCache.set(inFlightKey, {
+          value: safeMap,
+          cachedAt: Date.now(),
+        });
+        pruneGlobalNearbyFareResultCache();
+      }
+      return cloneNearbyFareMap(safeMap);
     } catch (e) {
       warnThrottled(
         "vehicle-fares-api-failed",
@@ -1309,234 +1329,31 @@ const fetchVehicleFaresFromApi = async (
   return requestPromise;
 };
 
-// ? NEW: helper extracts road distance from route API response
-const extractRoadDistanceMeters = (payload) => {
-  if (!payload || typeof payload !== "object") return null;
-
-  const directM = toNumber(
-    payload?.distance_m ??
-      payload?.distanceMeters ??
-      payload?.distance_meters ??
-      null
-  );
-  if (directM !== null) return directM;
-
-  const km = toNumber(
-    payload?.route ??
-      payload?.distance_km ??
-      payload?.total_distance ??
-      null
-  );
-  if (km !== null) return Math.round(km * 1000);
-
-  const nestedM = toNumber(
-    payload?.routes?.[0]?.distanceMeters ??
-      payload?.routes?.[0]?.legs?.[0]?.distance?.value ??
-      null
-  );
-  if (nestedM !== null) return nestedM;
-
-  return null;
-};
-
-// ? NEW: driver -> pickup road metrics via Laravel route API
-const fetchDriverToPickupRoadMetrics = async (driverLat, driverLong, pickupLat, pickupLong) => {
-  const la1 = toNumber(driverLat);
-  const lo1 = toNumber(driverLong);
-  const la2 = toNumber(pickupLat);
-  const lo2 = toNumber(pickupLong);
-  const airDistanceM = getDistanceMeters(la1, lo1, la2, lo2);
-  const safeAirDistanceM =
-    Number.isFinite(airDistanceM) && airDistanceM >= 0 ? Math.round(airDistanceM) : null;
-  const fallbackSpeedKmph = 28;
-  const safeAirDurationS =
-    safeAirDistanceM !== null
-      ? Math.max(
-          1,
-          Math.round((safeAirDistanceM / 1000 / Math.max(1, fallbackSpeedKmph)) * 3600)
-        )
-      : null;
-
-  if (la1 === null || lo1 === null || la2 === null || lo2 === null) {
-    return {
-      road_distance_m: null,
-      road_duration_s: null,
-      road_duration_min: null,
-      raw: null,
-      source: "invalid-input",
-    };
-  }
-
-  const routeKey = buildRouteMetricsCacheKey(la1, lo1, la2, lo2);
-  const cached = getCachedRouteMetrics(routeKey);
-  if (cached) {
-    return {
-      ...cached,
-      source: cached?.source ? `${cached.source}-cache` : "cache",
-    };
-  }
-
-  if (routeKey && routeMetricsInFlight.has(routeKey)) {
-    return routeMetricsInFlight.get(routeKey);
-  }
-
-  const inFlightPromise = (async () => {
-    let routeLockToken = null;
-    const routeL2CacheKey = buildRouteL2CacheKey(routeKey);
-    const routeL2LockKey = buildRouteL2LockKey(routeKey);
-
-    try {
-      if (routeL2CacheKey && routeCacheL2.isEnabled()) {
-        const cachedL2 = await routeCacheL2.getJson(routeL2CacheKey);
-        if (cachedL2 && typeof cachedL2 === "object") {
-          setCachedRouteMetrics(routeKey, cachedL2);
-          return {
-            ...cachedL2,
-            source: cachedL2?.source ? `${cachedL2.source}-l2-cache` : "l2-cache",
-          };
-        }
-
-        routeLockToken = await routeCacheL2.tryAcquireLock(routeL2LockKey, ROUTE_LOCK_TTL_S);
-        if (!routeLockToken) {
-          await sleep(getRandomLockRecheckDelayMs());
-          const delayedL2 = await routeCacheL2.getJson(routeL2CacheKey);
-          if (delayedL2 && typeof delayedL2 === "object") {
-            setCachedRouteMetrics(routeKey, delayedL2);
-            return {
-              ...delayedL2,
-              source: delayedL2?.source
-                ? `${delayedL2.source}-l2-cache-after-wait`
-                : "l2-cache-after-wait",
-            };
-          }
-        }
-      }
-
-      if (isRouteApiCircuitOpen()) {
-        warnThrottled(
-          "driver-to-pickup-road-metrics-circuit-open",
-          "[driverToPickupRoadMetrics] circuit open; using air fallback:",
-          {
-            cooldown_until: routeApiCooldownUntil,
-            air_distance_m: safeAirDistanceM,
-          }
-        );
-        const fallback = {
-          road_distance_m: safeAirDistanceM,
-          road_duration_s: safeAirDurationS,
-          road_duration_min: safeAirDurationS !== null ? roundMoney(safeAirDurationS / 60) : null,
-          raw: null,
-          source: safeAirDistanceM !== null ? "air-fallback-circuit-open" : "circuit-open",
-        };
-        setCachedRouteMetrics(routeKey, fallback);
-        if (routeL2CacheKey && routeCacheL2.isEnabled()) {
-          await routeCacheL2.setJson(routeL2CacheKey, fallback, ROUTE_CACHE_L2_TTL_S);
-        }
-        return fallback;
-      }
-
-      const res = await axios.get(`${LARAVEL_BASE_URL}${LARAVEL_GET_ROUTE_PATH}`, {
-        params: {
-          startLongitude: lo1,
-          startLatitude: la1,
-          endLongitude: lo2,
-          endLatitude: la2,
-          requested_at: new Date().toISOString(),
-        },
-        timeout: LARAVEL_ROUTE_TIMEOUT_MS,
-      });
-
-      const data = res?.data ?? null;
-      recordRouteApiSuccess();
-      const roadDistanceM = extractRoadDistanceMeters(data);
-      const durationMin = toNumber(data?.duration ?? null);
-      const durationS = durationMin !== null ? Math.round(durationMin * 60) : null;
-      const resolvedDistanceM = roadDistanceM ?? safeAirDistanceM;
-      const resolvedDurationS = durationS ?? safeAirDurationS;
-      const resolvedDurationMin =
-        resolvedDurationS !== null
-          ? roundMoney(resolvedDurationS / 60)
-          : durationMin !== null
-          ? roundMoney(durationMin)
-          : null;
-
-      const result = {
-        road_distance_m: resolvedDistanceM,
-        road_duration_s: resolvedDurationS,
-        road_duration_min: resolvedDurationMin,
-        raw: data,
-        source: roadDistanceM !== null ? "road-api" : "air-fallback-empty-route",
-      };
-      setCachedRouteMetrics(routeKey, result);
-      if (routeL2CacheKey && routeCacheL2.isEnabled()) {
-        await routeCacheL2.setJson(routeL2CacheKey, result, ROUTE_CACHE_L2_TTL_S);
-      }
-      return result;
-    } catch (e) {
-      recordRouteApiFailure(e?.response?.data || e?.message || e);
-      warnThrottled(
-        "driver-to-pickup-road-metrics-failed",
-        "[driverToPickupRoadMetrics] failed:",
-        e?.response?.data || e?.message || e
-      );
-      const fallback = {
-        road_distance_m: safeAirDistanceM,
-        road_duration_s: safeAirDurationS,
-        road_duration_min: safeAirDurationS !== null ? roundMoney(safeAirDurationS / 60) : null,
-        raw: null,
-        source: safeAirDistanceM !== null ? "air-fallback-error" : "error",
-      };
-      setCachedRouteMetrics(routeKey, fallback);
-      if (routeL2CacheKey && routeCacheL2.isEnabled()) {
-        await routeCacheL2.setJson(routeL2CacheKey, fallback, ROUTE_CACHE_L2_TTL_S);
-      }
-      return fallback;
-    } finally {
-      if (routeL2LockKey && routeLockToken) {
-        await routeCacheL2.releaseLock(routeL2LockKey, routeLockToken);
-      }
-      if (routeKey) routeMetricsInFlight.delete(routeKey);
-    }
-  })();
-
-  if (routeKey) routeMetricsInFlight.set(routeKey, inFlightPromise);
-  return inFlightPromise;
-};
-
-// ? NEW: final road-based filtering
 const filterDriversByRoadRadius = async (drivers, pickupLat, pickupLong, roadRadiusM) => {
   const list = Array.isArray(drivers) ? drivers.slice(0, MAX_ROAD_FILTER_CANDIDATES) : [];
-  const results = await mapWithConcurrency(
-    list,
-    ROUTE_API_MAX_CONCURRENCY,
-    async (d) => {
-      const driverId = toNumber(d?.driver_id);
-      const driverLat = toNumber(d?.lat);
-      const driverLong = toNumber(d?.long);
+  if (list.length === 0) return [];
 
-      if (!driverId || driverLat === null || driverLong === null) return null;
+  const sharedFilterDriversByRoadRadius =
+    typeof biddingSocket.filterDriversByRoadRadius === "function"
+      ? biddingSocket.filterDriversByRoadRadius
+      : null;
 
-      const metrics = await fetchDriverToPickupRoadMetrics(
-        driverLat,
-        driverLong,
-        pickupLat,
-        pickupLong
-      );
+  if (sharedFilterDriversByRoadRadius) {
+    const stageIndex =
+      list.length <= 12 ? 0 : list.length <= 20 ? 1 : list.length <= 35 ? 2 : 3;
 
-      if (metrics.road_distance_m === null) return null;
-      if (metrics.road_distance_m > roadRadiusM) return null;
-
-      return {
-        ...d,
-        driver_to_pickup_distance_m: metrics.road_distance_m,
-        driver_to_pickup_distance_km: roundMoney(metrics.road_distance_m / 1000),
-        driver_to_pickup_duration_s: metrics.road_duration_s,
-        driver_to_pickup_duration_min: metrics.road_duration_min,
-      };
-    }
-  );
-
-  return results.filter(Boolean);
+    return sharedFilterDriversByRoadRadius(
+      list,
+      pickupLat,
+      pickupLong,
+      roadRadiusM,
+      {
+        stageIndex,
+        minNeededDrivers: list.length,
+      }
+    );
+  }
+  return [];
 };
 
 const buildAirFallbackCandidates = (drivers = []) => {
@@ -1867,14 +1684,17 @@ const setupUserSocket = (io, socket) => {
   socket.nearbyCenter = null; // { lat, long }
   socket.nearbyDriversInterval = null;
   socket.nearbyVehicleTypesInterval = null;
+  socket.nearbyRefreshInterval = null;
   socket.nearbyDriversInFlight = false;
   socket.nearbyVehicleTypesInFlight = false;
+  socket.nearbyPeriodicRefreshInFlight = false;
+  socket.nearbyDriversLoopEnabled = false;
+  socket.nearbyVehicleTypesLoopEnabled = false;
   socket.nearbyRadius = DEFAULT_NEARBY_RADIUS_METERS;
   socket.nearbyDispatchStagesMeters = [DEFAULT_NEARBY_RADIUS_METERS];
   socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
   socket.nearbyDriversSearchStartedAt = null;
   socket.nearbyVehicleTypesSearchStartedAt = null;
-  socket.nearbyCandidateCache = new Map();
 
   socket.nearbyServiceTypeId = null;
   socket.nearbyServiceCategoryId = null;
@@ -1889,6 +1709,7 @@ const setupUserSocket = (io, socket) => {
 
   socket.nearbyFareCache = new Map();
   socket.lastPricingSnapshotSigByRide = new Map();
+  socket.lastNearbyDriversSig = null;
 
   const canDriverAppearInNearby = (driverId) => {
     const safeDriverId = toNumber(driverId);
@@ -2282,73 +2103,6 @@ const syncNearbyRadius = async (payload = {}) => {
       });
     }
   };
-  const applyNearbyDriverPreferenceFilters = (drivers = []) => {
-    if (!Array.isArray(drivers) || drivers.length === 0) return [];
-
-    const requiredGender = toGenderFilter(socket.nearbyRequiredGender);
-    const requiredChildSeat = toOptionalBinaryRequirement(socket.nearbyNeedChildSeat);
-    const requiredHandicap = toOptionalBinaryRequirement(socket.nearbyNeedHandicap);
-
-    return drivers.filter((driver) => {
-      if (requiredGender === 1 || requiredGender === 2) {
-        const driverGender = toGenderFilter(
-          driver?.driver_gender ?? driver?.gender ?? null
-        );
-        if (driverGender !== requiredGender) return false;
-      }
-
-      if (requiredChildSeat === 1) {
-        const driverChildSeat = toBinaryFlag(
-          driver?.child_seat ??
-            driver?.smoking ??
-            driver?.smoking_value ??
-            driver?.child_seat_accessibility ??
-            null
-        );
-        if (driverChildSeat !== requiredChildSeat) return false;
-      }
-
-      if (requiredHandicap === 1) {
-        const driverHandicap = toBinaryFlag(
-          driver?.handicap ??
-            driver?.handicap_accessibility ??
-            driver?.special_needs ??
-            null
-        );
-        if (driverHandicap !== requiredHandicap) return false;
-      }
-
-      return true;
-    });
-  };
-
-  const clearNearbyCandidateCache = () => {
-    if (!(socket.nearbyCandidateCache instanceof Map)) {
-      socket.nearbyCandidateCache = new Map();
-      return;
-    }
-    socket.nearbyCandidateCache.clear();
-  };
-
-  const pruneNearbyCandidateCache = () => {
-    if (!(socket.nearbyCandidateCache instanceof Map)) {
-      socket.nearbyCandidateCache = new Map();
-      return;
-    }
-
-    const now = Date.now();
-    for (const [key, entry] of socket.nearbyCandidateCache.entries()) {
-      if (!entry || typeof entry !== "object") {
-        socket.nearbyCandidateCache.delete(key);
-        continue;
-      }
-      if (entry.promise) continue;
-      if (!Number.isFinite(Number(entry.expiresAt)) || Number(entry.expiresAt) <= now) {
-        socket.nearbyCandidateCache.delete(key);
-      }
-    }
-  };
-
   const buildNearbyCandidateCacheKey = ({
     lat,
     long,
@@ -2362,9 +2116,6 @@ const syncNearbyRadius = async (payload = {}) => {
     const requiredChildSeat = toOptionalBinaryRequirement(socket.nearbyNeedChildSeat);
     const requiredHandicap = toOptionalBinaryRequirement(socket.nearbyNeedHandicap);
     const normalizedServiceTypeId = toNumber(serviceTypeId);
-    const normalizedServiceCategoryId = normalizeServiceCategoryId(
-      socket.nearbyServiceCategoryId
-    );
 
     return [
       `lat:${normalizedLat ?? "na"}`,
@@ -2372,7 +2123,6 @@ const syncNearbyRadius = async (payload = {}) => {
       `road:${Math.round(toNumber(roadRadius) ?? 0)}`,
       `air:${Math.round(toNumber(airCandidateRadius) ?? 0)}`,
       `service_type:${normalizedServiceTypeId ?? "all"}`,
-      `service_category:${normalizedServiceCategoryId ?? "all"}`,
       `gender:${requiredGender ?? "all"}`,
       `child_seat:${requiredChildSeat ?? "all"}`,
       `handicap:${requiredHandicap ?? "all"}`,
@@ -2406,7 +2156,6 @@ const syncNearbyRadius = async (payload = {}) => {
       };
     }
 
-    pruneNearbyCandidateCache();
     const cacheKey = buildNearbyCandidateCacheKey({
       lat: safeLat,
       long: safeLong,
@@ -2415,16 +2164,7 @@ const syncNearbyRadius = async (payload = {}) => {
       serviceTypeId,
     });
 
-    const cachedEntry = socket.nearbyCandidateCache.get(cacheKey);
-    const now = Date.now();
-    if (cachedEntry?.value && Number(cachedEntry.expiresAt) > now) {
-      return cachedEntry.value;
-    }
-    if (cachedEntry?.promise) {
-      return cachedEntry.promise;
-    }
-
-    const requestPromise = (async () => {
+    const requestPromise = getSharedNearbyCandidateSnapshot(cacheKey, async () => {
       const opts = {
         only_online: true,
         max_age_ms: MAX_DRIVER_LOCATION_AGE_MS,
@@ -2453,7 +2193,7 @@ const syncNearbyRadius = async (payload = {}) => {
         safeAirCandidateRadius,
         opts
       );
-      const nearbyPreferenceMatched = applyNearbyDriverPreferenceFilters(nearbyAll);
+      const nearbyPreferenceMatched = nearbyAll;
       const nearbyAvailable = nearbyPreferenceMatched.filter((driver) => {
         const driverId = toNumber(driver?.driver_id);
         return canDriverAppearInNearby(driverId);
@@ -2478,29 +2218,8 @@ const syncNearbyRadius = async (payload = {}) => {
         usingAirFallback:
           roadFilteredCandidates.length === 0 && nearbyAvailable.length > 0,
       };
-    })();
-
-    socket.nearbyCandidateCache.set(cacheKey, {
-      promise: requestPromise,
-      expiresAt: now + NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS,
     });
-
-    try {
-      const value = await requestPromise;
-      const nextExpiresAt = Date.now() + NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS;
-      if (NEARBY_CANDIDATE_QUERY_CACHE_TTL_MS > 0) {
-        socket.nearbyCandidateCache.set(cacheKey, {
-          value,
-          expiresAt: nextExpiresAt,
-        });
-      } else {
-        socket.nearbyCandidateCache.delete(cacheKey);
-      }
-      return value;
-    } catch (error) {
-      socket.nearbyCandidateCache.delete(cacheKey);
-      throw error;
-    }
+    return requestPromise;
   };
 
   const setNearbyRouteDistanceKm = (value) => {
@@ -2539,8 +2258,8 @@ const syncNearbyRadius = async (payload = {}) => {
     socket.nearbyDispatchTimeoutS = NEARBY_DISPATCH_TIMEOUT_S;
     socket.nearbyDriversSearchStartedAt = null;
     socket.nearbyVehicleTypesSearchStartedAt = null;
-    clearNearbyCandidateCache();
     socket.nearbyFareCache.clear();
+    socket.lastNearbyDriversSig = null;
     socket.lastVehicleTypesSig = null;
     socket.lastPricingSnapshotSigByRide.clear();
   };
@@ -2960,29 +2679,59 @@ emitCachedPricingSnapshotToSocket(rideId, "user:rejoinRideRoom-cache");
     console.log(`?? User ${userId} rejoined ride room ride:${rideId} (socket:${socket.id})`);
   });
 
-  const stopNearbyDriversLoop = () => {
-    if (socket.nearbyDriversInterval) {
-      clearInterval(socket.nearbyDriversInterval);
-      socket.nearbyDriversInterval = null;
+  const syncNearbyLoopHandles = () => {
+    socket.nearbyDriversInterval = socket.nearbyDriversLoopEnabled
+      ? socket.nearbyRefreshInterval
+      : null;
+    socket.nearbyVehicleTypesInterval = socket.nearbyVehicleTypesLoopEnabled
+      ? socket.nearbyRefreshInterval
+      : null;
+  };
+
+  const ensureNearbyRefreshLoopState = () => {
+    const shouldRunLoop =
+      socket.nearbyDriversLoopEnabled || socket.nearbyVehicleTypesLoopEnabled;
+
+    if (!shouldRunLoop) {
+      if (socket.nearbyRefreshInterval) {
+        clearInterval(socket.nearbyRefreshInterval);
+      }
+      socket.nearbyRefreshInterval = null;
+      socket.nearbyPeriodicRefreshInFlight = false;
+      syncNearbyLoopHandles();
+      return;
     }
+
+    if (!socket.nearbyRefreshInterval) {
+      socket.nearbyRefreshInterval = setInterval(() => {
+        void runPeriodicNearbyRefresh();
+      }, NEARBY_EVERY_MS);
+    }
+
+    syncNearbyLoopHandles();
+  };
+
+  const stopNearbyDriversLoop = () => {
+    socket.nearbyDriversLoopEnabled = false;
     socket.nearbyDriversInFlight = false;
+    ensureNearbyRefreshLoopState();
   };
 
   const stopNearbyVehicleTypesLoop = () => {
-    if (socket.nearbyVehicleTypesInterval) {
-      clearInterval(socket.nearbyVehicleTypesInterval);
-      socket.nearbyVehicleTypesInterval = null;
+    const hadActiveLoop = socket.nearbyVehicleTypesLoopEnabled;
+    socket.nearbyVehicleTypesLoopEnabled = false;
+    if (hadActiveLoop) {
       console.log("[nearbyVehicleTypes] loop stopped", {
         socket_id: socket.id,
       });
     }
     socket.nearbyVehicleTypesInFlight = false;
+    ensureNearbyRefreshLoopState();
   };
 
   const stopNearby = () => {
     stopNearbyDriversLoop();
     stopNearbyVehicleTypesLoop();
-    clearNearbyCandidateCache();
   };
 
   const buildNearbyVehicleTypes = async (lat, long) => {
@@ -3163,7 +2912,8 @@ emitCachedPricingSnapshotToSocket(rideId, "user:rejoinRideRoom-cache");
               distanceKm,
               typeIdsToRefresh,
               shouldIncludePickupForFareLookup ? pickupLat : null,
-              shouldIncludePickupForFareLookup ? pickupLong : null
+              shouldIncludePickupForFareLookup ? pickupLong : null,
+              fareConfigVersion
             );
             for (const [id, item] of fareMap.entries()) {
               cacheEntry.map.set(id, item);
@@ -3233,10 +2983,12 @@ item.max_price = hasExplicitBounds
     return result;
   };
 
-  const emitNearbyVehicleTypes = async () => {
+  const emitNearbyVehicleTypes = async (options = {}) => {
     if (!socket.nearbyCenter) return;
 
-    await syncNearbyRadius({});
+    if (options?.skipRadiusSync !== true) {
+      await syncNearbyRadius({});
+    }
 
     const { lat, long } = socket.nearbyCenter;
 
@@ -3453,10 +3205,12 @@ pricingEmitter.emit("ride:pricingSnapshot", pricingSnapshotPayload);
 };
 
   /////////////////////////////////////////////////////////////
-const sendNearby = async (eventName = "user:nearbyDrivers") => {
+const sendNearby = async (eventName = "user:nearbyDrivers", options = {}) => {
     if (!socket.nearbyCenter) return;
 
-    await syncNearbyRadius({});
+    if (options?.skipRadiusSync !== true) {
+      await syncNearbyRadius({});
+    }
 
     const { lat, long } = socket.nearbyCenter;
     const radiusPlan = resolveActiveNearbyRadiusPlan(
@@ -3486,8 +3240,21 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
       vehicle_type_icon: normalizeVehicleTypeIconUrl(d?.vehicle_type_icon),
       driver_image: normalizeDriverImageUrl(d?.driver_image),
     }));
+    const nearbySig = buildNearbyDriversSignature(nearbyWithNormalizedIcons);
+    const isUpdateEvent = eventName !== "user:nearbyDrivers";
+    const unchangedUpdate = isUpdateEvent && nearbySig === socket.lastNearbyDriversSig;
+
+    if (unchangedUpdate) {
+      nearbyLog("[nearbyDrivers] emit skipped (unchanged)", {
+        socket_id: socket.id,
+        event: eventName,
+        candidates: nearbyWithNormalizedIcons.length,
+      });
+      return;
+    }
 
     socket.emit(eventName, nearbyWithNormalizedIcons);
+    socket.lastNearbyDriversSig = nearbySig;
 
     nearbyLog(
       `?? Nearby -> ${nearby.length} drivers within road radius ${roadRadius}m (stage ${radiusPlan.stageNumber}/${radiusPlan.stageTotal})`
@@ -3506,23 +3273,56 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
     });
   };
 
-  const sendNearbyGuarded = async (eventName = "user:nearbyDrivers") => {
+  const sendNearbyGuarded = async (
+    eventName = "user:nearbyDrivers",
+    options = {}
+  ) => {
     if (socket.nearbyDriversInFlight) return;
     socket.nearbyDriversInFlight = true;
     try {
-      await sendNearby(eventName);
+      await sendNearby(eventName, options);
     } finally {
       socket.nearbyDriversInFlight = false;
     }
   };
 
-  const emitNearbyVehicleTypesGuarded = async () => {
+  const emitNearbyVehicleTypesGuarded = async (options = {}) => {
     if (socket.nearbyVehicleTypesInFlight) return;
     socket.nearbyVehicleTypesInFlight = true;
     try {
-      await emitNearbyVehicleTypes();
+      await emitNearbyVehicleTypes(options);
     } finally {
       socket.nearbyVehicleTypesInFlight = false;
+    }
+  };
+
+  const runPeriodicNearbyRefresh = async () => {
+    if (
+      socket.nearbyPeriodicRefreshInFlight ||
+      !socket.nearbyCenter ||
+      (!socket.nearbyDriversLoopEnabled &&
+        !socket.nearbyVehicleTypesLoopEnabled)
+    ) {
+      return;
+    }
+
+    socket.nearbyPeriodicRefreshInFlight = true;
+    try {
+      await syncNearbyRadius({});
+
+      if (socket.nearbyDriversLoopEnabled) {
+        await sendNearbyGuarded("user:nearbyDrivers:update", {
+          skipRadiusSync: true,
+        });
+      }
+
+      if (socket.nearbyVehicleTypesLoopEnabled) {
+        await emitNearbyVehicleTypesGuarded({
+          skipRadiusSync: true,
+        });
+      }
+    } finally {
+      socket.nearbyPeriodicRefreshInFlight = false;
     }
   };
 
@@ -3651,12 +3451,12 @@ const sendNearby = async (eventName = "user:nearbyDrivers") => {
 
     socket.lastVehicleTypesSig = null;
 
-    await sendNearbyGuarded("user:nearbyDrivers");
+    await sendNearbyGuarded("user:nearbyDrivers", {
+      skipRadiusSync: true,
+    });
 
-    stopNearbyDriversLoop();
-    socket.nearbyDriversInterval = setInterval(() => {
-      void sendNearbyGuarded("user:nearbyDrivers:update");
-    }, NEARBY_EVERY_MS);
+    socket.nearbyDriversLoopEnabled = true;
+    ensureNearbyRefreshLoopState();
   });
 
   //////////////////////////////////////////////////////////
@@ -3779,13 +3579,14 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     base_radius_m: socket.nearbyRadius,
   });
 
-  await emitNearbyVehicleTypesGuarded();
-  await sendNearbyGuarded("user:nearbyDrivers:update");
+  await emitNearbyVehicleTypesGuarded({
+    skipRadiusSync: true,
+  });
+  await sendNearbyGuarded("user:nearbyDrivers:update", {
+    skipRadiusSync: true,
+  });
 
-  stopNearbyVehicleTypesLoop();
-  socket.nearbyVehicleTypesInterval = setInterval(() => {
-    void emitNearbyVehicleTypesGuarded();
-  }, NEARBY_EVERY_MS);
+  socket.nearbyVehicleTypesLoopEnabled = true;
   nearbyLog("[nearbyVehicleTypes] loop started", {
     socket_id: socket.id,
     every_ms: NEARBY_EVERY_MS,
@@ -3793,10 +3594,8 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     dispatch_stages_m: socket.nearbyDispatchStagesMeters,
   });
 
-  if (!socket.nearbyDriversInterval) {
-    socket.nearbyDriversInterval = setInterval(() => {
-      void sendNearbyGuarded("user:nearbyDrivers:update");
-    }, NEARBY_EVERY_MS);
+  if (!socket.nearbyDriversLoopEnabled) {
+    socket.nearbyDriversLoopEnabled = true;
     nearbyLog("[nearbyDrivers] loop started via vehicle-types", {
       socket_id: socket.id,
       every_ms: NEARBY_EVERY_MS,
@@ -3804,6 +3603,7 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
       dispatch_stages_m: socket.nearbyDispatchStagesMeters,
     });
   }
+  ensureNearbyRefreshLoopState();
 
   nearbyLog(`?? Nearby vehicle types requested (socket:${socket.id})`);
 };
@@ -3858,8 +3658,12 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
     persistRideRouteMetrics(payload, routeKm, routeDurationMin, etaMin);
     emitRouteEtaToDriver(routeKm, etaMin, payload);
 
-    void sendNearbyGuarded("user:nearbyDrivers:update");
-    await emitNearbyVehicleTypesGuarded();
+    await sendNearbyGuarded("user:nearbyDrivers:update", {
+      skipRadiusSync: true,
+    });
+    await emitNearbyVehicleTypesGuarded({
+      skipRadiusSync: true,
+    });
   });
 
   socket.on("user:setNearbyServiceType", async ({ service_type_id }) => {
@@ -3876,10 +3680,14 @@ const handleGetNearbyVehicleTypes = async (payload = {}) => {
 
     await syncNearbyRadius({});
 
-    void sendNearbyGuarded("user:nearbyDrivers:update");
+    await sendNearbyGuarded("user:nearbyDrivers:update", {
+      skipRadiusSync: true,
+    });
 
     if (socket.nearbyCenter) {
-      await emitNearbyVehicleTypesGuarded();
+      await emitNearbyVehicleTypesGuarded({
+        skipRadiusSync: true,
+      });
     }
   });
 

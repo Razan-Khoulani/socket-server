@@ -354,7 +354,7 @@ const syncDriverAdminWalletMetaIfStale = async (
   const refreshPromise =
     syncDriverAdminWalletMeta(safeDriverId, {
       driverServiceId,
-      forceRefresh: true,
+      forceRefresh: false,
     }).finally(() => {
       driverAdminProfileSyncInFlight.delete(
         safeDriverId

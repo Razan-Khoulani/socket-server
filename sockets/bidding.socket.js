@@ -4986,7 +4986,6 @@ async function ensureFreshDriverWalletEligibility(driverId) {
       const refreshedProfile = await getDriverAdminProfile({
         driverId: safeDriverId,
         driverServiceId: toNumber(currentMeta?.driver_service_id ?? null),
-        forceRefresh: true,
       });
       walletGuardFailureBackoffUntilByDriver.delete(safeDriverId);
       const mergedMeta = mergeWalletMetaFromProfile(currentMeta, refreshedProfile);
@@ -12681,3 +12680,4 @@ module.exports.activateQueuedRideForDriver = activateQueuedRideForDriver;
 module.exports.getDriverInboxStats = getDriverInboxStats;
 module.exports.recoverDriverPendingDispatch = recoverDriverPendingDispatch;
 module.exports.syncDriverProfileIntoInbox = syncDriverProfileIntoInbox;
+module.exports.filterDriversByRoadRadius = filterDriversByRoadRadius;
