@@ -62,6 +62,14 @@ const driverQueuedRide = new Map(); // driverId -> { ride_id, offered_price, rid
 const rideDriverStates = new Map(); // rideId -> Map(driverId -> { status, notified_at, updated_at })
 const dispatchInFlightByRide = new Map(); // rideId -> token
 const autoAcceptFirstBidLocks = new Map(); // rideId -> timestamp
+const driverBidApiInFlight = new Map(); // requestKey -> Promise<{ ok, response, error }>
+const driverBidApiRecentResults = new Map(); // requestKey -> { at, result }
+const driverBidApiLimiterWaiters = [];
+let activeDriverBidApiRequests = 0;
+const acceptBidApiInFlight = new Map(); // requestKey -> Promise<{ ok, parsed, response, error }>
+const acceptBidApiRecentResults = new Map(); // requestKey -> { at, result }
+const acceptBidApiLimiterWaiters = [];
+let activeAcceptBidApiRequests = 0;
 
 // ✅ NEW: per-driver patch sequence (ordering)
 const driverPatchSeq = new Map(); // driverId -> number
@@ -648,6 +656,391 @@ const requestRouteApi = async (params = {}, options = {}) =>
     },
     options
   );
+const normalizeMoneyKey = (value) => {
+  const safeValue = toNumber(value);
+  if (safeValue === null) return "na";
+  return String(Math.round(safeValue * 100));
+};
+const buildDriverBidApiRequestKey = ({
+  driverId = null,
+  rideId = null,
+  offeredPrice = null,
+} = {}) => {
+  const safeDriverId = toNumber(driverId);
+  const safeRideId = toNumber(rideId);
+  if (!safeDriverId || !safeRideId) return null;
+  return `driver:${safeDriverId}|ride:${safeRideId}|price:${normalizeMoneyKey(offeredPrice)}`;
+};
+const cleanupDriverBidApiRecentResults = () => {
+  const now = Date.now();
+  for (const [requestKey, entry] of driverBidApiRecentResults.entries()) {
+    const at = toNumber(entry?.at ?? null) ?? 0;
+    if (!at || now - at > DRIVER_BID_API_DEDUPE_TTL_MS) {
+      driverBidApiRecentResults.delete(requestKey);
+    }
+  }
+};
+const pumpDriverBidApiLimiterWaiters = () => {
+  while (activeDriverBidApiRequests < DRIVER_BID_API_MAX_CONCURRENCY) {
+    const resume = driverBidApiLimiterWaiters.shift();
+    if (!resume) return;
+    activeDriverBidApiRequests += 1;
+    try {
+      resume();
+    } catch (_) {
+      activeDriverBidApiRequests = Math.max(0, activeDriverBidApiRequests - 1);
+    }
+  }
+};
+const acquireDriverBidApiLimiterSlot = async ({ driverId = null, rideId = null } = {}) => {
+  if (activeDriverBidApiRequests < DRIVER_BID_API_MAX_CONCURRENCY) {
+    activeDriverBidApiRequests += 1;
+    return;
+  }
+
+  if (driverBidApiLimiterWaiters.length >= DRIVER_BID_API_MAX_WAITERS) {
+    const overloadError = new Error("driver-bid-api-limiter-overloaded");
+    overloadError.code = "DRIVER_BID_API_LIMITER_OVERLOADED";
+    warnThrottled(
+      "driver-bid-api-limiter-overloaded",
+      "[driver:submitBid][limiter-overloaded]",
+      {
+        driver_id: driverId,
+        ride_id: rideId,
+        active: activeDriverBidApiRequests,
+        waiting: driverBidApiLimiterWaiters.length,
+        max_concurrency: DRIVER_BID_API_MAX_CONCURRENCY,
+        max_waiters: DRIVER_BID_API_MAX_WAITERS,
+      }
+    );
+    throw overloadError;
+  }
+
+  await new Promise((resolve) => {
+    driverBidApiLimiterWaiters.push(resolve);
+  });
+};
+const releaseDriverBidApiLimiterSlot = () => {
+  activeDriverBidApiRequests = Math.max(0, activeDriverBidApiRequests - 1);
+  pumpDriverBidApiLimiterWaiters();
+};
+const postDriverBidOfferToLaravel = async ({
+  driverId = null,
+  rideId = null,
+  offeredPrice = null,
+  bidPayload = null,
+} = {}) => {
+  if (!bidPayload || typeof bidPayload !== "object") {
+    return {
+      ok: false,
+      response: null,
+      error: "invalid_bid_payload",
+    };
+  }
+
+  const requestKey = buildDriverBidApiRequestKey({
+    driverId,
+    rideId,
+    offeredPrice,
+  });
+  if (!requestKey) {
+    return {
+      ok: false,
+      response: null,
+      error: "invalid_bid_request_key",
+    };
+  }
+
+  cleanupDriverBidApiRecentResults();
+
+  const recentEntry = driverBidApiRecentResults.get(requestKey);
+  if (
+    recentEntry &&
+    Date.now() - (toNumber(recentEntry?.at ?? null) ?? 0) <= DRIVER_BID_API_DEDUPE_TTL_MS
+  ) {
+    return recentEntry.result;
+  }
+
+  const inFlightRequest = driverBidApiInFlight.get(requestKey);
+  if (inFlightRequest) {
+    return inFlightRequest;
+  }
+
+  const requestPromise = (async () => {
+    let limiterSlotAcquired = false;
+    try {
+      await acquireDriverBidApiLimiterSlot({ driverId, rideId });
+      limiterSlotAcquired = true;
+
+      const response = await axios.post(
+        `${LARAVEL_BASE_URL}${LARAVEL_DRIVER_BID_PATH}`,
+        bidPayload,
+        { timeout: LARAVEL_TIMEOUT_MS }
+      );
+
+      let parsed = response?.data ?? null;
+      if (typeof parsed === "string") {
+        try {
+          parsed = JSON.parse(parsed);
+        } catch (_) {}
+      }
+
+      return {
+        ok:
+          parsed?.status === 1 ||
+          parsed?.success === true ||
+          parsed?.result === true ||
+          response?.status === 200,
+        response: parsed,
+        error: null,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        response: null,
+        error: error?.response?.data || error?.message || error,
+      };
+    } finally {
+      if (limiterSlotAcquired) {
+        releaseDriverBidApiLimiterSlot();
+      }
+    }
+  })();
+
+  driverBidApiInFlight.set(requestKey, requestPromise);
+
+  try {
+    const result = await requestPromise;
+    driverBidApiRecentResults.set(requestKey, {
+      at: Date.now(),
+      result,
+    });
+    return result;
+  } finally {
+    driverBidApiInFlight.delete(requestKey);
+  }
+};
+const buildAcceptBidApiRequestKey = (payload = {}) => {
+  const safeUserId = toNumber(payload?.user_id);
+  const safeRideId = toNumber(payload?.ride_id);
+  const safeDriverId = toNumber(
+    payload?.provider_id ?? payload?.driver_detail_id ?? payload?.driver_id
+  );
+  const safeToken = normalizeToken(payload?.access_token);
+
+  if (!safeUserId || !safeRideId || !safeDriverId || !safeToken) {
+    return null;
+  }
+
+  return [
+    `user:${safeUserId}`,
+    `ride:${safeRideId}`,
+    `driver:${safeDriverId}`,
+    `price:${normalizeMoneyKey(payload?.offered_price)}`,
+    `token:${encodeURIComponent(safeToken)}`,
+  ].join("|");
+};
+const cleanupAcceptBidApiRecentResults = () => {
+  const now = Date.now();
+  for (const [requestKey, entry] of acceptBidApiRecentResults.entries()) {
+    const at = toNumber(entry?.at ?? null) ?? 0;
+    if (!at || now - at > ACCEPT_BID_API_DEDUPE_TTL_MS) {
+      acceptBidApiRecentResults.delete(requestKey);
+    }
+  }
+};
+const pumpAcceptBidApiLimiterWaiters = () => {
+  while (activeAcceptBidApiRequests < ACCEPT_BID_API_MAX_CONCURRENCY) {
+    const resume = acceptBidApiLimiterWaiters.shift();
+    if (!resume) return;
+    activeAcceptBidApiRequests += 1;
+    try {
+      resume();
+    } catch (_) {
+      activeAcceptBidApiRequests = Math.max(0, activeAcceptBidApiRequests - 1);
+    }
+  }
+};
+const acquireAcceptBidApiLimiterSlot = async ({
+  userId = null,
+  driverId = null,
+  rideId = null,
+} = {}) => {
+  if (activeAcceptBidApiRequests < ACCEPT_BID_API_MAX_CONCURRENCY) {
+    activeAcceptBidApiRequests += 1;
+    return;
+  }
+
+  if (acceptBidApiLimiterWaiters.length >= ACCEPT_BID_API_MAX_WAITERS) {
+    const overloadError = new Error("accept-bid-api-limiter-overloaded");
+    overloadError.code = "ACCEPT_BID_API_LIMITER_OVERLOADED";
+    warnThrottled(
+      "accept-bid-api-limiter-overloaded",
+      "[accept-bid-api][limiter-overloaded]",
+      {
+        user_id: userId,
+        driver_id: driverId,
+        ride_id: rideId,
+        active: activeAcceptBidApiRequests,
+        waiting: acceptBidApiLimiterWaiters.length,
+        max_concurrency: ACCEPT_BID_API_MAX_CONCURRENCY,
+        max_waiters: ACCEPT_BID_API_MAX_WAITERS,
+      }
+    );
+    throw overloadError;
+  }
+
+  await new Promise((resolve) => {
+    acceptBidApiLimiterWaiters.push(resolve);
+  });
+};
+const releaseAcceptBidApiLimiterSlot = () => {
+  activeAcceptBidApiRequests = Math.max(0, activeAcceptBidApiRequests - 1);
+  pumpAcceptBidApiLimiterWaiters();
+};
+const postAcceptBidToLaravel = async ({
+  acceptPayload = null,
+  timeoutMs = LARAVEL_ACCEPT_BID_TIMEOUT_MS,
+} = {}) => {
+  if (!acceptPayload || typeof acceptPayload !== "object") {
+    return {
+      ok: false,
+      parsed: null,
+      response: null,
+      error: {
+        message: "Invalid accept payload",
+        reason: "invalid_accept_payload",
+        details: null,
+      },
+    };
+  }
+
+  const requestKey = buildAcceptBidApiRequestKey(acceptPayload);
+  if (!requestKey) {
+    return {
+      ok: false,
+      parsed: null,
+      response: null,
+      error: {
+        message: "Invalid accept request key",
+        reason: "invalid_accept_request_key",
+        details: null,
+      },
+    };
+  }
+
+  cleanupAcceptBidApiRecentResults();
+
+  const recentEntry = acceptBidApiRecentResults.get(requestKey);
+  if (
+    recentEntry &&
+    Date.now() - (toNumber(recentEntry?.at ?? null) ?? 0) <= ACCEPT_BID_API_DEDUPE_TTL_MS
+  ) {
+    return recentEntry.result;
+  }
+
+  const inFlightRequest = acceptBidApiInFlight.get(requestKey);
+  if (inFlightRequest) {
+    return inFlightRequest;
+  }
+
+  const safeUserId = toNumber(acceptPayload?.user_id);
+  const safeRideId = toNumber(acceptPayload?.ride_id);
+  const safeDriverId = toNumber(
+    acceptPayload?.provider_id ??
+      acceptPayload?.driver_detail_id ??
+      acceptPayload?.driver_id
+  );
+
+  const requestPromise = (async () => {
+    let limiterSlotAcquired = false;
+    try {
+      await acquireAcceptBidApiLimiterSlot({
+        userId: safeUserId,
+        driverId: safeDriverId,
+        rideId: safeRideId,
+      });
+      limiterSlotAcquired = true;
+
+      const response = await axios.post(
+        `${LARAVEL_BASE_URL}${LARAVEL_ACCEPT_BID_PATH}`,
+        acceptPayload,
+        {
+          timeout: timeoutMs,
+        }
+      );
+
+      const raw = response?.data ?? null;
+      let parsed = raw;
+      if (typeof parsed === "string") {
+        try {
+          parsed = JSON.parse(parsed);
+        } catch (_) {}
+      }
+
+      const ok =
+        parsed?.status === 1 ||
+        parsed?.success === true ||
+        parsed?.result === true;
+
+      if (ok) {
+        return {
+          ok: true,
+          parsed,
+          response: raw,
+          error: null,
+        };
+      }
+
+      return {
+        ok: false,
+        parsed,
+        response: raw,
+        error: {
+          message:
+            parsed?.message ||
+            parsed?.error ||
+            "Accept bid API returned unsuccessful response",
+          reason: "accept_api_rejected",
+          details: parsed,
+        },
+      };
+    } catch (error) {
+      const details = error?.response?.data || null;
+      return {
+        ok: false,
+        parsed: details,
+        response: details,
+        error: {
+          message:
+            details?.message ||
+            details?.error ||
+            error?.message ||
+            "Accept bid API request failed",
+          reason: "accept_api_failed",
+          details,
+        },
+      };
+    } finally {
+      if (limiterSlotAcquired) {
+        releaseAcceptBidApiLimiterSlot();
+      }
+    }
+  })();
+
+  acceptBidApiInFlight.set(requestKey, requestPromise);
+
+  try {
+    const result = await requestPromise;
+    acceptBidApiRecentResults.set(requestKey, {
+      at: Date.now(),
+      result,
+    });
+    return result;
+  } finally {
+    acceptBidApiInFlight.delete(requestKey);
+  }
+};
 const pickFirstValue = (...values) => {
   for (const v of values) {
     if (v !== undefined && v !== null && v !== "") return v;
@@ -2501,6 +2894,36 @@ const LARAVEL_ACCEPT_BID_TIMEOUT_MS = Number.isFinite(
 )
   ? Number(process.env.LARAVEL_ACCEPT_BID_TIMEOUT_MS)
   : LARAVEL_TIMEOUT_MS;
+const DRIVER_BID_API_MAX_CONCURRENCY = Number.isFinite(
+  Number(process.env.DRIVER_BID_API_MAX_CONCURRENCY)
+)
+  ? Math.max(1, Math.floor(Number(process.env.DRIVER_BID_API_MAX_CONCURRENCY)))
+  : 6;
+const DRIVER_BID_API_MAX_WAITERS = Number.isFinite(
+  Number(process.env.DRIVER_BID_API_MAX_WAITERS)
+)
+  ? Math.max(10, Math.floor(Number(process.env.DRIVER_BID_API_MAX_WAITERS)))
+  : 500;
+const DRIVER_BID_API_DEDUPE_TTL_MS = Number.isFinite(
+  Number(process.env.DRIVER_BID_API_DEDUPE_TTL_MS)
+)
+  ? Math.max(250, Number(process.env.DRIVER_BID_API_DEDUPE_TTL_MS))
+  : 3000;
+const ACCEPT_BID_API_MAX_CONCURRENCY = Number.isFinite(
+  Number(process.env.ACCEPT_BID_API_MAX_CONCURRENCY)
+)
+  ? Math.max(1, Math.floor(Number(process.env.ACCEPT_BID_API_MAX_CONCURRENCY)))
+  : 8;
+const ACCEPT_BID_API_MAX_WAITERS = Number.isFinite(
+  Number(process.env.ACCEPT_BID_API_MAX_WAITERS)
+)
+  ? Math.max(10, Math.floor(Number(process.env.ACCEPT_BID_API_MAX_WAITERS)))
+  : 300;
+const ACCEPT_BID_API_DEDUPE_TTL_MS = Number.isFinite(
+  Number(process.env.ACCEPT_BID_API_DEDUPE_TTL_MS)
+)
+  ? Math.max(250, Number(process.env.ACCEPT_BID_API_DEDUPE_TTL_MS))
+  : 2000;
 const LARAVEL_ROUTE_TIMEOUT_MS = Number.isFinite(Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
   ? Math.max(1000, Number(process.env.LARAVEL_ROUTE_TIMEOUT_MS))
   : 10000;
@@ -9458,39 +9881,27 @@ if (!isSameMoneyValue(acceptedPrice, targetAutoAcceptPrice)) {
       : {}),
   };
 
-  try {
-    const response = await axios.post(
-      `${LARAVEL_BASE_URL}${LARAVEL_ACCEPT_BID_PATH}`,
-      acceptPayload,
-      { timeout: LARAVEL_ACCEPT_BID_TIMEOUT_MS }
-    );
+  const acceptApiResult = await postAcceptBidToLaravel({
+    acceptPayload,
+    timeoutMs: LARAVEL_ACCEPT_BID_TIMEOUT_MS,
+  });
 
-    let parsed = response?.data ?? null;
-    if (typeof parsed === "string") {
-      try {
-        parsed = JSON.parse(parsed);
-      } catch (_) {}
-    }
+  if (!acceptApiResult.ok) {
+    const logLevel =
+      acceptApiResult?.error?.reason === "accept_api_rejected" ? "warn" : "error";
+    console[logLevel]("[auto-accept-first-bid] accept API failed; fallback to normal bid flow", {
+      ride_id: safeRideId,
+      driver_id: safeDriverId,
+      error: acceptApiResult?.error?.details || acceptApiResult?.error?.message || null,
+    });
 
-    const ok =
-      parsed?.status === 1 ||
-      parsed?.success === true ||
-      parsed?.result === true;
-
-    if (!ok) {
-      console.warn("[auto-accept-first-bid] accept API rejected; fallback to normal bid flow", {
-        ride_id: safeRideId,
-        driver_id: safeDriverId,
-        response: parsed,
-      });
-
-      return {
-        handled: false,
-        accepted: false,
-        reason: "accept_api_rejected",
-        details: parsed,
-      };
-    }
+    return {
+      handled: false,
+      accepted: false,
+      reason: acceptApiResult?.error?.reason || "accept_api_failed",
+      details: acceptApiResult?.error?.details ?? null,
+    };
+  }
 
     emitUserAcceptOfferResult(io, userId, {
       success: true,
@@ -9499,7 +9910,7 @@ if (!isSameMoneyValue(acceptedPrice, targetAutoAcceptPrice)) {
       driver_id: toNumber(customerFacingDriverId) ?? safeDriverId,
       message: "تم قبول أول عرض تلقائياً وبدء الرحلة بنجاح",
       reason: null,
-      details: parsed,
+      details: acceptApiResult.parsed,
     });
 
     emitToRideAudience(
@@ -9537,20 +9948,6 @@ if (!isSameMoneyValue(acceptedPrice, targetAutoAcceptPrice)) {
     });
 
     return { handled: true, accepted: true, reason: "accepted" };
-  } catch (error) {
-    console.error("[auto-accept-first-bid] accept API failed; fallback to normal bid flow", {
-      ride_id: safeRideId,
-      driver_id: safeDriverId,
-      error: error?.response?.data || error?.message || error,
-    });
-
-    return {
-      handled: false,
-      accepted: false,
-      reason: "accept_api_failed",
-      details: error?.response?.data || error?.message || null,
-    };
-  }
 }
 
 module.exports = (io, socket) => {
@@ -10124,19 +10521,22 @@ if (removed) {
           : {}),
       };
 
-      axios
-        .post(`${LARAVEL_BASE_URL}${LARAVEL_ACCEPT_BID_PATH}`, acceptPayload, {
-          timeout: LARAVEL_ACCEPT_BID_TIMEOUT_MS,
-        })
-        .then((response) => {
-          console.log("API Response: Accept Bid (driver)", response.data);
+      void postAcceptBidToLaravel({
+        acceptPayload,
+        timeoutMs: LARAVEL_ACCEPT_BID_TIMEOUT_MS,
+      })
+        .then((acceptApiResult) => {
+          if (acceptApiResult.ok) {
+            console.log("API Response: Accept Bid (driver)", acceptApiResult.parsed);
+          } else {
+            console.error(
+              "Error while calling accept bid API (driver):",
+              acceptApiResult?.error?.details || acceptApiResult?.error?.message || null
+            );
+          }
           finalize();
         })
-        .catch((error) => {
-          console.error(
-            "Error while calling accept bid API (driver):",
-            error?.response?.data || error.message
-          );
+        .catch(() => {
           // حتى لو فشل API — خلّي الflow يكمل محلياً
           finalize();
         });
@@ -10829,57 +11229,50 @@ if (!driverServiceId || !accessToken) {
   });
 
   if (autoAcceptFirstBid) {
-    try {
-      const response = await axios.post(
-        `${LARAVEL_BASE_URL}${LARAVEL_DRIVER_BID_PATH}`,
-        bidPayload,
-        { timeout: LARAVEL_TIMEOUT_MS }
-      );
+    const submitBidApiResult = await postDriverBidOfferToLaravel({
+      driverId,
+      rideId,
+      offeredPrice,
+      bidPayload,
+    });
 
-      let parsed = response?.data ?? null;
-      if (typeof parsed === "string") {
-        try {
-          parsed = JSON.parse(parsed);
-        } catch (_) {}
-      }
+    driverBidApiOk = submitBidApiResult.ok === true;
 
-      driverBidApiOk =
-        parsed?.status === 1 ||
-        parsed?.success === true ||
-        parsed?.result === true ||
-        response?.status === 200;
-
+    if (driverBidApiOk) {
       console.log("[driver:submitBid][api-ok]", {
         ride_id: rideId,
         driver_id: driverId,
-        response: parsed,
+        response: submitBidApiResult.response,
       });
-    } catch (error) {
+    } else {
       console.error("[driver:submitBid][api-failed]", {
         ride_id: rideId,
         driver_id: driverId,
-        error: error?.response?.data || error?.message || error,
+        error: submitBidApiResult.error,
       });
     }
   } else {
-    axios
-      .post(`${LARAVEL_BASE_URL}${LARAVEL_DRIVER_BID_PATH}`, bidPayload, {
-        timeout: LARAVEL_TIMEOUT_MS,
-      })
-      .then((response) => {
+    void postDriverBidOfferToLaravel({
+      driverId,
+      rideId,
+      offeredPrice,
+      bidPayload,
+    }).then((submitBidApiResult) => {
+      if (submitBidApiResult.ok === true) {
         console.log("[driver:submitBid][api-ok]", {
           ride_id: rideId,
           driver_id: driverId,
-          response: response?.data ?? null,
+          response: submitBidApiResult.response,
         });
-      })
-      .catch((error) => {
-        console.error("[driver:submitBid][api-failed]", {
-          ride_id: rideId,
-          driver_id: driverId,
-          error: error?.response?.data || error?.message || error,
-        });
+        return;
+      }
+
+      console.error("[driver:submitBid][api-failed]", {
+        ride_id: rideId,
+        driver_id: driverId,
+        error: submitBidApiResult.error,
       });
+    });
   }
 }
 
@@ -11954,10 +12347,10 @@ if (removed) {
       );
 
       const lockedUserId =
-        toNumber(payload?.user_id) ??
-        toNumber(socket.userId) ??
         toNumber(rideOwnerByRide.get(rideId)) ??
         toNumber(rideDetails?.user_id) ??
+        toNumber(socket.userId) ??
+        toNumber(payload?.user_id) ??
         null;
 
       const lockedPayload = {
@@ -12127,37 +12520,26 @@ const preferredOwnerToken = normalizeToken(
   storedOwnerToken ?? liveOwnerRoomToken ?? rideSnapshotToken ?? null
 );
 
-const hasPayloadOwnerMismatch =
-  !!(payloadUserId && rideOwnerUserId && payloadUserId !== rideOwnerUserId);
-const hasTokenOwnerMismatch =
-  !!(payloadTokenUserId && rideOwnerUserId && payloadTokenUserId !== rideOwnerUserId);
-
 let userId = payloadUserId ?? payloadTokenUserId ?? socketUserId ?? rideOwnerUserId;
 let tokenTmp = normalizeToken(
   preferredOwnerToken ?? payloadToken ?? socketUserToken ?? null
 );
 
-if (rideOwnerUserId && (hasPayloadOwnerMismatch || hasTokenOwnerMismatch)) {
-  // Payload can carry stale identity from a previous login/session on frontend.
-  // For accepting a ride, prefer the ride owner identity to avoid auth mismatch.
+if (rideOwnerUserId) {
   userId = rideOwnerUserId;
-  tokenTmp = normalizeToken(preferredOwnerToken ?? socketUserToken ?? null);
-
-  console.warn("[user:acceptOffer] mismatch detected, using ride owner auth", {
-    ride_id: rideId,
-    payload_user_id: payloadUserId,
-    payload_token_user_id: payloadTokenUserId,
-    socket_user_id: socketUserId,
-    ride_owner_user_id: rideOwnerUserId,
-    has_owner_token: !!storedOwnerToken,
-    has_room_owner_token: !!liveOwnerRoomToken,
-  });
+  tokenTmp = normalizeToken(
+    preferredOwnerToken ??
+      (payloadTokenUserId === rideOwnerUserId ? payloadToken : null) ??
+      (socketUserId === rideOwnerUserId ? socketUserToken : null) ??
+      payloadToken ??
+      socketUserToken ??
+      null
+  );
 } else if (
   payloadTokenUserId &&
   payloadUserId &&
   payloadTokenUserId !== payloadUserId
 ) {
-  // If payload user id and payload token map to different users, trust token mapping.
   userId = payloadTokenUserId;
   const tokenMappedUser = getUserDetails(payloadTokenUserId);
   tokenTmp = normalizeToken(
@@ -12167,13 +12549,6 @@ if (rideOwnerUserId && (hasPayloadOwnerMismatch || hasTokenOwnerMismatch)) {
       tokenMappedUser?.access_token ??
       tokenTmp
   );
-  console.warn("[user:acceptOffer] payload user/token mismatch, using token user", {
-    ride_id: rideId,
-    payload_user_id: payloadUserId,
-    payload_token_user_id: payloadTokenUserId,
-  });
-} else if (rideOwnerUserId && userId === rideOwnerUserId) {
-  tokenTmp = normalizeToken(preferredOwnerToken ?? socketUserToken ?? tokenTmp);
 }
 
 const driverCurrentActiveRide = getActiveRideByDriver(driverId);
@@ -12272,73 +12647,24 @@ const accessToken = tokenTmp;
           : {}),
       };
 
-      try {
-        const response = await axios.post(
-          `${LARAVEL_BASE_URL}${LARAVEL_ACCEPT_BID_PATH}`,
-          acceptPayload,
-          {
-            timeout: LARAVEL_ACCEPT_BID_TIMEOUT_MS,
-          }
+      const acceptApiResult = await postAcceptBidToLaravel({
+        acceptPayload,
+        timeoutMs: LARAVEL_ACCEPT_BID_TIMEOUT_MS,
+      });
+
+      if (acceptApiResult.ok) {
+        console.log(
+          `[user:acceptOffer] accept API response (${attempt}):`,
+          acceptApiResult.parsed
         );
-
-        const raw = response?.data ?? null;
-        let parsed = raw;
-        if (typeof parsed === "string") {
-          try {
-            parsed = JSON.parse(parsed);
-          } catch (_) {}
-        }
-
-        const ok =
-          parsed?.status === 1 ||
-          parsed?.success === true ||
-          parsed?.result === true;
-
-        console.log(`[user:acceptOffer] accept API response (${attempt}):`, parsed);
-
-        if (ok) {
-          return {
-            ok: true,
-            parsed,
-            response: raw,
-            error: null,
-          };
-        }
-
-        return {
-          ok: false,
-          parsed,
-          response: raw,
-          error: {
-            message:
-              parsed?.message ||
-              parsed?.error ||
-              "Accept bid API returned unsuccessful response",
-            reason: "accept_api_rejected",
-            details: parsed,
-          },
-        };
-      } catch (error) {
-        const details = error?.response?.data || null;
+      } else {
         console.error(
-          `[user:acceptOffer] Error while calling accept bid API (${attempt}):`,
-          details || error.message
+          `[user:acceptOffer] accept API failed (${attempt}):`,
+          acceptApiResult?.error?.details || acceptApiResult?.error?.message || null
         );
-        return {
-          ok: false,
-          parsed: details,
-          response: details,
-          error: {
-            message:
-              details?.message ||
-              details?.error ||
-              error?.message ||
-              "Accept bid API request failed",
-            reason: "accept_api_failed",
-            details,
-          },
-        };
       }
+
+      return acceptApiResult;
     };
 
     if (!userId || !accessToken) {
