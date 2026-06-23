@@ -5685,6 +5685,41 @@ function releaseAutoAcceptFirstBidLock(rideId) {
   autoAcceptFirstBidLocks.delete(safeRideId);
 }
 
+function extractCustomerPricingFields(rideDetails = null) {
+  if (!rideDetails || typeof rideDetails !== "object" || Array.isArray(rideDetails)) {
+    return {};
+  }
+
+  const nestedRideDetails =
+    rideDetails.ride_details &&
+    typeof rideDetails.ride_details === "object" &&
+    !Array.isArray(rideDetails.ride_details)
+      ? rideDetails.ride_details
+      : null;
+  const source = nestedRideDetails ? { ...nestedRideDetails, ...rideDetails } : rideDetails;
+  const pricingKeys = [
+    "final_confirm_bid_price",
+    "total_pay",
+    "payable_price",
+    "subtotal",
+    "sub_total",
+    "tax",
+    "promocode_discount",
+    "promocode_name",
+    "discount",
+    "refer_discount",
+    "total_discount",
+    "is_promocode_applied",
+  ];
+
+  return pricingKeys.reduce((acc, key) => {
+    if (source[key] !== undefined && source[key] !== null) {
+      acc[key] = source[key];
+    }
+    return acc;
+  }, {});
+}
+
 
 function finalizeAcceptedRide(io, rideId, driverId, finalPrice, options = {}) {
   const {
@@ -5778,6 +5813,7 @@ function finalizeAcceptedRide(io, rideId, driverId, finalPrice, options = {}) {
           : {}),
       }
     : null;
+  const customerPricingPayload = extractCustomerPricingFields(rideDetailsPayload ?? snapshot);
 
   if (hasAnotherActiveRide) {
     const alreadyQueued = getDriverQueuedRide(driverId);
@@ -5807,6 +5843,7 @@ const queuedOk = setDriverQueuedRide(driverId, {
     }
 
 const queuedPayload = withDriverImage({
+  ...customerPricingPayload,
   ...(rideDetailsPayload && typeof rideDetailsPayload === "object"
     ? rideDetailsPayload
     : {}),
@@ -5842,6 +5879,7 @@ closeRideBidding(io, rideId, {
   setActiveRide(driverId, rideId);
 
   const acceptedPayload = withDriverImage({
+    ...customerPricingPayload,
     ride_id: rideId,
     driver_id: driverId,
     ...buildDriverIdentityPayload(resolvedDriverIdentity, driverId),
@@ -5858,6 +5896,7 @@ closeRideBidding(io, rideId, {
     rideId,
     "ride:trackingStarted",
     withDriverImage({
+      ...customerPricingPayload,
       ride_id: rideId,
       driver_id: driverId,
       at: Date.now(),
