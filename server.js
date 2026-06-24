@@ -1151,7 +1151,17 @@ driverLocationService.updateMeta(safeDriverId, {
     console.log(`[MEMORY] driver:${driver_id} marked offline`);
     emitAdminDriverUpdate(io, safeDriverId);
   }
-  
+  if (
+  typeof biddingSocket
+    .emitCandidatesSummaryForDriverStateChange ===
+    "function"
+) {
+  biddingSocket
+    .emitCandidatesSummaryForDriverStateChange(
+      io,
+      safeDriverId
+    );
+}
 
   io.emit("driver:status-updated", { driver_id, old_status, new_status });
 
@@ -1255,12 +1265,17 @@ const nextMeta = {
       biddingSocket.recoverDriverPendingDispatch(io, safeDriverId, "driver-profile-updated");
     }
 
-    if (
-      resolvedIsOnline &&
-      typeof biddingSocket.emitCandidatesSummaryForDriverStateChange === "function"
-    ) {
-      biddingSocket.emitCandidatesSummaryForDriverStateChange(io, safeDriverId);
-    }
+if (
+  typeof biddingSocket
+    .emitCandidatesSummaryForDriverStateChange ===
+    "function"
+) {
+  biddingSocket
+    .emitCandidatesSummaryForDriverStateChange(
+      io,
+      safeDriverId
+    );
+}
 
     io.to(room).emit("driver:profile-updated", {
       driver_id: safeDriverId,
@@ -1420,6 +1435,22 @@ driverLocationService.updateMeta(driverId, {
 
   updatedAt: now,
 });
+if (
+  typeof biddingSocket
+    .emitCandidateLocationUpdate ===
+    "function"
+) {
+  biddingSocket.emitCandidateLocationUpdate(
+    io,
+    driverId,
+    la,
+    lo,
+    {
+      source:
+        "laravel-internal:driver-location",
+    }
+  );
+}
 
   // ✅ broadcast to driver's room
   emitAdminDriverUpdate(io, driverId);

@@ -254,6 +254,55 @@ module.exports = (io, socket) => {
     if (n == null) return null;
     return Math.round(n * 100) / 100;
   };
+  const buildCandidateSummaryStateSignature = (
+  meta = {}
+) =>
+  JSON.stringify({
+    is_online:
+      meta?.is_online === false ? 0 : 1,
+
+    wallet_blocked:
+      Number(
+        meta?.not_valid_wallet_balance ?? 0
+      ) === 1
+        ? 1
+        : 0,
+
+    service_type_id:
+      toNumber(meta?.service_type_id),
+
+    service_category_id:
+      toNumber(
+        meta?.service_category_id ??
+          meta?.service_cat_id
+      ),
+
+    driver_gender:
+      toNumber(meta?.driver_gender),
+
+    child_seat:
+      toNumber(meta?.child_seat),
+
+    handicap:
+      toNumber(meta?.handicap),
+
+    vehicle_type_name:
+      String(
+        meta?.vehicle_type_name ?? ""
+      ),
+
+    vehicle_type_icon:
+      String(
+        meta?.vehicle_type_icon ?? ""
+      ),
+
+    driver_image:
+      String(
+        meta?.driver_image ??
+          meta?.driver_image_url ??
+          ""
+      ),
+  });
 
   const syncDriverAdminWalletMeta = async (
     driverId,
@@ -263,6 +312,10 @@ module.exports = (io, socket) => {
     if (!safeDriverId) return null;
 
     const currentMeta = driverLocationService.getMeta(safeDriverId) || {};
+    const candidateStateBefore =
+  buildCandidateSummaryStateSignature(
+    currentMeta
+  );
     const safeDriverServiceId = toNumber(
       driverServiceId ?? currentMeta?.driver_service_id ?? null
     );
@@ -293,7 +346,30 @@ const mergedMeta = {
   updatedAt: now,
 };
       driverLocationService.updateMeta(safeDriverId, mergedMeta);
-      return mergedMeta;
+      const storedMetaAfterSync =
+  driverLocationService.getMeta(
+    safeDriverId
+  ) || mergedMeta;
+
+const candidateStateAfter =
+  buildCandidateSummaryStateSignature(
+    storedMetaAfterSync
+  );
+
+if (
+  candidateStateBefore !==
+    candidateStateAfter &&
+  typeof biddingSocket
+    .emitCandidatesSummaryForDriverStateChange ===
+    "function"
+) {
+  biddingSocket
+    .emitCandidatesSummaryForDriverStateChange(
+      io,
+      safeDriverId
+    );
+}
+return storedMetaAfterSync;
     } catch (error) {
       console.warn("[driver-wallet-sync] admin profile sync failed", {
         driver_id: safeDriverId,
@@ -1019,7 +1095,9 @@ const syncDriverAdminWalletMetaIfStale = async (
             socket_disconnected: true,
             updatedAt: Date.now(),
           });
-          emitCandidatesSummaryForDriver(socket.driverId);
+            emitCandidatesSummaryForDriver(
+    socket.driverId
+  );
           emitAdminDriverUpdate(io, socket.driverId);
         }
       })
@@ -1066,10 +1144,35 @@ driverLocationService.updateMeta(
     updatedAt: now,
   }
 );
+// ✅ أرسل تحديث موقع خفيف للسائق المرشح
+/*
+ * إذا الميزة الجديدة مفعلة:
+ * أرسل موقع السائق وحده.
+ *
+ * إذا معطلة:
+ * ارجع للسلوك القديم وأرسل الملخص الكامل.
+ */
+const candidateDeltaHandled =
+  typeof biddingSocket
+    .emitCandidateLocationUpdate ===
+    "function"
+    ? biddingSocket.emitCandidateLocationUpdate(
+        io,
+        socket.driverId,
+        la,
+        lo,
+        {
+          source:
+            "driver-socket:update-location",
+        }
+      )
+    : false;
 
-    // ✅ ابعث تحديث المرشحين مع كل update-location مقبول
-    emitCandidatesSummaryForDriver(socket.driverId);
-    locationLog(
+if (!candidateDeltaHandled) {
+  emitCandidatesSummaryForDriver(
+    socket.driverId
+  );
+}    locationLog(
       "[update-location] payload:",
       { lat: la, long: lo },
       "socket:",

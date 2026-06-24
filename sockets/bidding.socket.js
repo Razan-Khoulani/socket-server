@@ -77,6 +77,67 @@ const driverRidesListEmptyLoggedAt = new Map(); // driverId -> timestamp
 const driverInboxLastCount = new Map(); // driverId -> last emitted inbox count
 let latestIo = null;
 const driverRecoveryNoopLoggedAt = new Map(); // `${source}:${driverId}` -> timestamp
+// ─────────────────────────────────────────────
+// Lightweight candidate location updates
+// ─────────────────────────────────────────────
+
+const CANDIDATE_LOCATION_DELTA_ENABLED =
+  String(
+    process.env.CANDIDATE_LOCATION_DELTA_ENABLED ||
+      "0"
+  ) === "1";
+
+const CANDIDATE_LOCATION_EMIT_MIN_INTERVAL_MS =
+  Number.isFinite(
+    Number(
+      process.env
+        .CANDIDATE_LOCATION_EMIT_MIN_INTERVAL_MS
+    )
+  )
+    ? Math.max(
+        500,
+        Number(
+          process.env
+            .CANDIDATE_LOCATION_EMIT_MIN_INTERVAL_MS
+        )
+      )
+    : 1500;
+
+const CANDIDATE_LOCATION_EMIT_MAX_INTERVAL_MS =
+  Number.isFinite(
+    Number(
+      process.env
+        .CANDIDATE_LOCATION_EMIT_MAX_INTERVAL_MS
+    )
+  )
+    ? Math.max(
+        CANDIDATE_LOCATION_EMIT_MIN_INTERVAL_MS,
+        Number(
+          process.env
+            .CANDIDATE_LOCATION_EMIT_MAX_INTERVAL_MS
+        )
+      )
+    : 5000;
+
+const CANDIDATE_LOCATION_MIN_MOVE_METERS =
+  Number.isFinite(
+    Number(
+      process.env
+        .CANDIDATE_LOCATION_MIN_MOVE_METERS
+    )
+  )
+    ? Math.max(
+        1,
+        Number(
+          process.env
+            .CANDIDATE_LOCATION_MIN_MOVE_METERS
+        )
+      )
+    : 8;
+
+// driverId -> { lat, long, at }
+const candidateLocationLastEmitByDriver =
+  new Map();
 
 const DRIVER_RIDES_LIST_EMPTY_LOG_THROTTLE_MS = Number.isFinite(
   Number(process.env.DRIVER_RIDES_LIST_EMPTY_LOG_THROTTLE_MS)
@@ -4305,6 +4366,268 @@ function emitRideCandidatesSummary(io, rideId) {
     ),
     at: Date.now(),
   });
+}
+
+function isDriverVisibleInCandidatesSummary(
+  rideId,
+  driverId,
+  driver,
+  meta
+) {
+  const safeRideId = toNumber(rideId);
+  const safeDriverId = toNumber(driverId);
+
+  if (
+    !safeRideId ||
+    !safeDriverId ||
+    !driver
+  ) {
+    return false;
+  }
+
+  const candidateSet =
+    rideCandidates.get(safeRideId);
+
+  if (
+    !candidateSet ||
+    !candidateSet.has(safeDriverId)
+  ) {
+    return false;
+  }
+
+  // نفس شروط buildRideCandidatesSummary تقريباً
+  if (!isDriverLocationFresh(driver, meta)) {
+    return false;
+  }
+
+  const isOnline =
+    Number(
+      driver?.is_online ??
+        meta?.is_online ??
+        1
+    ) === 1;
+
+  if (!isOnline) {
+    return false;
+  }
+
+  const walletBlocked =
+    Number(
+      meta?.not_valid_wallet_balance ?? 0
+    ) === 1;
+
+  if (walletBlocked) {
+    return false;
+  }
+
+  const activeRide =
+    getActiveRideByDriver(safeDriverId);
+
+  if (
+    activeRide &&
+    activeRide !== safeRideId &&
+    !canDriverReceiveNewRideRequests(
+      safeDriverId
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    !isDriverOfferStillActive(
+      safeDriverId,
+      safeRideId
+    )
+  ) {
+    return false;
+  }
+
+  const rideSnapshot =
+    getRideDetails(safeRideId) || null;
+
+  const requestedServiceTypeId =
+    toNumber(
+      rideSnapshot?.service_type_id ??
+        null
+    );
+
+  const driverServiceTypeId =
+    toNumber(
+      driver?.service_type_id ??
+        meta?.service_type_id ??
+        null
+    );
+
+  if (!driverServiceTypeId) {
+    return false;
+  }
+
+  if (
+    requestedServiceTypeId &&
+    driverServiceTypeId !==
+      requestedServiceTypeId
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * يرجع false فقط عندما تكون الميزة معطلة.
+ *
+ * يرجع true عندما تمت معالجة الحدث، حتى لو لم يرسل
+ * بسبب throttle أو لأن السائق ليس مرشحاً.
+ */
+function emitCandidateLocationUpdate(
+  io,
+  driverId,
+  lat,
+  long,
+  options = {}
+) {
+  if (!CANDIDATE_LOCATION_DELTA_ENABLED) {
+    return false;
+  }
+
+  const safeDriverId = toNumber(driverId);
+  const safeLat = toNumber(lat);
+  const safeLong = toNumber(long);
+
+  if (
+    !io ||
+    !safeDriverId ||
+    safeLat === null ||
+    safeLong === null
+  ) {
+    return true;
+  }
+
+  const now = Date.now();
+  const force = options?.force === true;
+
+  const previous =
+    candidateLocationLastEmitByDriver.get(
+      safeDriverId
+    );
+
+  if (previous && !force) {
+    const elapsedMs =
+      now - Number(previous.at || 0);
+
+    const movedMeters =
+      getDistanceMeters(
+        previous.lat,
+        previous.long,
+        safeLat,
+        safeLong
+      );
+
+    const minIntervalPassed =
+      elapsedMs >=
+      CANDIDATE_LOCATION_EMIT_MIN_INTERVAL_MS;
+
+    const maxIntervalPassed =
+      elapsedMs >=
+      CANDIDATE_LOCATION_EMIT_MAX_INTERVAL_MS;
+
+    const movedEnough =
+      Number.isFinite(movedMeters) &&
+      movedMeters >=
+        CANDIDATE_LOCATION_MIN_MOVE_METERS;
+
+    /*
+     * نرسل عندما:
+     * - مر الحد الأدنى وتحرك المسافة المطلوبة.
+     * - أو مر الحد الأقصى حتى لو السائق واقف.
+     */
+    if (
+      !maxIntervalPassed &&
+      (!minIntervalPassed || !movedEnough)
+    ) {
+      return true;
+    }
+  }
+
+  const driver =
+    driverLocationService.getDriver(
+      safeDriverId
+    );
+
+  const meta =
+    driverLocationService.getMeta(
+      safeDriverId
+    ) || {};
+
+  if (!driver) {
+    return true;
+  }
+
+  let emittedRides = 0;
+
+  for (
+    const [rideId, candidateSet] of
+      rideCandidates.entries()
+  ) {
+    if (
+      !candidateSet ||
+      !candidateSet.has(safeDriverId)
+    ) {
+      continue;
+    }
+
+    if (
+      !isDriverVisibleInCandidatesSummary(
+        rideId,
+        safeDriverId,
+        driver,
+        meta
+      )
+    ) {
+      continue;
+    }
+
+    io.to(rideRoom(rideId)).emit(
+      "ride:candidateLocationUpdate",
+      {
+        ride_id: toNumber(rideId),
+        driver_id: safeDriverId,
+
+        lat: safeLat,
+        long: safeLong,
+
+        // alias مفيد لبعض تطبيقات الخرائط
+        lng: safeLong,
+
+        timestamp: now,
+        at: now,
+
+        source:
+          toTrimmedText(
+            options?.source
+          ) ?? "driver-location",
+      }
+    );
+
+    emittedRides += 1;
+  }
+
+  /*
+   * لا نخزن آخر إرسال إلا إذا انرسل
+   * لرحلة واحدة على الأقل.
+   */
+  if (emittedRides > 0) {
+    candidateLocationLastEmitByDriver.set(
+      safeDriverId,
+      {
+        lat: safeLat,
+        long: safeLong,
+        at: now,
+      }
+    );
+  }
+
+  return true;
 }
 
 const fetchDriverMetaFromApi = async (driverId, accessToken, driverServiceId) => {
@@ -13046,3 +13369,5 @@ module.exports.getDriverInboxStats = getDriverInboxStats;
 module.exports.recoverDriverPendingDispatch = recoverDriverPendingDispatch;
 module.exports.syncDriverProfileIntoInbox = syncDriverProfileIntoInbox;
 module.exports.filterDriversByRoadRadius = filterDriversByRoadRadius;
+module.exports.emitCandidateLocationUpdate =
+  emitCandidateLocationUpdate;
