@@ -12357,7 +12357,7 @@ if (removed) {
     });
 
     driverId = toNumber(driverIdentity?.provider_id) ?? initialLookupDriverId;
-    const customerFacingDriverId =
+    let customerFacingDriverId =
       toNumber(driverIdentity?.driver_detail_id) ?? requestedDriverId ?? driverId;
 
     if (!driverId) {
@@ -12607,7 +12607,60 @@ if (
   return;
 }
 
-const accessToken = tokenTmp;
+    const accessToken = tokenTmp;
+    const driverMeta = driverLocationService.getMeta(driverId) || {};
+    const acceptFlowAutoAcceptFirstBid =
+      isAutoAcceptFirstBidEnabled(payload) ||
+      isAutoAcceptFirstBidEnabled(rideFull) ||
+      isAutoAcceptFirstBidEnabled(rideSnapshot) ||
+      isAutoAcceptFirstBidEnabled(rideDetails);
+    const driverServiceIdForFinalBid =
+      toNumber(payload?.driver_service_id) ??
+      toNumber(payload?.driver_service) ??
+      toNumber(driverIdentity?.driver_service_id) ??
+      toNumber(rideFull?.driver_service_id) ??
+      toNumber(rideSnapshot?.driver_service_id) ??
+      toNumber(rideDetails?.driver_service_id) ??
+      toNumber(driverMeta?.driver_service_id);
+    const driverAccessTokenForFinalBid = normalizeToken(
+      payload?.driver_access_token ?? driverMeta?.access_token ?? null
+    );
+    if (
+      driverIdentity?.driver_service_id === null &&
+      driverServiceIdForFinalBid !== null
+    ) {
+      driverIdentity = {
+        ...driverIdentity,
+        driver_service_id: driverServiceIdForFinalBid,
+      };
+    }
+    if (
+      driverIdentity?.driver_detail_id === null &&
+      driverServiceIdForFinalBid &&
+      driverAccessTokenForFinalBid
+    ) {
+      const fetchedIdentity = await fetchDriverMetaFromApi(
+        driverId,
+        driverAccessTokenForFinalBid,
+        driverServiceIdForFinalBid
+      );
+      if (fetchedIdentity) {
+        driverIdentity = {
+          provider_id:
+            driverIdentity.provider_id ?? fetchedIdentity.provider_id ?? driverId,
+          driver_service_id:
+            driverIdentity.driver_service_id ??
+            fetchedIdentity.driver_service_id ??
+            driverServiceIdForFinalBid,
+          driver_detail_id:
+            driverIdentity.driver_detail_id ??
+            fetchedIdentity.driver_detail_id ??
+            null,
+        };
+        customerFacingDriverId =
+          toNumber(driverIdentity.driver_detail_id) ?? requestedDriverId ?? driverId;
+      }
+    }
     const acceptedRouteKmForApi = getAcceptedRouteKm(payload, rideSnapshot ?? rideDetails);
     const acceptedEtaMinForApi = getAcceptedEtaMin(payload, rideSnapshot ?? rideDetails);
     
@@ -12649,6 +12702,90 @@ const accessToken = tokenTmp;
           let acceptApiOk = false;
     let acceptApiResponse = null;
     let acceptApiError = null;
+
+    const syncFinalBidBeforeAccept = async () => {
+      if (acceptFlowAutoAcceptFirstBid) {
+        return {
+          ok: true,
+          skipped: true,
+          reason: "auto_accept_first_bid",
+        };
+      }
+
+      if (!driverServiceIdForFinalBid || !driverAccessTokenForFinalBid) {
+        console.warn("[user:acceptOffer][final-bid-sync-skipped] missing driver auth", {
+          ride_id: rideId,
+          driver_id: driverId,
+          driver_service_id: driverServiceIdForFinalBid ?? null,
+          has_driver_access_token: !!driverAccessTokenForFinalBid,
+        });
+
+        return {
+          ok: false,
+          message: "تعذر بدء الرحلة",
+          reason: "accept_api_failed",
+          details: {
+            stage: "final_bid_sync",
+            error: "missing_driver_service_id_or_access_token",
+            ride_id: rideId,
+            driver_id: driverId,
+            driver_service_id: driverServiceIdForFinalBid ?? null,
+            has_driver_access_token: !!driverAccessTokenForFinalBid,
+          },
+        };
+      }
+
+      const bidPayload = {
+        ...buildDriverIdentityPayload(driverIdentity, driverId),
+        access_token: driverAccessTokenForFinalBid,
+        driver_service_id: driverServiceIdForFinalBid,
+        ride_id: rideId,
+        offered_price: finalPrice,
+      };
+
+      const bidSyncResult = await postDriverBidOfferToLaravel({
+        driverId,
+        rideId,
+        offeredPrice: finalPrice,
+        bidPayload,
+      });
+
+      if (bidSyncResult.ok) {
+        console.log("[user:acceptOffer][final-bid-sync-ok]", {
+          ride_id: rideId,
+          driver_id: driverId,
+          offered_price: finalPrice,
+          driver_service_id: driverServiceIdForFinalBid,
+        });
+
+        return {
+          ok: true,
+          response: bidSyncResult.response ?? null,
+        };
+      }
+
+      console.error("[user:acceptOffer][final-bid-sync-failed]", {
+        ride_id: rideId,
+        driver_id: driverId,
+        offered_price: finalPrice,
+        error: bidSyncResult.error,
+        response: bidSyncResult.response ?? null,
+      });
+
+      return {
+        ok: false,
+        message: "تعذر بدء الرحلة",
+        reason: "accept_api_failed",
+        details: {
+          stage: "final_bid_sync",
+          error: bidSyncResult.error,
+          response: bidSyncResult.response ?? null,
+          ride_id: rideId,
+          driver_id: driverId,
+          offered_price: finalPrice,
+        },
+      };
+    };
 
     const callAcceptApi = async (candidateToken, attempt = "primary") => {
       const acceptPayload = {
@@ -12726,57 +12863,66 @@ const accessToken = tokenTmp;
         has_snapshot_token: !!rideSnapshotToken,
       });
     } else {
-      const primaryResult = await callAcceptApi(accessToken, "primary");
-      acceptApiOk = primaryResult.ok;
-      acceptApiResponse = primaryResult.response;
-      acceptApiError = primaryResult.ok ? null : primaryResult.error;
+      const finalBidSyncResult = await syncFinalBidBeforeAccept();
+      if (!finalBidSyncResult.ok) {
+        acceptApiError = {
+          message: finalBidSyncResult.message || "تعذر بدء الرحلة",
+          reason: finalBidSyncResult.reason || "accept_api_failed",
+          details: finalBidSyncResult.details ?? null,
+        };
+      } else {
+        const primaryResult = await callAcceptApi(accessToken, "primary");
+        acceptApiOk = primaryResult.ok;
+        acceptApiResponse = primaryResult.response;
+        acceptApiError = primaryResult.ok ? null : primaryResult.error;
 
-      const payloadTokenFallback = normalizeToken(payloadToken);
-      const primaryMessageCode = toNumber(primaryResult?.parsed?.message_code);
-      const primaryMessage = String(
-        primaryResult?.parsed?.message ?? primaryResult?.error?.message ?? ""
-      );
-      const isSessionExpired =
-        !acceptApiOk &&
-        (primaryMessageCode === 4 ||
-          /session\s*expired|login\s*session\s*expired/i.test(primaryMessage));
-      const isTokenAuthFailure =
-        !acceptApiOk &&
-        /invalid\s*token|expired\s*token|unauthori(?:z|s)ed|access[_\s-]*token/i.test(
-          primaryMessage
+        const payloadTokenFallback = normalizeToken(payloadToken);
+        const primaryMessageCode = toNumber(primaryResult?.parsed?.message_code);
+        const primaryMessage = String(
+          primaryResult?.parsed?.message ?? primaryResult?.error?.message ?? ""
         );
+        const isSessionExpired =
+          !acceptApiOk &&
+          (primaryMessageCode === 4 ||
+            /session\s*expired|login\s*session\s*expired/i.test(primaryMessage));
+        const isTokenAuthFailure =
+          !acceptApiOk &&
+          /invalid\s*token|expired\s*token|unauthori(?:z|s)ed|access[_\s-]*token/i.test(
+            primaryMessage
+          );
 
-      if (
-        (isSessionExpired || isTokenAuthFailure) &&
-        payloadTokenFallback &&
-        payloadTokenFallback !== accessToken
-      ) {
-        console.warn(
-          "[user:acceptOffer] primary token rejected, retrying once with payload token",
-          {
-            ride_id: rideId,
-            user_id: userId,
-            has_payload_token: true,
+        if (
+          (isSessionExpired || isTokenAuthFailure) &&
+          payloadTokenFallback &&
+          payloadTokenFallback !== accessToken
+        ) {
+          console.warn(
+            "[user:acceptOffer] primary token rejected, retrying once with payload token",
+            {
+              ride_id: rideId,
+              user_id: userId,
+              has_payload_token: true,
+            }
+          );
+
+          const retryResult = await callAcceptApi(
+            payloadTokenFallback,
+            "payload-token-retry"
+          );
+
+          acceptApiOk = retryResult.ok;
+          acceptApiResponse = retryResult.response;
+          acceptApiError = retryResult.ok ? null : retryResult.error;
+
+          if (retryResult.ok && userId) {
+            socket.userToken = payloadTokenFallback;
+            setUserDetails(userId, {
+              user_id: userId,
+              user_token: payloadTokenFallback,
+              token: payloadTokenFallback,
+              access_token: payloadTokenFallback,
+            });
           }
-        );
-
-        const retryResult = await callAcceptApi(
-          payloadTokenFallback,
-          "payload-token-retry"
-        );
-
-        acceptApiOk = retryResult.ok;
-        acceptApiResponse = retryResult.response;
-        acceptApiError = retryResult.ok ? null : retryResult.error;
-
-        if (retryResult.ok && userId) {
-          socket.userToken = payloadTokenFallback;
-          setUserDetails(userId, {
-            user_id: userId,
-            user_token: payloadTokenFallback,
-            token: payloadTokenFallback,
-            access_token: payloadTokenFallback,
-          });
         }
       }
     }
