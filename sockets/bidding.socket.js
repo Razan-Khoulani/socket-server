@@ -11258,16 +11258,16 @@ if (!driverServiceId || !accessToken) {
     offered_price: offeredPrice,
   };
 
-  console.log("[driver:submitBid][before-api]", {
-    ride_id: rideId,
-    driver_id: driverId,
-    offered_price: offeredPrice,
-    driver_service_id: driverServiceId,
-    has_access_token: !!accessToken,
-    auto_accept_first_bid: autoAcceptFirstBid ? 1 : 0,
-  });
-
   if (autoAcceptFirstBid) {
+    console.log("[driver:submitBid][before-api]", {
+      ride_id: rideId,
+      driver_id: driverId,
+      offered_price: offeredPrice,
+      driver_service_id: driverServiceId,
+      has_access_token: !!accessToken,
+      auto_accept_first_bid: 1,
+    });
+
     const submitBidApiResult = await postDriverBidOfferToLaravel({
       driverId,
       rideId,
@@ -11291,26 +11291,11 @@ if (!driverServiceId || !accessToken) {
       });
     }
   } else {
-    void postDriverBidOfferToLaravel({
-      driverId,
-      rideId,
-      offeredPrice,
-      bidPayload,
-    }).then((submitBidApiResult) => {
-      if (submitBidApiResult.ok === true) {
-        console.log("[driver:submitBid][api-ok]", {
-          ride_id: rideId,
-          driver_id: driverId,
-          response: submitBidApiResult.response,
-        });
-        return;
-      }
-
-      console.error("[driver:submitBid][api-failed]", {
-        ride_id: rideId,
-        driver_id: driverId,
-        error: submitBidApiResult.error,
-      });
+    console.log("[driver:submitBid][api-skipped][negotiation-mode]", {
+      ride_id: rideId,
+      driver_id: driverId,
+      offered_price: offeredPrice,
+      auto_accept_first_bid: 0,
     });
   }
 }
